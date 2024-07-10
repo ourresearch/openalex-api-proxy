@@ -79,7 +79,7 @@ def rate_limit_value():
         logger.debug(f'Authorized high rate limit for {g.app_request_id} due to API key.')
         return '100/second, 2000000/day'  # was '100/second, 1250000/day'. Increased to 2000000/day temporarily
     else:
-        return '10/second, 500000/day'
+        return '10/second, 100000/day'
 
 
 def remote_address():
