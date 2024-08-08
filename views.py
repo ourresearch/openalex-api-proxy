@@ -294,7 +294,7 @@ def forward_request(request_path):
         try:
             logger.debug(f'{g.app_request_id}: getting response from worker')
 
-            if request.method == 'POST' and request.path and request.path.startswith('/text'):
+            if request.method == 'POST' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
                 worker_response = worker_host.get("session").post(worker_url, json=request.json,
                                                                  headers=worker_headers, allow_redirects=False)
             else:
