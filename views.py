@@ -246,7 +246,7 @@ def email_rate_limit_exempt():
     return (g.mailto in RATE_LIMIT_EXEMPT_EMAILS) or (request.path and request.path.endswith('/ngrams'))
 
 
-@app.route('/<path:request_path>', methods=['GET', 'POST'])
+@app.route('/<path:request_path>', methods=['GET', 'POST', 'PUT', 'PATCH'])
 @limiter.limit(limit_value=rate_limit_value, key_func=rate_limit_key)
 def forward_request(request_path):
     logger.debug(f'{g.app_request_id}: started forward_request')
