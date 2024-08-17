@@ -246,7 +246,7 @@ def email_rate_limit_exempt():
     return (g.mailto in RATE_LIMIT_EXEMPT_EMAILS) or (request.path and request.path.endswith('/ngrams'))
 
 
-@app.route('/<path:request_path>', methods=['GET', 'POST', 'PUT', 'PATCH'])
+@app.route('/<path:request_path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 @limiter.limit(limit_value=rate_limit_value, key_func=rate_limit_key)
 def forward_request(request_path):
     logger.debug(f'{g.app_request_id}: started forward_request')
@@ -302,6 +302,9 @@ def forward_request(request_path):
                                                                  headers=worker_headers, allow_redirects=False)
             elif request.method == 'PATCH' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
                 worker_response = worker_host.get("session").patch(worker_url, json=request.json,
+                                                                 headers=worker_headers, allow_redirects=False)
+            elif request.method == 'DELETE' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
+                worker_response = worker_host.get("session").delete(worker_url, json=request.json,
                                                                  headers=worker_headers, allow_redirects=False)
             else:
                 worker_response = worker_host.get("session").get(worker_url, params=worker_params,
