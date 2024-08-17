@@ -297,6 +297,12 @@ def forward_request(request_path):
             if request.method == 'POST' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
                 worker_response = worker_host.get("session").post(worker_url, json=request.json,
                                                                  headers=worker_headers, allow_redirects=False)
+            elif request.method == 'PUT' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
+                worker_response = worker_host.get("session").put(worker_url, json=request.json,
+                                                                 headers=worker_headers, allow_redirects=False)
+            elif request.method == 'PATCH' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
+                worker_response = worker_host.get("session").patch(worker_url, json=request.json,
+                                                                 headers=worker_headers, allow_redirects=False)
             else:
                 worker_response = worker_host.get("session").get(worker_url, params=worker_params,
                                                                  headers=worker_headers, allow_redirects=False)
