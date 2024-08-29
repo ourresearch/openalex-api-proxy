@@ -223,7 +223,7 @@ def select_worker_host(request_path, request_args):
     # /works?filter=title.search:science&format=csv or /works?filter=title.search:science&format=ris
     if re.match(r"^works/?", request_path):
         requested_format = request_args.get('format')
-        if requested_format and requested_format.strip().lower() in ['csv', 'ris'] and not group_by and not group_bys:
+        if requested_format and requested_format.strip().lower() in ['csv', 'ris', 'wos-plaintext', 'zip'] and not group_by and not group_bys:
             return {'url': formatter_api_url, 'session': formatter_session}
 
     if re.match(r"^export/?", request_path):
@@ -257,6 +257,11 @@ def forward_request(request_path):
 
     worker_host = select_worker_host(request_path, request.args)
     logger.debug(f'{g.app_request_id}: got worker host {worker_host.get("url")}')
+
+    # strip "users/" path prefix when forwarding to users api
+    if 'user.openalex.org' in worker_host.get('url', ''):
+        request_path = re.sub(r'^users/*', '', request_path)
+
     worker_url = f'{worker_host.get("url")}/{request_path}'
 
     worker_headers = dict(request.headers)
