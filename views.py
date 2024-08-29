@@ -15,7 +15,7 @@ from werkzeug.http import http_date
 from api_key import valid_key, get_all_valid_keys
 from rate_limit_exempt_email import get_rate_limit_exempt_emails
 from app import app
-from app import elastic_api_url, formatter_api_url, ngrams_api_url, text_api_url
+from app import elastic_api_url, formatter_api_url, ngrams_api_url, text_api_url, users_api_url
 from app import logger
 from app import memcached
 from blocked_requester import check_for_blocked_requester
@@ -207,6 +207,7 @@ formatter_session = requests.Session()
 elastic_session = requests.Session()
 ngrams_session = requests.Session()
 text_session = requests.Session()
+user_session = requests.Session()
 
 
 def select_worker_host(request_path, request_args):
@@ -230,6 +231,9 @@ def select_worker_host(request_path, request_args):
 
     if re.match(r"^text/?", request_path):
         return {'url': text_api_url, 'session': text_session}
+
+    if re.match(r"^users/?", request_path):
+        return {'url': users_api_url, 'session': user_session}
 
     # /works/W2548140242/ngrams or /works/10.1103/physrevlett.77.3865/ngrams
     if re.match(r"^works/[wW]\d+/ngrams/?$", request_path) or re.match(r"^works/10\..*/ngrams/?$", request_path):
@@ -294,21 +298,17 @@ def forward_request(request_path):
         try:
             logger.debug(f'{g.app_request_id}: getting response from worker')
 
-            if request.method == 'POST' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
-                worker_response = worker_host.get("session").post(worker_url, json=request.json,
-                                                                 headers=worker_headers, allow_redirects=False)
-            elif request.method == 'PUT' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
-                worker_response = worker_host.get("session").put(worker_url, json=request.json,
-                                                                 headers=worker_headers, allow_redirects=False)
-            elif request.method == 'PATCH' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
-                worker_response = worker_host.get("session").patch(worker_url, json=request.json,
-                                                                 headers=worker_headers, allow_redirects=False)
-            elif request.method == 'DELETE' and request.path and (request.path.startswith('/text') or request.path.startswith('/searches')):
-                worker_response = worker_host.get("session").delete(worker_url, json=request.json,
-                                                                 headers=worker_headers, allow_redirects=False)
+            if any([request.path.startswith(path) for path in {'/text', '/searches', '/users'}]):
+                session_method = getattr(worker_host.get('session'), request.method.lower())
+                worker_response = session_method(worker_url, json=request.json,
+                                                             headers=worker_headers,
+                                                             allow_redirects=False)
+
             else:
-                worker_response = worker_host.get("session").get(worker_url, params=worker_params,
-                                                                 headers=worker_headers, allow_redirects=False)
+                worker_response = worker_host.get("session").get(worker_url,
+                                                                 params=worker_params,
+                                                                 headers=worker_headers,
+                                                                 allow_redirects=False)
             response_source = worker_response.url
 
             response_attrs = {
