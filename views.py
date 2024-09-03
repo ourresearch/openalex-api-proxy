@@ -310,6 +310,9 @@ def forward_request(request_path):
                                                              allow_redirects=False)
 
             else:
+                # bypass_cache automatically for certain endpoints
+                if any([request.path.startswith(path) for path in {'/test_stories'}]):
+                    worker_params.update({'bypass_cache': 'true'})
                 worker_response = worker_host.get("session").get(worker_url,
                                                                  params=worker_params,
                                                                  headers=worker_headers,
