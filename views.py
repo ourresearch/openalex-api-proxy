@@ -215,13 +215,19 @@ def select_worker_host(request_path, request_args):
     group_by = request_args.get('group-by') or request_args.get('group_by')
     group_bys = request_args.get('group-bys') or request_args.get('group_bys')
 
-    # /works/W2741809807.bib
+    # convert v2 endpoint to /works so we don't have to adjust regex so much
+    normalized_works_path = re.sub(r'^works/v2/', 'works/', request_path)
+
     # /W2741809807.bib
-    if re.match(r"^(?:works/+)?[wW]\d+\.bib$", request_path) and not request_args:
+    if re.match(r"^(?:works/+)?[wW]\d+\.bib$", normalized_works_path) and not request_args:
         return {'url': formatter_api_url, 'session': formatter_session}
 
-    # /works?filter=title.search:science&format=csv or /works?filter=title.search:science&format=ris
-    if re.match(r"^works/?", request_path):
+    # /works?filter=title.search:science&format=csv
+    # /works/v2?filter=title.search:science&format=csv
+    # or
+    # /works?filter=title.search:science&format=ris
+    # /works/v2?filter=title.search:science&format=ris
+    if re.match(r"^works/?", normalized_works_path):
         requested_format = request_args.get('format')
         if requested_format and requested_format.strip().lower() in ['csv', 'ris', 'wos-plaintext', 'zip'] and not group_by and not group_bys:
             return {'url': formatter_api_url, 'session': formatter_session}
