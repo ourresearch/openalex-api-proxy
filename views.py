@@ -15,7 +15,7 @@ from werkzeug.http import http_date
 from api_key import valid_key, get_all_valid_keys
 from rate_limit_exempt_email import get_rate_limit_exempt_emails
 from app import app
-from app import elastic_api_url, formatter_api_url, ngrams_api_url, text_api_url, users_api_url
+from app import elastic_api_url, formatter_api_url, ngrams_api_url, text_api_url, unpaywall_api_url, users_api_url
 from app import logger
 from app import memcached
 from blocked_requester import check_for_blocked_requester
@@ -207,6 +207,7 @@ formatter_session = requests.Session()
 elastic_session = requests.Session()
 ngrams_session = requests.Session()
 text_session = requests.Session()
+unpaywall_session = requests.Session()
 user_session = requests.Session()
 
 
@@ -244,6 +245,10 @@ def select_worker_host(request_path, request_args):
     # /works/W2548140242/ngrams or /works/10.1103/physrevlett.77.3865/ngrams
     if re.match(r"^works/[wW]\d+/ngrams/?$", request_path) or re.match(r"^works/10\..*/ngrams/?$", request_path):
         abort(404)  # ngrams no longer supported via API
+
+    # /unpaywall/10.1103/physrevlett.77.3865
+    if re.match(r"^unpaywall/", request_path):
+        return {'url': unpaywall_api_url, 'session': unpaywall_session}
 
     # everything else
     return {'url': elastic_api_url, 'session': elastic_session}

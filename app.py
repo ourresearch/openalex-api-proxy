@@ -51,6 +51,7 @@ elastic_api_url = os.getenv('ELASTIC_API_URL')
 formatter_api_url = os.getenv('FORMATTER_API_URL')
 ngrams_api_url = os.getenv('NGRAMS_API_URL')
 text_api_url = os.getenv('TEXT_API_URL')
+unpaywall_api_url = os.getenv('UNPAYWALL_API_URL')
 users_api_url = os.getenv('USERS_API_URL')
 
 
