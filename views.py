@@ -247,7 +247,7 @@ def select_worker_host(request_path, request_args):
         abort(404)  # ngrams no longer supported via API
 
     # /unpaywall/10.1103/physrevlett.77.3865
-    if re.match(r"^unpaywall/", request_path):
+    if re.match(r"^unpaywall/.+", request_path):
         return {'url': unpaywall_api_url, 'session': unpaywall_session}
 
     # everything else
