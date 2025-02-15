@@ -19,11 +19,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(
     stream=sys.stdout,
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(thread)d: %(message)s'
 )
 
 logger = logging.getLogger("openalex-api-proxy")
+logger.setLevel(logging.DEBUG)  # Ensure our logger shows DEBUG messages
 
 libraries_to_mum = [
     'psycopg2',

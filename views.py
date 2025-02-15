@@ -68,8 +68,11 @@ def rate_limit_value():
     if request.path and request.path.startswith('/text'):
         return '1/second, 1000/day'
     elif g.api_key:
-        return api_key.get_rate_limits(g.api_key)
+        limits = api_key.get_rate_limits(g.api_key)
+        logger.info(f"Rate limits for key {g.api_key}: {limits}")
+        return limits
     else:
+        logger.info("No API key found")
         return '10/second, 100000/day'  # default limits for requests without API key
 
 
