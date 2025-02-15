@@ -23,8 +23,7 @@ import sentry_sdk
 
 API_POOL_PUBLIC = 'common'
 API_POOL_POLITE = 'polite'
-HIGH_RATE_LIMIT_API_KEYS = os.environ.get('HIGH_RATE_LIMIT_API_KEYS', '').split(';')
-HIGH_RATE_LIMIT_API_KEYS_FROM_DB = get_all_valid_keys()
+HIGH_RATE_LIMIT_API_KEYS = get_all_valid_keys()
 
 
 def abort_json(status_code, msg):
@@ -169,7 +168,6 @@ def after_request(response):
             scope.set_extra("request_args", request.args)
             scope.set_extra("request_headers", dict(request.headers))
             scope.set_extra("request_method", request.method)
-            scope.set_extra("HIGH_RATE_LIMIT_API_KEYS", HIGH_RATE_LIMIT_API_KEYS)
             scope.set_extra("rate_limit_value", rate_limit_value())
             sentry_sdk.capture_message("DEBUG API KEY MESSAGE")
 
