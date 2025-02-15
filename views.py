@@ -12,7 +12,7 @@ from flask import request
 from flask_limiter import Limiter
 from werkzeug.http import http_date
 
-from api_key import valid_key, get_all_valid_keys
+import api_key
 from app import app
 from app import elastic_api_url, formatter_api_url, ngrams_api_url, text_api_url, unpaywall_api_url, users_api_url
 from app import logger
@@ -53,7 +53,7 @@ def protect_updated_created_params(arg, arg_type):
                 '403',
                 f'you must include an api_key argument to use {matched_string} with {arg_type}'
             )
-        elif not valid_key(g.api_key):
+        elif not api_key.valid_key(g.api_key):
             abort_json('403', f'api_key {g.api_key} is invalid')
 
 
@@ -67,14 +67,10 @@ def rate_limit_key():
 def rate_limit_value():
     if request.path and request.path.startswith('/text'):
         return '1/second, 1000/day'
-    elif g.api_key and g.api_key.startswith('AmZLwH'):
-        logger.debug(f'Authorized mega high rate limit for {g.app_request_id} due to special API key.')
-        return '100/second, 4000000/day'
-    elif g.api_key and g.api_key in get_all_valid_keys():
-        logger.debug(f'Authorized high rate limit for {g.app_request_id} due to API key.')
-        return '100/second, 2000000/day'  # was '100/second, 1250000/day'. Increased to 2000000/day temporarily
+    elif g.api_key:
+        return api_key.get_rate_limits(g.api_key)
     else:
-        return '10/second, 100000/day'
+        return '10/second, 100000/day'  # default limits for requests without API key
 
 
 def remote_address():
