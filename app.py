@@ -11,11 +11,9 @@ import redis
 from flask import Flask
 from flask_compress import Compress
 from flask_talisman import Talisman
-from flask_sqlalchemy import SQLAlchemy
 from limits.storage.redis import RedisStorage
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
-from sqlalchemy.pool import NullPool
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -38,11 +36,8 @@ for library in libraries_to_mum:
 sentry_sdk.init(dsn=os.environ.get("SENTRY_DSN"), integrations=[FlaskIntegration()])
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL').replace('postgres://', 'postgresql://')
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config['RATELIMIT_HEADERS_ENABLED'] = os.getenv('RATELIMIT_HEADERS_ENABLED')
 app.config['RATELIMIT_STORAGE_URL'] = os.getenv('REDIS_URL')
-app.config['SQLALCHEMY_ECHO'] = (os.getenv('SQLALCHEMY_ECHO', False) == 'True')
 app.config['RATELIMIT_HEADER_RETRY_AFTER_VALUE'] = 'http-date'
 app.config['RATELIMIT_IN_MEMORY_FALLBACK_ENABLED'] = True
 app.config['RATELIMIT_IN_MEMORY_FALLBACK'] = '100000/day'
@@ -53,15 +48,6 @@ ngrams_api_url = os.getenv('NGRAMS_API_URL')
 text_api_url = os.getenv('TEXT_API_URL')
 unpaywall_api_url = os.getenv('UNPAYWALL_API_URL')
 users_api_url = os.getenv('USERS_API_URL')
-
-
-class NullPoolSQLAlchemy(SQLAlchemy):
-    def apply_driver_hacks(self, flask_app, info, options):
-        options['poolclass'] = NullPool
-        return super(NullPoolSQLAlchemy, self).apply_driver_hacks(flask_app, info, options)
-
-
-db = NullPoolSQLAlchemy(app, session_options={"autoflush": False})
 
 Talisman(app, force_https=True)
 Compress(app)
@@ -99,13 +85,16 @@ def redis_init(self, uri: str, **options):
 
     self.storage = redis.Redis(**redis_options)
     self.initialize_storage(uri)
-    super(RedisStorage, self).__init__()
 
 
 RedisStorage.__init__ = redis_init
 
-memcached_servers = os.environ.get('MEMCACHEDCLOUD_SERVERS').split(',')
-memcached_user = os.environ.get('MEMCACHEDCLOUD_USERNAME')
+memcached_servers = os.environ.get('MEMCACHEDCLOUD_SERVERS', '').split(',')
+memcached_username = os.environ.get('MEMCACHEDCLOUD_USERNAME')
 memcached_password = os.environ.get('MEMCACHEDCLOUD_PASSWORD')
 
-memcached = bmemcached.Client(memcached_servers, memcached_user, memcached_password)
+memcached = bmemcached.Client(
+    memcached_servers,
+    memcached_username,
+    memcached_password
+)

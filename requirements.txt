@@ -1,17 +1,13 @@
 Flask-Compress==1.10.1
 Flask-Limiter==2.0.2
-Flask-SQLAlchemy==2.5.1
 flask-talisman==1.0.0
 Flask==2.0.2
 gunicorn==20.1.0
 Jinja2==3.0.3
 limits==2.0.3
-psycopg2==2.9.2
 python-binary-memcached==0.30.1
 redis==4.0.2
 requests[security]==2.26.0
 sendgrid==6.9.2
 sentry-sdk[flask]==1.20.0
-shortuuid==1.0.8
-SQLAlchemy==1.4.27
 Werkzeug==2.0.2
