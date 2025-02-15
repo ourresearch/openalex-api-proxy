@@ -33,31 +33,34 @@ def load_api_keys_from_csv():
         csv_file = StringIO(response.text)
         csv_reader = csv.DictReader(csv_file)
         
+        key_count = 0
         for row in csv_reader:
             key = row.get('key', '').strip()
             if not key:  # Skip rows with missing keys
+                logger.warning("Found row with missing key")
                 continue
                 
             try:
                 calls_per_second = int(row.get('max per second', 0))
-                calls_per_day = int(row.get('max per day', 0))  # using same value for both as shown in sample
+                calls_per_day = int(row.get('max per day', 0))
                 
                 API_KEYS[key] = {
                     'calls_per_second': calls_per_second,
                     'calls_per_day': calls_per_day
                 }
+                key_count += 1
                 logger.info(f"Loaded key {key} with limits: {calls_per_second}/s, {calls_per_day}/day")
             except (ValueError, TypeError) as e:
                 logger.error(f"Error parsing rate limits for key {key}: {e}")
-                continue
-                
-        logger.info(f"Successfully loaded {len(API_KEYS)} API keys")
-        logger.info(f"First few keys loaded: {list(API_KEYS.keys())[:5]}")
         
-    except Exception as e:
+        logger.info(f"Successfully loaded {key_count} API keys")
+        
+    except requests.RequestException as e:
         logger.error(f"Error loading API keys from CSV: {e}")
-        if isinstance(e, requests.RequestException):
-            logger.error(f"Request error details: {e.response.text if e.response else 'No response'}")
+        return
+    except Exception as e:
+        logger.error(f"Unexpected error loading API keys: {e}")
+        return
 
 def valid_key(key):
     """Check if an API key exists."""
@@ -67,13 +70,19 @@ def valid_key(key):
 
 def get_rate_limits(key):
     """Get rate limits for a key. Returns default limits if key doesn't exist."""
+    if not key:
+        logger.info("No API key provided")
+        return '10/second, 100000/day'  # default limits
+    
+    logger.info(f"Looking up rate limits for key: {key}")
     if key in API_KEYS:
         limits = API_KEYS[key]
         limit_str = f"{limits['calls_per_second']}/second, {limits['calls_per_day']}/day"
-        logger.info(f"Returning limits for key {key}: {limit_str}")
+        logger.info(f"Found rate limits for {key}: {limit_str}")
         return limit_str
-    logger.warning(f"Key {key} not found, returning default limits")
-    return "10/second, 100000/day"  # default limits for invalid/missing keys
+    else:
+        logger.info(f"Key {key} not found in API_KEYS (total keys: {len(API_KEYS)})")
+        return '10/second, 100000/day'  # default limits for unknown keys
 
 def get_all_valid_keys():
     """Get a list of all API keys."""
