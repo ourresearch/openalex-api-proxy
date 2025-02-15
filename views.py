@@ -54,7 +54,7 @@ def protect_updated_created_params(arg, arg_type):
                 f'you must include an api_key argument to use {matched_string} with {arg_type}'
             )
         elif not valid_key(g.api_key):
-            abort_json('403', f'api_key {g.api_key} is expired or invalid')
+            abort_json('403', f'api_key {g.api_key} is invalid')
 
 
 def rate_limit_key():
