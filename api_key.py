@@ -17,9 +17,14 @@ def load_api_keys_from_csv():
         logger.error("API_KEY_CSV_URL environment variable not set")
         return
     
+    logger.info(f"Starting to load API keys from {csv_url}")
+    
     try:
         response = requests.get(csv_url)
         response.raise_for_status()
+        
+        # Log the first 100 characters of response to debug
+        logger.info(f"Received CSV content (first 100 chars): {response.text[:100]}")
         
         # Clear existing keys
         API_KEYS.clear()
@@ -41,24 +46,33 @@ def load_api_keys_from_csv():
                     'calls_per_second': calls_per_second,
                     'calls_per_day': calls_per_day
                 }
+                logger.info(f"Loaded key {key} with limits: {calls_per_second}/s, {calls_per_day}/day")
             except (ValueError, TypeError) as e:
                 logger.error(f"Error parsing rate limits for key {key}: {e}")
                 continue
                 
         logger.info(f"Successfully loaded {len(API_KEYS)} API keys")
+        logger.info(f"First few keys loaded: {list(API_KEYS.keys())[:5]}")
         
     except Exception as e:
         logger.error(f"Error loading API keys from CSV: {e}")
+        if isinstance(e, requests.RequestException):
+            logger.error(f"Request error details: {e.response.text if e.response else 'No response'}")
 
 def valid_key(key):
     """Check if an API key exists."""
-    return key in API_KEYS
+    is_valid = key in API_KEYS
+    logger.info(f"Checking key {key}: {'valid' if is_valid else 'invalid'}")
+    return is_valid
 
 def get_rate_limits(key):
     """Get rate limits for a key. Returns default limits if key doesn't exist."""
     if key in API_KEYS:
         limits = API_KEYS[key]
-        return f"{limits['calls_per_second']}/second, {limits['calls_per_day']}/day"
+        limit_str = f"{limits['calls_per_second']}/second, {limits['calls_per_day']}/day"
+        logger.info(f"Returning limits for key {key}: {limit_str}")
+        return limit_str
+    logger.warning(f"Key {key} not found, returning default limits")
     return "10/second, 100000/day"  # default limits for invalid/missing keys
 
 def get_all_valid_keys():
