@@ -14,6 +14,8 @@ from flask_talisman import Talisman
 from limits.storage.redis import RedisStorage
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
+import api_key
+from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -52,6 +54,14 @@ users_api_url = os.getenv('USERS_API_URL')
 Talisman(app, force_https=True)
 Compress(app)
 
+# Initialize scheduler for periodic tasks
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=api_key.load_api_keys_from_csv, trigger="interval", minutes=5)
+scheduler.start()
+
+# Shut down the scheduler when exiting the app
+import atexit
+atexit.register(lambda: scheduler.shutdown())
 
 def redis_init(self, uri: str, **options):
     """

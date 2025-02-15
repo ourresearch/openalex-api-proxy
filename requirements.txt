@@ -12,3 +12,4 @@ sendgrid==6.9.2
 sentry-sdk[flask]==1.20.0
 shortuuid==1.0.8
 Werkzeug==2.0.2
+APScheduler==3.10.1
