@@ -23,7 +23,6 @@ import sentry_sdk
 
 API_POOL_PUBLIC = 'common'
 API_POOL_POLITE = 'polite'
-HIGH_RATE_LIMIT_API_KEYS = get_all_valid_keys()
 
 
 def abort_json(status_code, msg):
@@ -71,7 +70,7 @@ def rate_limit_value():
     elif g.api_key and g.api_key.startswith('AmZLwH'):
         logger.debug(f'Authorized mega high rate limit for {g.app_request_id} due to special API key.')
         return '100/second, 4000000/day'
-    elif g.api_key and g.api_key in HIGH_RATE_LIMIT_API_KEYS:
+    elif g.api_key and g.api_key in get_all_valid_keys():
         logger.debug(f'Authorized high rate limit for {g.app_request_id} due to API key.')
         return '100/second, 2000000/day'  # was '100/second, 1250000/day'. Increased to 2000000/day temporarily
     else:
