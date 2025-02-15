@@ -1,18 +1,11 @@
 import datetime
 
-from sqlalchemy import Sequence
-
-from app import db
-
-
-class BlockedRequester(db.Model):
-    __tablename__ = "blocked_requester"
-
-    id = db.Column(db.BigInteger, Sequence('blocked_requester_id_seq', start=1, increment=1), primary_key=True)
-    ip = db.Column(db.Text, nullable=False, unique=True)
-    created = db.Column(db.DateTime, nullable=False, default=datetime.datetime.now(datetime.timezone.utc).isoformat())
-    active = db.Column(db.Boolean, nullable=False, default=True)
-    notes = db.Column(db.Text)
+class BlockedRequester:
+    def __init__(self, ip, created=None, active=True, notes=None):
+        self.ip = ip
+        self.created = created or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.active = active
+        self.notes = notes
 
     def to_dict(self):
         return {
@@ -26,10 +19,11 @@ class BlockedRequester(db.Model):
         return f'<BlockedRequester ({self.ip})>'
 
 
-_blocked_requesters_by_ip = {}
-
-for blocked_requester in BlockedRequester.query.filter_by(active=True):
-    _blocked_requesters_by_ip[blocked_requester.ip] = blocked_requester
+# Mock blocked requesters data
+_blocked_requesters_by_ip = {
+    # Example blocked IPs - you can add more as needed
+    # '1.2.3.4': BlockedRequester('1.2.3.4', notes='Excessive requests'),
+}
 
 
 def check_for_blocked_requester(request_ip):
