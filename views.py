@@ -13,7 +13,6 @@ from flask_limiter import Limiter
 from werkzeug.http import http_date
 
 from api_key import valid_key, get_all_valid_keys
-from rate_limit_exempt_email import get_rate_limit_exempt_emails
 from app import app
 from app import elastic_api_url, formatter_api_url, ngrams_api_url, text_api_url, unpaywall_api_url, users_api_url
 from app import logger
@@ -25,9 +24,6 @@ import sentry_sdk
 API_POOL_PUBLIC = 'common'
 API_POOL_POLITE = 'polite'
 HIGH_RATE_LIMIT_API_KEYS = os.environ.get('HIGH_RATE_LIMIT_API_KEYS', '').split(';')
-RATE_LIMIT_EXEMPT_EMAILS = os.environ.get('TOP_SECRET_UNLIMITED_EMAILS', '').split(';')
-
-RATE_LIMIT_EXEMPT_EMAILS_FROM_DB = get_rate_limit_exempt_emails()
 HIGH_RATE_LIMIT_API_KEYS_FROM_DB = get_all_valid_keys()
 
 
@@ -64,9 +60,7 @@ def protect_updated_created_params(arg, arg_type):
 
 
 def rate_limit_key():
-    if g.api_pool == API_POOL_POLITE:
-        return g.mailto
-    elif g.api_key:
+    if g.api_key:
         return g.api_key
     else:
         return remote_address()
@@ -90,23 +84,6 @@ def remote_address():
         return forwarded_for[0]
     else:
         return request.remote_addr
-
-
-def request_mailto_address():
-    mailto_address = None
-
-    if arg_mailto := (request.args.get('mailto') or request.args.get('email')):
-        mailto_address = arg_mailto
-    elif from_header := request.headers.get('from'):
-        mailto_address = from_header
-    elif ua_header := request.headers.get('user-agent'):
-        mailto_address = re.findall(r'mailto:([^);]*)|$', ua_header)[0].strip()
-
-    # take anything that vaguely looks like an email address
-    if mailto_address and re.match(r'^.+@.+\..+$', mailto_address):
-        return mailto_address
-
-    return None
 
 
 def request_api_key():
@@ -139,18 +116,11 @@ def before_request():
 
     g.api_key = request_api_key()
 
-    if mailto := request_mailto_address():
-        g.mailto = mailto
-        g.api_pool = API_POOL_POLITE
-    else:
-        g.mailto = None
-        g.api_pool = API_POOL_PUBLIC
+    logger.info(f"url: {request.url}, api_key: {g.api_key}")
 
-    logger.info(f"url: {request.url}, mailto: {g.mailto}, api_key: {g.api_key}")
+    logger.debug(f'{g.app_request_id}: assigned api pool {API_POOL_PUBLIC}')
 
-    logger.debug(f'{g.app_request_id}: assigned api pool {g.api_pool}')
-
-    if blocked_requester := check_for_blocked_requester(request_ip=remote_address(), request_email=g.mailto):
+    if blocked_requester := check_for_blocked_requester(request_ip=remote_address(), request_email=None):
         logger.info(json.dumps({'blocked_requester': blocked_requester.to_dict()}))
 
         return abort_json(
@@ -188,17 +158,19 @@ def after_request(response):
             pass
 
     try:
-        response.headers['X-API-Pool'] = g.api_pool
+        response.headers['X-API-Pool'] = API_POOL_PUBLIC
     except AttributeError:
         pass
 
     if hasattr(g, "api_key") and g.api_key == os.environ.get('DEBUG_API_KEY', ''):
         # send message to sentry
         with sentry_sdk.push_scope() as scope:
-            scope.set_extra("RATE_LIMIT_EXEMPT_EMAILS_FROM_DB", RATE_LIMIT_EXEMPT_EMAILS_FROM_DB)
-            scope.set_extra("RATE_LIMIT_EXEMPT_EMAILS", RATE_LIMIT_EXEMPT_EMAILS)
-            scope.set_extra("test4_in_exempt_emails_from_db", "test4@example.com" in RATE_LIMIT_EXEMPT_EMAILS_FROM_DB)
-            scope.set_extra("test4_in_exempt_emails_from_env", "test4@example.com" in RATE_LIMIT_EXEMPT_EMAILS)
+            scope.set_extra("request_path", request.path)
+            scope.set_extra("request_args", request.args)
+            scope.set_extra("request_headers", dict(request.headers))
+            scope.set_extra("request_method", request.method)
+            scope.set_extra("HIGH_RATE_LIMIT_API_KEYS", HIGH_RATE_LIMIT_API_KEYS)
+            scope.set_extra("rate_limit_value", rate_limit_value())
             sentry_sdk.capture_message("DEBUG API KEY MESSAGE - check ratelimit exempt emails")
 
     return response
@@ -261,7 +233,7 @@ def select_worker_host(request_path, request_args):
 # see https://flask-limiter.readthedocs.io/en/stable/api.html#flask_limiter.Limiter.request_filter
 @limiter.request_filter
 def email_rate_limit_exempt():
-    return (g.mailto in RATE_LIMIT_EXEMPT_EMAILS) or (request.path and request.path.endswith('/ngrams'))
+    return request.path and request.path.endswith('/ngrams')
 
 
 @app.route('/<path:request_path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
@@ -355,8 +327,7 @@ def forward_request(request_path):
             'response_source': response_source,
             'cache_key': cache_key,
             'response_status_code': response_attrs['status_code'],
-            'api_pool': g.api_pool,
-            'mailto': g.mailto,
+            'api_pool': API_POOL_PUBLIC,
             'remote_address': remote_address(),
             'request_id': g.app_request_id,
         }
@@ -393,12 +364,7 @@ def base_endpoint():
 
 @app.route('/refreshdb', methods=["POST"])
 def refreshdb():
-    global RATE_LIMIT_EXEMPT_EMAILS_FROM_DB
-    global HIGH_RATE_LIMIT_API_KEYS_FROM_DB
-    RATE_LIMIT_EXEMPT_EMAILS_FROM_DB = get_rate_limit_exempt_emails()
-    HIGH_RATE_LIMIT_API_KEYS_FROM_DB = get_all_valid_keys()
-    return jsonify({"msg": "refresh successful", "sent_at": datetime.now(timezone.utc).isoformat()}), 200
-
+    return jsonify({'status': 'ok'})
 
 
 if __name__ == '__main__':
