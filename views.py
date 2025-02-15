@@ -3,7 +3,7 @@ import shortuuid
 import json
 import os
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 from datetime import datetime, timezone
 
 import requests
@@ -120,11 +120,11 @@ def before_request():
 
     logger.debug(f'{g.app_request_id}: assigned api pool {API_POOL_PUBLIC}')
 
-    if blocked_requester := check_for_blocked_requester(request_ip=remote_address(), request_email=None):
+    if blocked_requester := check_for_blocked_requester(request_ip=remote_address()):
         logger.info(json.dumps({'blocked_requester': blocked_requester.to_dict()}))
 
         return abort_json(
-            403, f'{blocked_requester.email or blocked_requester.ip} is blocked. Please contact team@ourresearch.org.'
+            403, f'{blocked_requester.ip} is blocked. Please contact team@ourresearch.org.'
         )
 
     logger.debug(f'{g.app_request_id}: finished with before_request')
@@ -171,7 +171,7 @@ def after_request(response):
             scope.set_extra("request_method", request.method)
             scope.set_extra("HIGH_RATE_LIMIT_API_KEYS", HIGH_RATE_LIMIT_API_KEYS)
             scope.set_extra("rate_limit_value", rate_limit_value())
-            sentry_sdk.capture_message("DEBUG API KEY MESSAGE - check ratelimit exempt emails")
+            sentry_sdk.capture_message("DEBUG API KEY MESSAGE")
 
     return response
 
@@ -232,7 +232,7 @@ def select_worker_host(request_path, request_args):
 # request is exempt from rate limiting if this function returns True
 # see https://flask-limiter.readthedocs.io/en/stable/api.html#flask_limiter.Limiter.request_filter
 @limiter.request_filter
-def email_rate_limit_exempt():
+def rate_limit_exempt():
     return request.path and request.path.endswith('/ngrams')
 
 
@@ -257,12 +257,13 @@ def forward_request(request_path):
     worker_params = dict(request.args)
 
     # don't pass email or mailto args to elastic worker
-    if worker_host.get("url") == elastic_api_url:
-        try:
+    if request.args.get('email') or request.args.get('mailto'):
+        worker_params = dict(request.args)
+        if 'email' in worker_params:
             del worker_params['email']
+        if 'mailto' in worker_params:
             del worker_params['mailto']
-        except KeyError:
-            pass
+        worker_url = f'{worker_host}{request_path}?{urlencode(worker_params, doseq=True)}'
 
     logger.debug(f'{g.app_request_id}: calculated worker_params')
 
@@ -362,11 +363,9 @@ def base_endpoint():
         "msg": "Don't panic"
     })
 
-@app.route('/refreshdb', methods=["POST"])
-def refreshdb():
-    return jsonify({'status': 'ok'})
 
 
+# this is for local development
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
