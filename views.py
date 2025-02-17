@@ -259,7 +259,7 @@ def forward_request(request_path):
             del worker_params['email']
         if 'mailto' in worker_params:
             del worker_params['mailto']
-        worker_url = f'{worker_host}{request_path}?{urlencode(worker_params, doseq=True)}'
+        worker_url = f'{worker_host.get("url")}/{request_path}?{urlencode(worker_params, doseq=True)}'
 
     logger.debug(f'{g.app_request_id}: calculated worker_params')
 
