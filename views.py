@@ -253,13 +253,10 @@ def forward_request(request_path):
     worker_params = dict(request.args)
 
     # don't pass email or mailto args to elastic worker
-    if request.args.get('email') or request.args.get('mailto'):
-        worker_params = dict(request.args)
-        if 'email' in worker_params:
-            del worker_params['email']
-        if 'mailto' in worker_params:
-            del worker_params['mailto']
-        worker_url = f'{worker_host.get("url")}/{request_path}?{urlencode(worker_params, doseq=True)}'
+    if 'email' in worker_params:
+        del worker_params['email']
+    if 'mailto' in worker_params:
+        del worker_params['mailto']
 
     logger.debug(f'{g.app_request_id}: calculated worker_params')
 
