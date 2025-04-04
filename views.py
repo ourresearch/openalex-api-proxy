@@ -66,7 +66,7 @@ def rate_limit_key():
 
 def rate_limit_value():
     if request.path and request.path.startswith('/text'):
-        return '1/second, 1000/day'
+        return '10/second, 10000/day'
     elif g.api_key:
         limits = api_key.get_rate_limits(g.api_key)
         logger.info(f"Rate limits for key {g.api_key}: {limits}")
