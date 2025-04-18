@@ -229,7 +229,8 @@ def select_worker_host(request_path, request_args):
 # see https://flask-limiter.readthedocs.io/en/stable/api.html#flask_limiter.Limiter.request_filter
 @limiter.request_filter
 def rate_limit_exempt():
-    return request.path and request.path.endswith('/ngrams')
+    # /analytics request are exempt here because they limited based on query counting downstream
+    return request.path and (request.path.endswith('/ngrams') or request.path.startswith('/analytics'))
 
 
 @app.route('/<path:request_path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
