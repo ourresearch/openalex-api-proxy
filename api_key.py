@@ -46,7 +46,7 @@ def load_api_keys_from_csv():
                     'calls_per_second': calls_per_second,
                     'calls_per_day': calls_per_day
                 }
-                logger.info(f"Loaded key {key} with limits: {calls_per_second}/s, {calls_per_day}/day")
+                #logger.info(f"Loaded key {key} with limits: {calls_per_second}/s, {calls_per_day}/day")
             except (ValueError, TypeError) as e:
                 logger.error(f"Error parsing rate limits for key {key}: {e}")
                 continue

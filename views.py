@@ -284,7 +284,7 @@ def forward_request(request_path):
         try:
             logger.debug(f'{g.app_request_id}: getting response from worker')
 
-            if request.method != 'GET' and any([request.path.startswith(path) for path in {'/text', '/searches', '/users', '/test_stories'}]):
+            if request.method != 'GET' and any([request.path.startswith(path) for path in {'/text', '/analytics', '/users', '/test_stories'}]):
                 session_method = getattr(worker_host.get('session'), request.method.lower())
                 worker_response = session_method(worker_url, json=request.json,
                                                              headers=worker_headers,

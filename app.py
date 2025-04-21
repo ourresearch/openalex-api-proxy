@@ -51,7 +51,9 @@ text_api_url = os.getenv('TEXT_API_URL')
 unpaywall_api_url = os.getenv('UNPAYWALL_API_URL')
 users_api_url = os.getenv('USERS_API_URL')
 
-Talisman(app, force_https=True)
+ENVIRONMENT = os.getenv('ENVIRONMENT')
+force_https = ENVIRONMENT != 'development'
+Talisman(app, force_https=force_https)
 Compress(app)
 
 # Load API keys on startup
