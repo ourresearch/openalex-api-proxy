@@ -113,6 +113,11 @@ def before_request():
 
     g.api_key = request_api_key()
 
+    mailto = request.args.get('mailto') or request.args.get('email')
+    if mailto and "example.com" in mailto.lower():
+        logger.info(f"Blocked request with invalid email: {mailto}")
+        return abort_json(400, "Invalid")
+
     logger.info(f"url: {request.url}, api_key: {g.api_key}")
 
     logger.debug(f'{g.app_request_id}: assigned api pool {API_POOL_PUBLIC}')
