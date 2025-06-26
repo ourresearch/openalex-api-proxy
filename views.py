@@ -118,6 +118,15 @@ def before_request():
         logger.info(f"Blocked request with invalid email: {mailto}")
         return abort_json(400, "Invalid")
 
+    require_api_key = os.environ.get('REQUIRE_API_KEY', 'false').lower() == 'true'
+    if require_api_key:
+        if not g.api_key:
+            logger.info(f"API key required but not provided for request: {request.url}")
+            return abort_json(503, "Service temporarily unavailable: API key required")
+        elif not api_key.valid_key(g.api_key):
+            logger.info(f"Invalid API key provided: {g.api_key}")
+            return abort_json(503, "Service unavailable: Invalid API key")
+
     logger.info(f"url: {request.url}, api_key: {g.api_key}")
 
     logger.debug(f'{g.app_request_id}: assigned api pool {API_POOL_PUBLIC}')
