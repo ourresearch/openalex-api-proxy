@@ -1,0 +1,16 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "openalex-api-proxy",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-10-03",
+	"observability": {
+		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "openalex_db",
+			"database_name": "openalex-db",
+			"database_id": "769bdd92-0544-4135-b2e4-c67f1df17994"
+		}
+	]
+}
