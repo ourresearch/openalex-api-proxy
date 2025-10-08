@@ -12,5 +12,19 @@
 			"database_name": "openalex-db",
 			"database_id": "769bdd92-0544-4135-b2e4-c67f1df17994"
 		}
-	]
+	],
+	"routes": [
+		{
+		  "pattern": "api.openalex.org/*",
+		  "zone_name": "api.openalex.org"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "RATE_LIMITER",
+				"class_name": "RateLimiter"
+			}
+		]
+	}
 }

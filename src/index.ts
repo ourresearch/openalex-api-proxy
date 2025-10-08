@@ -1,6 +1,11 @@
+import { RateLimiter } from "./rateLimiter";
+
 export interface Env {
 	openalex_db: D1Database;
+	RATE_LIMITER: DurableObjectNamespace;
 }
+
+export { RateLimiter };
 
 const OPENALEX_API_BASE = "https://api.openalex.org";
 
@@ -12,13 +17,41 @@ export default {
 
 		const url = new URL(req.url);
 
-		// Check API key authentication
-		const authResult = await checkApiKey(req, env);
-		if (!authResult.valid) {
-			const message = authResult.error || "Provide a valid API key";
-			return json(401, {
-				error: "Invalid or missing API key",
-				message: message
+		// Check API key authentication (optional)
+		const apiKey = getApiKeyFromRequest(req);
+		let hasValidApiKey = false;
+
+		if (apiKey) {
+			const authResult = await checkApiKey(req, env);
+			if (!authResult.valid) {
+				const message = authResult.error || "Provide a valid API key";
+				return json(401, {
+					error: "Invalid or missing API key",
+					message: message
+				});
+			}
+			hasValidApiKey = true;
+		}
+
+		// Rate limiting - 50 req/sec with API key, 10 req/sec without
+		const rateLimitKey = apiKey || req.headers.get("CF-Connecting-IP") || "anonymous";
+		const limit = hasValidApiKey ? 50 : 10;
+		const window = 1; // 1 second
+
+		const id = env.RATE_LIMITER.idFromName(rateLimitKey);
+		const stub = env.RATE_LIMITER.get(id);
+
+		const rateLimitResponse = await stub.fetch("http://internal/check", {
+			method: "POST",
+			body: JSON.stringify({ key: rateLimitKey, limit, window })
+		});
+
+		const { success } = await rateLimitResponse.json<{ success: boolean }>();
+
+		if (!success) {
+			return json(429, {
+				error: "Rate limit exceeded",
+				message: `You have exceeded the rate limit of ${limit} requests per second. Please try again later.`
 			});
 		}
 
