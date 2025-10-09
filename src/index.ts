@@ -4,6 +4,7 @@ export interface Env {
 	openalex_db: D1Database;
 	RATE_LIMITER: DurableObjectNamespace;
 	OPENALEX_API_URL: string;
+	EXPORTER_API_URL: string;
 }
 
 export { RateLimiter };
@@ -73,8 +74,11 @@ export default {
 			});
 		}
 
-		// Proxy request to OpenAlex API
-		const openalexUrl = new URL(env.OPENALEX_API_URL + url.pathname);
+		// Determine which API to use (exporter vs. main API)
+		const targetApiUrl = shouldUseExporterApi(url) ? env.EXPORTER_API_URL : env.OPENALEX_API_URL;
+
+		// Proxy request to the appropriate API
+		const openalexUrl = new URL(targetApiUrl + url.pathname);
 
 		// Copy all query parameters (including api_key variants)
 		url.searchParams.forEach((value, key) => {
@@ -185,6 +189,45 @@ function addCorsHeaders(response: Response): Response {
 		statusText: response.statusText,
 		headers: newHeaders
 	});
+}
+
+/** Exporter API Routing **/
+function shouldUseExporterApi(url: URL): boolean {
+	const pathname = url.pathname;
+
+	// Normalize the path - remove leading/trailing slashes and convert to lowercase
+	const normalizedPath = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+
+	// Check if there are any query parameters
+	const hasQueryParams = url.search.length > 0;
+
+	// Pattern 1: /works/W123.bib or W123.bib (no query params)
+	// Matches: works/W123.bib, W123.bib, works/w123.bib
+	if (/^(?:works\/+)?[wW]\d+\.bib$/.test(normalizedPath) && !hasQueryParams) {
+		return true;
+	}
+
+	// Pattern 2: /works or /works/v2 with format=csv/ris/wos-plaintext/zip
+	// and NO group_by or group_bys parameters
+	if (/^works\/?/.test(normalizedPath)) {
+		const format = url.searchParams.get('format');
+		const groupBy = url.searchParams.get('group_by');
+		const groupBys = url.searchParams.get('group_bys');
+
+		if (format &&
+		    ['csv', 'ris', 'wos-plaintext', 'zip'].includes(format.trim().toLowerCase()) &&
+		    !groupBy &&
+		    !groupBys) {
+			return true;
+		}
+	}
+
+	// Pattern 3: /export routes always go to exporter API
+	if (/^export\/?/.test(normalizedPath)) {
+		return true;
+	}
+
+	return false;
 }
 
 /** Protected Parameters **/
