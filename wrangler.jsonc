@@ -16,7 +16,7 @@
 	"routes": [
 		{
 		  "pattern": "api.openalex.org/*",
-		  "zone_name": "api.openalex.org"
+		  "zone_name": "openalex.org"
 		}
 	],
 	"durable_objects": {

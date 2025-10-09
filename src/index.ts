@@ -27,6 +27,7 @@ export default {
 		// Check API key authentication (optional)
 		const apiKey = getApiKeyFromRequest(req);
 		let hasValidApiKey = false;
+		let maxPerSecond = 10; // Default for unauthenticated requests
 
 		if (apiKey) {
 			const authResult = await checkApiKey(req, env);
@@ -38,6 +39,7 @@ export default {
 				});
 			}
 			hasValidApiKey = true;
+			maxPerSecond = authResult.maxPerSecond || 50; // Use DB value or default to 50
 		}
 
 		// Check protected parameters
@@ -49,9 +51,9 @@ export default {
 			});
 		}
 
-		// Rate limiting - 50 req/sec with API key, 10 req/sec without
+		// Rate limiting - use max_per_second from DB for API keys, 10 req/sec without
 		const rateLimitKey = apiKey || req.headers.get("CF-Connecting-IP") || "anonymous";
-		const limit = hasValidApiKey ? 50 : 10;
+		const limit = maxPerSecond;
 		const window = 1; // 1 second
 
 		const id = env.RATE_LIMITER.idFromName(rateLimitKey);
@@ -122,7 +124,7 @@ function getApiKeyFromRequest(req: Request): string | null {
 	);
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string}> {
+async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerSecond?: number}> {
 	const apiKey = getApiKeyFromRequest(req);
 
 	if (!apiKey) {
@@ -130,25 +132,28 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
 	}
 
 	try {
-		const keyExists = await env.openalex_db
-			.prepare("SELECT expires_at FROM api_keys WHERE api_key = ?")
+		const keyData = await env.openalex_db
+			.prepare("SELECT expires_at, max_per_second FROM api_keys WHERE api_key = ?")
 			.bind(apiKey)
 			.first();
 
-		if (!keyExists) {
+		if (!keyData) {
 			return { valid: false, error: "API key not found" };
 		}
 
 		// Check if the key has expired
-		if (keyExists.expires_at) {
-			const expiresAt = new Date(keyExists.expires_at as string);
+		if (keyData.expires_at) {
+			const expiresAt = new Date(keyData.expires_at as string);
 			const now = new Date();
 			if (expiresAt <= now) {
-				return { valid: false, error: `API key expired on ${keyExists.expires_at}` };
+				return { valid: false, error: `API key expired on ${keyData.expires_at}` };
 			}
 		}
 
-		return { valid: true };
+		return {
+			valid: true,
+			maxPerSecond: keyData.max_per_second as number
+		};
 
 	} catch (error) {
 		console.error("Error checking API key:", error);
