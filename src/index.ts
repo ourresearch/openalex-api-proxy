@@ -78,6 +78,18 @@ export default {
 		const rateLimitKey = apiKey || req.headers.get("CF-Connecting-IP") || "anonymous";
 		const window = 1; // 1 second
 
+		// Log rate limit check
+		const ipAddress = req.headers.get("CF-Connecting-IP") || "unknown";
+		console.log({
+			timestamp: new Date().toISOString(),
+			ip: ipAddress,
+			path: url.pathname,
+			hasApiKey: !!apiKey,
+			apiKeyPrefix: apiKey ? apiKey.substring(0, 8) + "..." : null,
+			rateLimit: limit,
+			rateLimitKey: apiKey ? "API_KEY" : ipAddress
+		});
+
 		const id = env.RATE_LIMITER.idFromName(rateLimitKey);
 		const stub = env.RATE_LIMITER.get(id);
 
@@ -89,6 +101,14 @@ export default {
 		const { success } = await rateLimitResponse.json<{ success: boolean }>();
 
 		if (!success) {
+			console.log({
+				timestamp: new Date().toISOString(),
+				ip: ipAddress,
+				path: url.pathname,
+				status: "RATE_LIMITED",
+				limit: limit
+			});
+
 			return json(429, {
 				error: "Rate limit exceeded",
 				message: `You have exceeded the rate limit of ${limit} requests per second. Please try again later.`
