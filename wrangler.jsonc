@@ -26,5 +26,13 @@
 				"class_name": "RateLimiter"
 			}
 		]
-	}
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_classes": [
+				"RateLimiter"
+			]
+		}
+	]
 }

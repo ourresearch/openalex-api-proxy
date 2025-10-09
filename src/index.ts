@@ -3,16 +3,23 @@ import { RateLimiter } from "./rateLimiter";
 export interface Env {
 	openalex_db: D1Database;
 	RATE_LIMITER: DurableObjectNamespace;
+	OPENALEX_API_URL: string;
 }
 
 export { RateLimiter };
 
-const OPENALEX_API_BASE = "https://api.openalex.org";
-
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
+		// Handle OPTIONS preflight requests
+		if (req.method === "OPTIONS") {
+			return new Response(null, {
+				status: 204,
+				headers: getCorsHeaders()
+			});
+		}
+
 		if (req.method !== "GET") {
-			return new Response("Method Not Allowed", { status: 405 });
+			return addCorsHeaders(new Response("Method Not Allowed", { status: 405 }));
 		}
 
 		const url = new URL(req.url);
@@ -31,6 +38,15 @@ export default {
 				});
 			}
 			hasValidApiKey = true;
+		}
+
+		// Check protected parameters
+		const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
+		if (!protectedParamCheck.valid) {
+			return json(403, {
+				error: "Forbidden",
+				message: protectedParamCheck.error
+			});
 		}
 
 		// Rate limiting - 50 req/sec with API key, 10 req/sec without
@@ -56,7 +72,7 @@ export default {
 		}
 
 		// Proxy request to OpenAlex API
-		const openalexUrl = new URL(OPENALEX_API_BASE + url.pathname);
+		const openalexUrl = new URL(env.OPENALEX_API_URL + url.pathname);
 
 		// Copy all query parameters (including api_key variants)
 		url.searchParams.forEach((value, key) => {
@@ -74,12 +90,12 @@ export default {
 
 		const response = await fetch(proxyReq);
 
-		// Return the response from OpenAlex
-		return new Response(response.body, {
+		// Return the response from OpenAlex with CORS headers
+		return addCorsHeaders(new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
 			headers: response.headers
-		});
+		}));
 	}
 } satisfies ExportedHandler<Env>;
 
@@ -140,10 +156,76 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
 	}
 }
 
+/** CORS Helpers **/
+function getCorsHeaders(): Headers {
+	const headers = new Headers();
+	headers.set("Access-Control-Allow-Origin", "*");
+	headers.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, PATCH");
+	headers.set("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Accept-Encoding, Authorization, Cache-Control");
+	headers.set("Access-Control-Expose-Headers", "Authorization, Cache-Control");
+	headers.set("Access-Control-Allow-Credentials", "true");
+	return headers;
+}
+
+function addCorsHeaders(response: Response): Response {
+	const newHeaders = new Headers(response.headers);
+	const corsHeaders = getCorsHeaders();
+
+	corsHeaders.forEach((value, key) => {
+		newHeaders.set(key, value);
+	});
+
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers: newHeaders
+	});
+}
+
+/** Protected Parameters **/
+function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boolean; error?: string } {
+	// Check filter parameter for protected date fields
+	const filterParam = url.searchParams.get('filter');
+	if (filterParam) {
+		const filterPattern = /(?:from|to)_(?:updated|created)_date:[><]?\d{4}-\d{2}-\d{2}/;
+		const matches = filterParam.match(filterPattern);
+
+		if (matches && !hasValidApiKey) {
+			return {
+				valid: false,
+				error: `You must include a valid API key to use "${matches[0]}" with filter`
+			};
+		}
+	}
+
+	// Check sort parameter for protected date fields
+	const sortParam = url.searchParams.get('sort');
+	if (sortParam) {
+		const sortPattern = /(?:from|to)_(?:updated|created)_date(?::(?:asc|desc))?/;
+		const matches = sortParam.match(sortPattern);
+
+		if (matches && !hasValidApiKey) {
+			return {
+				valid: false,
+				error: `You must include a valid API key to use "${matches[0]}" with sort`
+			};
+		}
+	}
+
+	return { valid: true };
+}
+
 /** Helpers **/
 function json(status: number, data: unknown): Response {
-	return new Response(JSON.stringify(data), {
-		status,
-		headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+	const headers = new Headers({
+		"Content-Type": "application/json",
+		"Cache-Control": "no-store"
 	});
+
+	const corsHeaders = getCorsHeaders();
+	corsHeaders.forEach((value, key) => {
+		headers.set(key, value);
+	});
+
+	return new Response(JSON.stringify(data), { status, headers });
 }
