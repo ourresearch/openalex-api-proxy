@@ -5,6 +5,8 @@ export interface Env {
 	RATE_LIMITER: DurableObjectNamespace;
 	OPENALEX_API_URL: string;
 	EXPORTER_API_URL: string;
+	TEXT_API_URL: string;
+	USERS_API_URL: string;
 }
 
 export { RateLimiter };
@@ -52,9 +54,28 @@ export default {
 			});
 		}
 
-		// Rate limiting - use max_per_second from DB for API keys, 10 req/sec without
+		// Determine path-specific rate limits
+		const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+		const isTextPath = /^text\/?/.test(normalizedPath);
+		const isUsersPath = /^users\/?/.test(normalizedPath);
+		const isExportPath = /^export\/?/.test(normalizedPath) ||
+		                     /^(?:works\/+)?[wW]\d+\.bib$/.test(normalizedPath) ||
+		                     (/^works\/?/.test(normalizedPath) &&
+		                      url.searchParams.get('format') &&
+		                      ['csv', 'ris', 'wos-plaintext', 'zip'].includes(url.searchParams.get('format')?.trim().toLowerCase() || ''));
+
+		// Determine rate limit based on path and authentication
+		// API key increased limits ONLY apply to main OpenAlex API paths
+		let limit: number;
+		if (isTextPath) {
+			limit = 5; // /text is always 5/sec
+		} else if (isUsersPath || isExportPath) {
+			limit = 10; // /users and /export always use default 10/sec, even with API keys
+		} else {
+			limit = maxPerSecond; // Main API uses API key limits (10 without key, DB value with key)
+		}
+
 		const rateLimitKey = apiKey || req.headers.get("CF-Connecting-IP") || "anonymous";
-		const limit = maxPerSecond;
 		const window = 1; // 1 second
 
 		const id = env.RATE_LIMITER.idFromName(rateLimitKey);
@@ -74,8 +95,8 @@ export default {
 			});
 		}
 
-		// Determine which API to use (exporter vs. main API)
-		const targetApiUrl = shouldUseExporterApi(url) ? env.EXPORTER_API_URL : env.OPENALEX_API_URL;
+		// Determine which API to use based on the request path
+		const targetApiUrl = getTargetApiUrl(url, env);
 
 		// Proxy request to the appropriate API
 		const openalexUrl = new URL(targetApiUrl + url.pathname);
@@ -191,8 +212,8 @@ function addCorsHeaders(response: Response): Response {
 	});
 }
 
-/** Exporter API Routing **/
-function shouldUseExporterApi(url: URL): boolean {
+/** API Routing **/
+function getTargetApiUrl(url: URL, env: Env): string {
 	const pathname = url.pathname;
 
 	// Normalize the path - remove leading/trailing slashes and convert to lowercase
@@ -201,13 +222,23 @@ function shouldUseExporterApi(url: URL): boolean {
 	// Check if there are any query parameters
 	const hasQueryParams = url.search.length > 0;
 
-	// Pattern 1: /works/W123.bib or W123.bib (no query params)
-	// Matches: works/W123.bib, W123.bib, works/w123.bib
-	if (/^(?:works\/+)?[wW]\d+\.bib$/.test(normalizedPath) && !hasQueryParams) {
-		return true;
+	// Pattern: /text routes go to text API
+	if (/^text\/?/.test(normalizedPath)) {
+		return env.TEXT_API_URL;
 	}
 
-	// Pattern 2: /works or /works/v2 with format=csv/ris/wos-plaintext/zip
+	// Pattern: /users routes go to users API
+	if (/^users\/?/.test(normalizedPath)) {
+		return env.USERS_API_URL;
+	}
+
+	// Pattern 1: /works/W123.bib or W123.bib (no query params) -> exporter API
+	// Matches: works/W123.bib, W123.bib, works/w123.bib
+	if (/^(?:works\/+)?[wW]\d+\.bib$/.test(normalizedPath) && !hasQueryParams) {
+		return env.EXPORTER_API_URL;
+	}
+
+	// Pattern 2: /works or /works/v2 with format=csv/ris/wos-plaintext/zip -> exporter API
 	// and NO group_by or group_bys parameters
 	if (/^works\/?/.test(normalizedPath)) {
 		const format = url.searchParams.get('format');
@@ -218,16 +249,17 @@ function shouldUseExporterApi(url: URL): boolean {
 		    ['csv', 'ris', 'wos-plaintext', 'zip'].includes(format.trim().toLowerCase()) &&
 		    !groupBy &&
 		    !groupBys) {
-			return true;
+			return env.EXPORTER_API_URL;
 		}
 	}
 
 	// Pattern 3: /export routes always go to exporter API
 	if (/^export\/?/.test(normalizedPath)) {
-		return true;
+		return env.EXPORTER_API_URL;
 	}
 
-	return false;
+	// Default: use main OpenAlex API
+	return env.OPENALEX_API_URL;
 }
 
 /** Protected Parameters **/
