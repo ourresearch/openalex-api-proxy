@@ -1,5 +1,14 @@
 import { RateLimiter } from "./rateLimiter";
 
+// In-memory cache for API key validation
+const API_KEY_CACHE = new Map<string, {
+    valid: boolean;
+    maxPerSecond?: number;
+    error?: string;
+    cachedAt: number;
+}>();
+const CACHE_TTL = 60000; // 60 seconds
+
 export interface Env {
     openalex_db: D1Database;
     RATE_LIMITER: DurableObjectNamespace;
@@ -164,6 +173,19 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
     const apiKey = getApiKeyFromRequest(req);
     if (!apiKey) return { valid: false };
 
+    // Check cache first
+    const cached = API_KEY_CACHE.get(apiKey);
+    const now = Date.now();
+
+    if (cached && (now - cached.cachedAt) < CACHE_TTL) {
+        return {
+            valid: cached.valid,
+            error: cached.error,
+            maxPerSecond: cached.maxPerSecond
+        };
+    }
+
+    // Cache miss - query D1
     try {
         const keyData = await env.openalex_db
             .prepare("SELECT expires_at, max_per_second FROM api_keys WHERE api_key = ?")
@@ -171,20 +193,27 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             .first();
 
         if (!keyData) {
-            return { valid: false, error: "API key not found" };
+            const result = { valid: false, error: "API key not found" };
+            API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
+            return result;
         }
 
         if (keyData.expires_at) {
             const expiresAt = new Date(keyData.expires_at as string);
             if (expiresAt <= new Date()) {
-                return { valid: false, error: `API key expired on ${keyData.expires_at}` };
+                const result = { valid: false, error: `API key expired on ${keyData.expires_at}` };
+                API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
+                return result;
             }
         }
 
-        return {
+        const result = {
             valid: true,
             maxPerSecond: keyData.max_per_second as number
         };
+        API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
+        return result;
+
     } catch (error) {
         console.error("Error checking API key:", error);
         return { valid: false, error: "Database error" };
