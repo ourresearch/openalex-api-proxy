@@ -1,64 +1,83 @@
+interface TokenBucket {
+    tokens: number;
+    lastRefill: number;
+    capacity: number;
+    refillRate: number;
+}
+
 export class RateLimiter implements DurableObject {
-	private state: DurableObjectState;
+    private static readonly BUCKET_KEY = "bucket";
 
-	constructor(state: DurableObjectState) {
-		this.state = state;
-	}
+    constructor(private state: DurableObjectState) {}
 
-	async fetch(request: Request): Promise<Response> {
-		const { key, limit, window } = await request.json<{
-			key: string;
-			limit: number;
-			window: number;
-		}>();
+    async fetch(request: Request): Promise<Response> {
+        const { limit, burstCapacity } = await request.json<{
+            limit: number;           // Tokens per second
+            burstCapacity?: number;  // Max burst size (defaults to limit * 2)
+        }>();
 
-		const now = Date.now();
-		const windowStart = now - window * 1000;
+        // Input validation
+        const rate = Math.max(1, limit);
+        const cap = Math.max(1, burstCapacity ?? limit * 2);
 
-		// Get existing requests from storage
-		const requests = (await this.state.storage.get<number[]>(key)) || [];
+        const now = Date.now();
 
-		// Filter out requests outside the current window
-		const recentRequests = requests.filter((timestamp) => timestamp > windowStart);
+        // Get current bucket state
+        let bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY);
 
-		// Check if limit exceeded
-		if (recentRequests.length >= limit) {
-			return new Response(
-				JSON.stringify({ success: false }),
-				{ headers: { "Content-Type": "application/json" } }
-			);
-		}
+        if (!bucket) {
+            // First request - initialize with full capacity
+            bucket = {
+                tokens: cap,
+                lastRefill: now,
+                capacity: cap,
+                refillRate: rate
+            };
+        }
 
-		// Add current request
-		recentRequests.push(now);
+        // Refill tokens based on time passed
+        const elapsedSeconds = (now - bucket.lastRefill) / 1000;
+        const tokensToAdd = elapsedSeconds * bucket.refillRate;
+        bucket.tokens = Math.min(bucket.capacity, bucket.tokens + tokensToAdd);
+        bucket.lastRefill = now;
 
-		// Store updated requests
-		await this.state.storage.put(key, recentRequests);
+        // Check if request can proceed
+        if (bucket.tokens < 1) {
+            // Save state and return rate limit error
+            await this.state.storage.put(RateLimiter.BUCKET_KEY, bucket);
 
-		// Set alarm to clean up old data
-		const alarmTime = now + window * 1000;
-		await this.state.storage.setAlarm(alarmTime);
+            return Response.json({
+                success: false,
+                retryAfter: (1 - bucket.tokens) / bucket.refillRate
+            });
+        }
 
-		return new Response(
-			JSON.stringify({ success: true }),
-			{ headers: { "Content-Type": "application/json" } }
-		);
-	}
+        // Consume a token and save (clamp to prevent negatives)
+        bucket.tokens = Math.max(0, bucket.tokens - 1);
+        await this.state.storage.put(RateLimiter.BUCKET_KEY, bucket);
 
-	async alarm(): Promise<void> {
-		// Clean up old entries
-		const now = Date.now();
-		const keys = await this.state.storage.list();
+        // Schedule cleanup alarm if not set
+        const alarmAt = await this.state.storage.getAlarm();
+        if (!alarmAt || alarmAt < now) {
+            await this.state.storage.setAlarm(now + 300_000); // 5 minutes
+        }
 
-		for (const [key, timestamps] of keys.entries()) {
-			if (Array.isArray(timestamps)) {
-				const recent = timestamps.filter((ts: number) => ts > now - 60000);
-				if (recent.length === 0) {
-					await this.state.storage.delete(key);
-				} else {
-					await this.state.storage.put(key, recent);
-				}
-			}
-		}
-	}
+        return Response.json({
+            success: true,
+            tokensRemaining: Math.floor(bucket.tokens)
+        });
+    }
+
+    async alarm(): Promise<void> {
+        // Clean up after 10 minutes of inactivity
+        const bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY);
+        if (!bucket) return;
+
+        const now = Date.now();
+        const inactivityPeriod = now - bucket.lastRefill;
+
+        if (inactivityPeriod > 600_000) {
+            await this.state.storage.delete(RateLimiter.BUCKET_KEY);
+        }
+    }
 }
