@@ -7,8 +7,16 @@ interface TokenBucket {
 
 export class RateLimiter implements DurableObject {
     private static readonly BUCKET_KEY = "bucket";
+    private bucket: TokenBucket | null = null;
+    private lastSave: number = 0;
+    private static readonly SAVE_INTERVAL = 5000; // Save every 5 seconds
 
-    constructor(private state: DurableObjectState) {}
+    constructor(private state: DurableObjectState) {
+        // Load bucket from storage on startup
+        this.state.blockConcurrencyWhile(async () => {
+            this.bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY) ?? null;
+        });
+    }
 
     async fetch(request: Request): Promise<Response> {
         const { limit, burstCapacity } = await request.json<{
@@ -22,12 +30,9 @@ export class RateLimiter implements DurableObject {
 
         const now = Date.now();
 
-        // Get current bucket state
-        let bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY);
-
-        if (!bucket) {
-            // First request - initialize with full capacity
-            bucket = {
+        // Initialize bucket if needed
+        if (!this.bucket) {
+            this.bucket = {
                 tokens: cap,
                 lastRefill: now,
                 capacity: cap,
@@ -36,35 +41,37 @@ export class RateLimiter implements DurableObject {
         }
 
         // Refill tokens based on time passed
-        const elapsedSeconds = (now - bucket.lastRefill) / 1000;
-        const tokensToAdd = elapsedSeconds * bucket.refillRate;
-        bucket.tokens = Math.min(bucket.capacity, bucket.tokens + tokensToAdd);
-        bucket.lastRefill = now;
+        const elapsedSeconds = (now - this.bucket.lastRefill) / 1000;
+        const tokensToAdd = elapsedSeconds * this.bucket.refillRate;
+        this.bucket.tokens = Math.min(this.bucket.capacity, this.bucket.tokens + tokensToAdd);
+        this.bucket.lastRefill = now;
 
         // Check if request can proceed
-        if (bucket.tokens < 1) {
-            // Save state and return rate limit error
-            await this.state.storage.put(RateLimiter.BUCKET_KEY, bucket);
-
+        if (this.bucket.tokens < 1) {
             return Response.json({
                 success: false,
-                retryAfter: (1 - bucket.tokens) / bucket.refillRate
+                retryAfter: (1 - this.bucket.tokens) / this.bucket.refillRate
             });
         }
 
-        // Consume a token and save (clamp to prevent negatives)
-        bucket.tokens = Math.max(0, bucket.tokens - 1);
-        await this.state.storage.put(RateLimiter.BUCKET_KEY, bucket);
+        // Consume a token (clamp to prevent negatives)
+        this.bucket.tokens = Math.max(0, this.bucket.tokens - 1);
 
-        // Schedule cleanup alarm if not set
-        const alarmAt = await this.state.storage.getAlarm();
-        if (!alarmAt || alarmAt < now) {
-            await this.state.storage.setAlarm(now + 300_000); // 5 minutes
+        // Periodically save to storage (not every request)
+        if (now - this.lastSave > RateLimiter.SAVE_INTERVAL) {
+            this.state.storage.put(RateLimiter.BUCKET_KEY, this.bucket); // Non-blocking
+            this.lastSave = now;
+
+            // Schedule cleanup alarm if not set
+            const alarmAt = await this.state.storage.getAlarm();
+            if (!alarmAt || alarmAt < now) {
+                await this.state.storage.setAlarm(now + 300_000); // 5 minutes
+            }
         }
 
         return Response.json({
             success: true,
-            tokensRemaining: Math.floor(bucket.tokens)
+            tokensRemaining: Math.floor(this.bucket.tokens)
         });
     }
 
