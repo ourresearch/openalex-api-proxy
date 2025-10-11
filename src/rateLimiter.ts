@@ -6,16 +6,10 @@ interface TokenBucket {
 }
 
 export class RateLimiter implements DurableObject {
-    private static readonly BUCKET_KEY = "bucket";
     private bucket: TokenBucket | null = null;
-    private lastSave: number = 0;
-    private static readonly SAVE_INTERVAL = 5000; // Save every 5 seconds
 
     constructor(private readonly state: DurableObjectState) {
-        // Load bucket from storage on startup
-        this.state.blockConcurrencyWhile(async () => {
-            this.bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY) ?? null;
-        });
+        // Bucket is initialized on first request (no persistence needed)
     }
 
     async fetch(request: Request): Promise<Response> {
@@ -64,34 +58,9 @@ export class RateLimiter implements DurableObject {
         // Consume a token (clamp to prevent negatives)
         this.bucket.tokens = Math.max(0, this.bucket.tokens - 1);
 
-        // Periodically save to storage (not every request)
-        if (now - this.lastSave > RateLimiter.SAVE_INTERVAL) {
-            this.state.storage.put(RateLimiter.BUCKET_KEY, this.bucket); // Non-blocking
-            this.lastSave = now;
-
-            // Schedule cleanup alarm if not set
-            const alarmAt = await this.state.storage.getAlarm();
-            if (!alarmAt || alarmAt < now) {
-                await this.state.storage.setAlarm(now + 300_000); // 5 minutes
-            }
-        }
-
         return Response.json({
             success: true,
             tokensRemaining: Math.floor(this.bucket.tokens)
         });
-    }
-
-    async alarm(): Promise<void> {
-        // Clean up after 10 minutes of inactivity
-        const bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY);
-        if (!bucket) return;
-
-        const now = Date.now();
-        const inactivityPeriod = now - bucket.lastRefill;
-
-        if (inactivityPeriod > 600_000) {
-            await this.state.storage.delete(RateLimiter.BUCKET_KEY);
-        }
     }
 }
