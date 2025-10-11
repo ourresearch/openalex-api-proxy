@@ -118,9 +118,16 @@ export default {
             });
         }
 
+		// Get the target API URL
         const targetApiUrl = getTargetApiUrl(url, env);
-        const openalexUrl = new URL(targetApiUrl + url.pathname);
 
+        // Get the path to forward (with prefix stripping if needed)
+        const forwardPath = getForwardPath(url, targetApiUrl, env);
+
+        // Build the final URL
+        const openalexUrl = new URL(targetApiUrl + forwardPath);
+
+        // Copy query parameters
         url.searchParams.forEach((value, key) => {
             openalexUrl.searchParams.set(key, value);
         });
@@ -270,6 +277,27 @@ function getTargetApiUrl(url: URL, env: Env): string {
         return env.EXPORTER_API_URL;
     }
     return env.OPENALEX_API_URL;
+}
+
+function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
+    const pathname = url.pathname;
+
+    if (/^\/users\/?/i.test(pathname) && targetApiUrl === env.USERS_API_URL) {
+        const forwardPath = pathname.replace(/^\/users\/?/, '/');
+        return forwardPath === '' ? '/' : forwardPath;
+    }
+
+    if (/^\/text\/?/i.test(pathname) && targetApiUrl === env.TEXT_API_URL) {
+        const forwardPath = pathname.replace(/^\/text\/?/, '/');
+        return forwardPath === '' ? '/' : forwardPath;
+    }
+
+    if (/^\/export\/?/i.test(pathname) && targetApiUrl === env.EXPORTER_API_URL) {
+        const forwardPath = pathname.replace(/^\/export\/?/, '/');
+        return forwardPath === '' ? '/' : forwardPath;
+    }
+
+    return pathname;
 }
 
 function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boolean; error?: string } {
