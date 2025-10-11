@@ -11,7 +11,7 @@ export class RateLimiter implements DurableObject {
     private lastSave: number = 0;
     private static readonly SAVE_INTERVAL = 5000; // Save every 5 seconds
 
-    constructor(private state: DurableObjectState) {
+    constructor(private readonly state: DurableObjectState) {
         // Load bucket from storage on startup
         this.state.blockConcurrencyWhile(async () => {
             this.bucket = await this.state.storage.get<TokenBucket>(RateLimiter.BUCKET_KEY) ?? null;
@@ -45,6 +45,13 @@ export class RateLimiter implements DurableObject {
         const tokensToAdd = elapsedSeconds * this.bucket.refillRate;
         this.bucket.tokens = Math.min(this.bucket.capacity, this.bucket.tokens + tokensToAdd);
         this.bucket.lastRefill = now;
+
+        // Update bucket if rate limits changed (e.g., API key tier upgraded in D1)
+        if (this.bucket.capacity !== cap || this.bucket.refillRate !== rate) {
+            this.bucket.capacity = cap;
+            this.bucket.refillRate = rate;
+            this.bucket.tokens = Math.min(this.bucket.tokens, cap); // clamp to new capacity
+        }
 
         // Check if request can proceed
         if (this.bucket.tokens < 1) {
