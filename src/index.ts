@@ -37,7 +37,7 @@ export default {
 
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
-        let maxPerSecond = 10;
+        let maxPerSecond = 5;  // Default rate limit for unauthenticated users
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
