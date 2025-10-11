@@ -91,7 +91,7 @@ export default {
             method: "POST",
             body: JSON.stringify({
                 limit,
-                burstCapacity: limit * 2
+                burstCapacity: limit * 1.5
             })
         }).then(res => res.json<{
             success: boolean;
