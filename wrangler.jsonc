@@ -7,7 +7,8 @@
 	"preview_urls": true,
 	"keep_vars": true,  // warning: this allows us to put plain text settings in the UI. If false it will delete them.
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"head_sampling_rate": 0.30
 	},
 	"d1_databases": [
 		{
