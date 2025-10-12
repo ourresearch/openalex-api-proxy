@@ -44,7 +44,7 @@ export default {
             if (!authResult.valid) {
                 // Log invalid API key attempts for security monitoring
                 console.warn("Invalid API key attempt", {
-                    apiKey: apiKey,
+                    invalidKey: apiKey,
                     ip: req.headers.get("CF-Connecting-IP"),
                     path: url.pathname,
                     error: authResult.error,
