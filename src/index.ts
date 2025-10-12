@@ -29,7 +29,7 @@ export default {
             });
         }
 
-        if (req.method !== "GET") {
+        if (req.method !== "GET" && req.method !== "HEAD") {
             return addCorsHeaders(new Response("Method Not Allowed", { status: 405 }));
         }
 
@@ -42,6 +42,14 @@ export default {
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
             if (!authResult.valid) {
+                // Log invalid API key attempts for security monitoring
+                console.warn("Invalid API key attempt", {
+                    apiKey: apiKey,
+                    ip: req.headers.get("CF-Connecting-IP"),
+                    path: url.pathname,
+                    error: authResult.error,
+                    userAgent: req.headers.get("User-Agent")
+                });
                 return json(401, {
                     error: "Invalid or missing API key",
                     message: authResult.error || "Provide a valid API key"
