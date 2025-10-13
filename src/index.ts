@@ -213,15 +213,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             return result;
         }
 
-        if (keyData.expires_at) {
-            const expiresAt = new Date(keyData.expires_at as string);
-            if (expiresAt <= new Date()) {
-                const result = { valid: false, error: `API key expired on ${keyData.expires_at}` };
-                API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
-                return result;
-            }
-        }
-
+        // API key exists - consider it valid (expiration checking removed)
         const result = {
             valid: true,
             maxPerSecond: keyData.max_per_second as number
