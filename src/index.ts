@@ -1,14 +1,5 @@
 import { RateLimiter } from "./rateLimiter";
 
-// In-memory cache for API key validation
-const API_KEY_CACHE = new Map<string, {
-    valid: boolean;
-    maxPerSecond?: number;
-    error?: string;
-    cachedAt: number;
-}>();
-const CACHE_TTL = 60000; // 60 seconds
-
 export interface Env {
     openalex_db: D1Database;
     RATE_LIMITER: DurableObjectNamespace;
@@ -17,6 +8,15 @@ export interface Env {
     TEXT_API_URL: string;
     USERS_API_URL: string;
 }
+
+// In-memory cache for API key validation
+const API_KEY_CACHE = new Map<string, {
+    valid: boolean;
+    maxPerSecond?: number;
+    error?: string;
+    cachedAt: number;
+}>();
+const CACHE_TTL = 60000; // 60 seconds
 
 export { RateLimiter };
 
@@ -126,16 +126,12 @@ export default {
             });
         }
 
-		// Get the target API URL
         const targetApiUrl = getTargetApiUrl(url, env);
 
-        // Get the path to forward (with prefix stripping if needed)
         const forwardPath = getForwardPath(url, targetApiUrl, env);
 
-        // Build the final URL
         const openalexUrl = new URL(targetApiUrl + forwardPath);
 
-        // Copy query parameters
         url.searchParams.forEach((value, key) => {
             openalexUrl.searchParams.set(key, value);
         });
@@ -230,9 +226,9 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
 function getCorsHeaders(): Headers {
     const headers = new Headers();
     headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, PATCH");
-    headers.set("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Accept-Encoding, Authorization, Cache-Control");
-    headers.set("Access-Control-Expose-Headers", "Authorization, Cache-Control, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After");
+    headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization");
+    headers.set("Access-Control-Expose-Headers", "Cache-Control, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After");
     return headers;
 }
 
