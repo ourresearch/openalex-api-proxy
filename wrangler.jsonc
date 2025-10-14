@@ -10,6 +10,12 @@
 		"enabled": true,
 		"head_sampling_rate": 0.30
 	},
+	"analytics_engine_datasets": [
+		{
+			"binding": "ANALYTICS",
+			"dataset": "openalex_requests"
+		}
+	],
 	"d1_databases": [
 		{
 			"binding": "openalex_db",

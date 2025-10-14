@@ -3,6 +3,7 @@ import { RateLimiter } from "./rateLimiter";
 export interface Env {
     openalex_db: D1Database;
     RATE_LIMITER: DurableObjectNamespace;
+    ANALYTICS: AnalyticsEngineDataset;
     OPENALEX_API_URL: string;
     EXPORTER_API_URL: string;
     TEXT_API_URL: string;
@@ -21,7 +22,9 @@ const CACHE_TTL = 60000; // 60 seconds
 export { RateLimiter };
 
 export default {
-    async fetch(req: Request, env: Env): Promise<Response> {
+    async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+        const startTime = Date.now();
+
         if (req.method === "OPTIONS") {
             return new Response(null, {
                 status: 204,
@@ -152,11 +155,39 @@ export default {
         newHeaders.set("RateLimit-Remaining", Math.floor(rateLimitResult.tokensRemaining || 0).toString());
         newHeaders.set("RateLimit-Reset", "1");
 
-        return addCorsHeaders(new Response(response.body, {
+        const finalResponse = addCorsHeaders(new Response(response.body, {
             status: response.status,
             statusText: response.statusText,
             headers: newHeaders
         }));
+
+        // Log analytics
+        const responseTime = Date.now() - startTime;
+        ctx.waitUntil(
+            Promise.resolve().then(() => {
+                try {
+                    env.ANALYTICS.writeDataPoint({
+                        indexes: [apiKey || 'anonymous'],
+                        blobs: [
+                            req.headers.get('CF-Connecting-IP') || 'unknown',
+                            url.pathname + url.search,
+                            req.method,
+                            scope
+                        ],
+                        doubles: [
+                            responseTime,
+                            response.status,
+                            limit,
+                            Math.floor(rateLimitResult.tokensRemaining || 0)
+                        ]
+                    });
+                } catch (error) {
+                    console.error('Analytics write failed:', error);
+                }
+            })
+        );
+
+        return finalResponse;
     }
 } satisfies ExportedHandler<Env>;
 
