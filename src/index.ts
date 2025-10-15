@@ -1,4 +1,5 @@
 import { RateLimiter } from "./rateLimiter";
+import { logAnalytics } from "./analytics";
 
 export interface Env {
     openalex_db: D1Database;
@@ -53,10 +54,27 @@ export default {
                     error: authResult.error,
                     userAgent: req.headers.get("User-Agent")
                 });
-                return json(401, {
+
+                const errorResponse = json(401, {
                     error: "Invalid or missing API key",
                     message: authResult.error || "Provide a valid API key"
                 });
+
+                // Log 401 error
+                logAnalytics({
+                    ctx,
+                    env,
+                    apiKey,
+                    req,
+                    url,
+                    scope: 'main',
+                    responseTime: Date.now() - startTime,
+                    statusCode: 401,
+                    rateLimit: 0,
+                    rateLimitRemaining: 0
+                });
+
+                return errorResponse;
             }
             hasValidApiKey = true;
             maxPerSecond = authResult.maxPerSecond || 50;
@@ -64,10 +82,26 @@ export default {
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
         if (!protectedParamCheck.valid) {
-            return json(403, {
+            const errorResponse = json(403, {
                 error: "Forbidden",
                 message: protectedParamCheck.error
             });
+
+            // Log 403 error
+            logAnalytics({
+                ctx,
+                env,
+                apiKey,
+                req,
+                url,
+                scope: 'main',
+                responseTime: Date.now() - startTime,
+                statusCode: 403,
+                rateLimit: 0,
+                rateLimitRemaining: 0
+            });
+
+            return errorResponse;
         }
 
         // Determine rate limits based on path
@@ -112,7 +146,7 @@ export default {
 
         // Handle rate limit exceeded
         if (!rateLimitResult.success) {
-            return new Response(JSON.stringify({
+            const errorResponse = new Response(JSON.stringify({
                 error: "Rate limit exceeded",
                 message: `You have exceeded the rate limit of ${limit} requests per second. Please try again later.`,
                 retryAfter: rateLimitResult.retryAfter
@@ -127,6 +161,22 @@ export default {
                     ...Object.fromEntries(getCorsHeaders())
                 }
             });
+
+            // Log 429 error
+            logAnalytics({
+                ctx,
+                env,
+                apiKey,
+                req,
+                url,
+                scope,
+                responseTime: Date.now() - startTime,
+                statusCode: 429,
+                rateLimit: limit,
+                rateLimitRemaining: 0
+            });
+
+            return errorResponse;
         }
 
         const targetApiUrl = getTargetApiUrl(url, env);
@@ -161,31 +211,19 @@ export default {
             headers: newHeaders
         }));
 
-        // Log analytics
-        const responseTime = Date.now() - startTime;
-        ctx.waitUntil(
-            Promise.resolve().then(() => {
-                try {
-                    env.ANALYTICS.writeDataPoint({
-                        indexes: [apiKey || 'anonymous'],
-                        blobs: [
-                            req.headers.get('CF-Connecting-IP') || 'unknown',
-                            url.pathname + url.search,
-                            req.method,
-                            scope
-                        ],
-                        doubles: [
-                            responseTime,
-                            response.status,
-                            limit,
-                            Math.floor(rateLimitResult.tokensRemaining || 0)
-                        ]
-                    });
-                } catch (error) {
-                    console.error('Analytics write failed:', error);
-                }
-            })
-        );
+        // Log analytics for successful requests
+        logAnalytics({
+            ctx,
+            env,
+            apiKey,
+            req,
+            url,
+            scope,
+            responseTime: Date.now() - startTime,
+            statusCode: response.status,
+            rateLimit: limit,
+            rateLimitRemaining: Math.floor(rateLimitResult.tokensRemaining || 0)
+        });
 
         return finalResponse;
     }
