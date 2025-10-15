@@ -4,7 +4,7 @@ function hashIpToBucket(ip: string): number {
         hash = ((hash << 5) - hash) + ip.charCodeAt(i);
         hash = hash & hash;
     }
-    return Math.abs(hash) % 1024;
+    return Math.abs(hash) % 2048;
 }
 
 export function logAnalytics(params: {
@@ -22,7 +22,7 @@ export function logAnalytics(params: {
     params.ctx.waitUntil(
         (async () => {
             try {
-                // For anonymous users, hash their IP into 1024 buckets
+                // For anonymous users, hash their IP into buckets
                 let indexKey: string;
                 if (params.apiKey) {
                     indexKey = params.apiKey;
