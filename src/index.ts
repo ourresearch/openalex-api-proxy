@@ -132,11 +132,14 @@ export default {
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
+        // Apply burst capacity only for anonymous users
+        const burstCapacity = apiKey ? limit : limit * 2;
+
         const rateLimitResult = await limiter.fetch("http://internal/check", {
             method: "POST",
             body: JSON.stringify({
                 limit,
-                burstCapacity: limit * 1.5
+                burstCapacity
             })
         }).then(res => res.json<{
             success: boolean;
