@@ -33,7 +33,7 @@ export default {
             });
         }
 
-        if (req.method !== "GET" && req.method !== "HEAD") {
+        if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "POST") {
             return addCorsHeaders(new Response("Method Not Allowed", { status: 405 }));
         }
 
@@ -298,8 +298,8 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
 function getCorsHeaders(): Headers {
     const headers = new Headers();
     headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-    headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization");
+    headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
+    headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type");
     headers.set("Access-Control-Expose-Headers", "Cache-Control, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After");
     return headers;
 }
