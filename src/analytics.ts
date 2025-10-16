@@ -22,25 +22,29 @@ export function logAnalytics(params: {
     params.ctx.waitUntil(
         (async () => {
             try {
-                // For anonymous users, hash their IP into buckets
-                let indexKey: string;
+                // Build index key with status code for easy filtering
+                let userKey: string;
                 if (params.apiKey) {
-                    indexKey = params.apiKey;
+                    userKey = params.apiKey;
                 } else {
                     const ip = params.req.headers.get('CF-Connecting-IP') || 'unknown';
                     const bucket = hashIpToBucket(ip);
-                    indexKey = `anon_${bucket}`;
+                    userKey = `anon_${bucket}`;
                 }
+
+                // Include status code in index for filtering
+                const indexKey = `${userKey}_${params.statusCode}`;
 
                 params.env.ANALYTICS.writeDataPoint({
                     indexes: [indexKey],
 
                     // Blobs: text data (not for aggregation)
                     blobs: [
-                        params.req.headers.get('CF-Connecting-IP') || 'unknown',  // blob1: IP address
-                        params.url.pathname + params.url.search,                  // blob2: full URL path
-                        params.req.method,                                         // blob3: HTTP method
-                        params.scope                                               // blob4: scope
+                        params.apiKey || '',                                      // blob1: API key (empty for anonymous)
+                        params.req.headers.get('CF-Connecting-IP') || 'unknown',  // blob2: IP address
+                        params.url.pathname + params.url.search,                  // blob3: full URL path
+                        params.req.method,                                         // blob4: HTTP method
+                        params.scope                                               // blob5: scope
                     ],
 
                     // Doubles: numeric data (for aggregation/math)

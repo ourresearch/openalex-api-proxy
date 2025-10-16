@@ -13,7 +13,7 @@
 	"analytics_engine_datasets": [
 		{
 			"binding": "ANALYTICS",
-			"dataset": "openalex_requests"
+			"dataset": "openalex_requests_v2"
 		}
 	],
 	"d1_databases": [
