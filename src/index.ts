@@ -192,12 +192,22 @@ export default {
             openalexUrl.searchParams.set(key, value);
         });
 
+        // For POST requests, we need to clone the request to preserve the body
+        const proxyHeaders = new Headers({
+            "User-Agent": "OpenAlex-Proxy/1.0",
+            "Accept": req.headers.get("Accept") || "application/json",
+            "Accept-Encoding": req.headers.get("Accept-Encoding") || ""
+        });
+
+        // Only add Content-Type for POST requests
+        if (req.method === "POST") {
+            proxyHeaders.set("Content-Type", req.headers.get("Content-Type") || "application/json");
+        }
+
         const proxyReq = new Request(openalexUrl.toString(), {
             method: req.method,
-            headers: {
-                "User-Agent": "OpenAlex-Proxy/1.0",
-                "Accept": req.headers.get("Accept") || "application/json"
-            }
+            headers: proxyHeaders,
+            body: req.method === "POST" ? await req.clone().arrayBuffer() : undefined
         });
 
         const response = await fetch(proxyReq);
@@ -356,8 +366,7 @@ function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
     }
 
     if (/^\/text\/?/i.test(pathname) && targetApiUrl === env.TEXT_API_URL) {
-        const forwardPath = pathname.replace(/^\/text\/?/, '/');
-        return forwardPath === '' ? '/' : forwardPath;
+        return pathname;
     }
 
     if (/^\/export\/?/i.test(pathname) && targetApiUrl === env.EXPORTER_API_URL) {
