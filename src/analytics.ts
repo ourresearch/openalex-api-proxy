@@ -44,7 +44,9 @@ export function logAnalytics(params: {
                         params.req.headers.get('CF-Connecting-IP') || 'unknown',  // blob2: IP address
                         params.url.pathname + params.url.search,                  // blob3: full URL path
                         params.req.method,                                         // blob4: HTTP method
-                        params.scope                                               // blob5: scope
+                        params.scope,                                              // blob5: scope
+                        params.req.headers.get('User-Agent') || '',               // blob6: user agent
+                        params.req.headers.get('Referer') || ''                   // blob7: referrer
                     ],
 
                     // Doubles: numeric data (for aggregation/math)
