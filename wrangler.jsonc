@@ -8,7 +8,7 @@
 	"keep_vars": true,  // warning: this allows us to put plain text settings in the UI. If false it will delete them.
 	"observability": {
 		"enabled": true,
-		"head_sampling_rate": 0.30
+		"head_sampling_rate": 0.10
 	},
 	"analytics_engine_datasets": [
 		{
