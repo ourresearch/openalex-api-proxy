@@ -380,7 +380,7 @@ function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
 function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boolean; error?: string } {
     const filterParam = url.searchParams.get('filter');
     if (filterParam) {
-        const filterPattern = /(?:from|to)_(?:updated|created)_date:[><]?\d{4}-\d{2}-\d{2}/;
+        const filterPattern = /(?:from_|to_)?(?:updated|created)_date:[><]?\d{4}-\d{2}-\d{2}/;
         const matches = filterParam.match(filterPattern);
         if (matches && !hasValidApiKey) {
             return {
@@ -392,7 +392,7 @@ function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boole
 
     const sortParam = url.searchParams.get('sort');
     if (sortParam) {
-        const sortPattern = /(?:from|to)_(?:updated|created)_date(?::(?:asc|desc))?/;
+        const sortPattern = /(?:from_|to_)?(?:updated|created)_date(?::(?:asc|desc))?/;
         const matches = sortParam.match(sortPattern);
         if (matches && !hasValidApiKey) {
             return {
