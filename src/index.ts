@@ -14,7 +14,7 @@ export interface Env {
 // In-memory cache for API key validation
 const API_KEY_CACHE = new Map<string, {
     valid: boolean;
-    maxPerSecond?: number;
+    maxPerDay?: number;
     error?: string;
     cachedAt: number;
 }>();
@@ -41,7 +41,7 @@ export default {
 
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
-        let maxPerSecond = 5;  // Default rate limit for unauthenticated users
+        let maxPerDay = 100000;  // Default daily rate limit for unauthenticated users
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -77,7 +77,7 @@ export default {
                 return errorResponse;
             }
             hasValidApiKey = true;
-            maxPerSecond = authResult.maxPerSecond || 50;
+            maxPerDay = authResult.maxPerDay || 100000;
         }
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
@@ -116,11 +116,11 @@ export default {
 
         let limit: number;
         if (isTextPath) {
-            limit = 5;
+            limit = 1000;
         } else if (isUsersPath || isExportPath) {
-            limit = 10;
+            limit = 2000;
         } else {
-            limit = maxPerSecond;
+            limit = maxPerDay;
         }
 
         // Create rate limit key
@@ -132,35 +132,43 @@ export default {
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
-        // Apply burst capacity only for anonymous users
-        const burstCapacity = apiKey ? limit : limit * 2;
-
-        const rateLimitResult = await limiter.fetch("http://internal/check", {
-            method: "POST",
-            body: JSON.stringify({
-                limit,
-                burstCapacity
-            })
-        }).then(res => res.json<{
+        let rateLimitResult: {
             success: boolean;
             retryAfter?: number;
-            tokensRemaining?: number;
-        }>());
+            remaining?: number;
+            limitType?: 'per_second' | 'daily';
+        };
+
+        try {
+            rateLimitResult = await limiter.fetch("http://internal/check", {
+                method: "POST",
+                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100 })
+            }).then(res => res.json());
+        } catch (error) {
+            // If DO fails, allow the request through but log the error
+            console.error("Rate limiter DO error:", error);
+            rateLimitResult = { success: true, remaining: limit };
+        }
 
         // Handle rate limit exceeded
         if (!rateLimitResult.success) {
+            const isPerSecond = rateLimitResult.limitType === 'per_second';
+            const message = isPerSecond
+                ? `You have exceeded the rate limit of 100 requests per second. Please slow down.`
+                : `You have exceeded the rate limit of ${limit} requests per day. Please try again tomorrow.`;
+
             const errorResponse = new Response(JSON.stringify({
                 error: "Rate limit exceeded",
-                message: `You have exceeded the rate limit of ${limit} requests per second. Please try again later.`,
+                message,
                 retryAfter: rateLimitResult.retryAfter
             }), {
                 status: 429,
                 headers: {
                     "Content-Type": "application/json",
                     "Retry-After": Math.ceil(rateLimitResult.retryAfter || 1).toString(),
-                    "RateLimit-Limit": limit.toString(),
+                    "RateLimit-Limit": isPerSecond ? "100" : limit.toString(),
                     "RateLimit-Remaining": "0",
-                    "RateLimit-Reset": "1",
+                    "RateLimit-Reset": Math.ceil(rateLimitResult.retryAfter || 1).toString(),
                     ...Object.fromEntries(getCorsHeaders())
                 }
             });
@@ -215,8 +223,8 @@ export default {
         // Return response with rate limit headers
         const newHeaders = new Headers(response.headers);
         newHeaders.set("RateLimit-Limit", limit.toString());
-        newHeaders.set("RateLimit-Remaining", Math.floor(rateLimitResult.tokensRemaining || 0).toString());
-        newHeaders.set("RateLimit-Reset", "1");
+        newHeaders.set("RateLimit-Remaining", (rateLimitResult.remaining ?? 0).toString());
+        newHeaders.set("RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
 
         const finalResponse = addCorsHeaders(new Response(response.body, {
             status: response.status,
@@ -235,7 +243,7 @@ export default {
             responseTime: Date.now() - startTime,
             statusCode: response.status,
             rateLimit: limit,
-            rateLimitRemaining: Math.floor(rateLimitResult.tokensRemaining || 0)
+            rateLimitRemaining: rateLimitResult.remaining ?? 0
         });
 
         return finalResponse;
@@ -262,7 +270,7 @@ function getApiKeyFromRequest(req: Request): string | null {
     );
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerSecond?: number}> {
+async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number}> {
     const apiKey = getApiKeyFromRequest(req);
     if (!apiKey) return { valid: false };
 
@@ -274,14 +282,14 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         return {
             valid: cached.valid,
             error: cached.error,
-            maxPerSecond: cached.maxPerSecond
+            maxPerDay: cached.maxPerDay
         };
     }
 
     // Cache miss - query D1
     try {
         const keyData = await env.openalex_db
-            .prepare("SELECT expires_at, max_per_second FROM api_keys WHERE api_key = ?")
+            .prepare("SELECT max_per_day FROM api_keys WHERE api_key = ?")
             .bind(apiKey)
             .first();
 
@@ -294,7 +302,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         // API key exists - consider it valid (expiration checking removed)
         const result = {
             valid: true,
-            maxPerSecond: keyData.max_per_second as number
+            maxPerDay: keyData.max_per_day as number
         };
         API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
         return result;
@@ -415,4 +423,12 @@ function json(status: number, data: unknown): Response {
         headers.set(key, value);
     });
     return new Response(JSON.stringify(data), { status, headers });
+}
+
+function getSecondsUntilMidnightUTC(): number {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    tomorrow.setUTCHours(0, 0, 0, 0);
+    return Math.ceil((tomorrow.getTime() - now.getTime()) / 1000);
 }
