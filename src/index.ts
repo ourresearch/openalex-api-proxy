@@ -289,7 +289,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
     // Cache miss - query D1
     try {
         const keyData = await env.openalex_db
-            .prepare("SELECT max_per_day FROM api_keys_slim WHERE api_key = ?")
+            .prepare("SELECT max_per_day FROM api_keys WHERE api_key = ?")
             .bind(apiKey)
             .first();
 
