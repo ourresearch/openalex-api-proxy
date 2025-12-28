@@ -6,9 +6,7 @@ export interface Env {
     RATE_LIMITER: DurableObjectNamespace;
     ANALYTICS: AnalyticsEngineDataset;
     OPENALEX_API_URL: string;
-    EXPORTER_API_URL: string;
     TEXT_API_URL: string;
-    USERS_API_URL: string;
 }
 
 // In-memory cache for API key validation
@@ -104,27 +102,24 @@ export default {
             return errorResponse;
         }
 
-        // Determine rate limits based on path
+        // Handle /rate-limit endpoint
         const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+        if (normalizedPath === 'rate-limit') {
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxPerDay);
+        }
+
+        // Determine rate limits based on path
         const isTextPath = /^text\/?/.test(normalizedPath);
-        const isUsersPath = /^users\/?/.test(normalizedPath);
-        const isExportPath = /^export\/?/.test(normalizedPath) ||
-                            /^(?:works\/+)?[wW]\d+\.bib$/.test(normalizedPath) ||
-                            (/^works\/?/.test(normalizedPath) &&
-                             url.searchParams.get('format') &&
-                             ['csv', 'ris', 'wos-plaintext', 'zip'].includes(url.searchParams.get('format')?.trim().toLowerCase() || ''));
 
         let limit: number;
         if (isTextPath) {
             limit = 1000;
-        } else if (isUsersPath || isExportPath) {
-            limit = 2000;
         } else {
             limit = maxPerDay;
         }
 
         // Create rate limit key
-        const scope = isTextPath ? "text" : isUsersPath ? "users" : isExportPath ? "export" : "main";
+        const scope = isTextPath ? "text" : "main";
         const identifier = apiKey || req.headers.get("CF-Connecting-IP") || "anon";
         const rateLimitKey = `${scope}:${identifier}`;
 
@@ -337,49 +332,18 @@ function addCorsHeaders(response: Response): Response {
 
 function getTargetApiUrl(url: URL, env: Env): string {
     const pathname = url.pathname;
-    const normalizedPath = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
-    const hasQueryParams = url.search.length > 0;
+    const normalizedPath = pathname.replace(/^\/*|\/*$/g, '').toLowerCase();
 
     if (/^text\/?/.test(normalizedPath)) {
         return env.TEXT_API_URL;
-    }
-    if (/^users\/?/.test(normalizedPath)) {
-        return env.USERS_API_URL;
-    }
-    if (/^(?:works\/+)?[wW]\d+\.bib$/.test(normalizedPath) && !hasQueryParams) {
-        return env.EXPORTER_API_URL;
-    }
-    if (/^works\/?/.test(normalizedPath)) {
-        const format = url.searchParams.get('format');
-        const groupBy = url.searchParams.get('group_by');
-        const groupBys = url.searchParams.get('group_bys');
-        if (format &&
-            ['csv', 'ris', 'wos-plaintext', 'zip'].includes(format.trim().toLowerCase()) &&
-            !groupBy && !groupBys) {
-            return env.EXPORTER_API_URL;
-        }
-    }
-    if (/^export\/?/.test(normalizedPath)) {
-        return env.EXPORTER_API_URL;
     }
     return env.OPENALEX_API_URL;
 }
 
 function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
     const pathname = url.pathname;
-
-    if (/^\/users\/?/i.test(pathname) && targetApiUrl === env.USERS_API_URL) {
-        const forwardPath = pathname.replace(/^\/users\/?/, '/');
-        return forwardPath === '' ? '/' : forwardPath;
-    }
-
     if (/^\/text\/?/i.test(pathname) && targetApiUrl === env.TEXT_API_URL) {
         return pathname;
-    }
-
-    if (/^\/export\/?/i.test(pathname) && targetApiUrl === env.EXPORTER_API_URL) {
-        const forwardPath = pathname.replace(/^\/export\/?/, '/');
-        return forwardPath === '' ? '/' : forwardPath;
     }
 
     return pathname;
@@ -431,4 +395,59 @@ function getSecondsUntilMidnightUTC(): number {
     tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     tomorrow.setUTCHours(0, 0, 0, 0);
     return Math.ceil((tomorrow.getTime() - now.getTime()) / 1000);
+}
+
+function getMidnightUTCISO(): string {
+    const tomorrow = new Date();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    tomorrow.setUTCHours(0, 0, 0, 0);
+    return tomorrow.toISOString();
+}
+
+function maskApiKey(apiKey: string): string {
+    if (apiKey.length <= 6) return '***';
+    return apiKey.slice(0, 3) + '...' + apiKey.slice(-3);
+}
+
+async function handleRateLimitEndpoint(
+    req: Request,
+    env: Env,
+    apiKey: string | null,
+    hasValidApiKey: boolean,
+    maxPerDay: number
+): Promise<Response> {
+    // Require a valid API key
+    if (!hasValidApiKey || !apiKey) {
+        return json(401, {
+            error: "Authentication required",
+            message: "You must provide a valid API key to check rate limit status"
+        });
+    }
+
+    // Query the rate limiter DO for current status (without incrementing)
+    const rateLimitKey = `main:${apiKey}`;
+    const id = env.RATE_LIMITER.idFromName(rateLimitKey);
+    const limiter = env.RATE_LIMITER.get(id);
+
+    let statusResult: { used: number; remaining: number };
+    try {
+        statusResult = await limiter.fetch("http://internal/status", {
+            method: "POST",
+            body: JSON.stringify({ dailyLimit: maxPerDay })
+        }).then(res => res.json());
+    } catch (error) {
+        console.error("Rate limiter status error:", error);
+        statusResult = { used: 0, remaining: maxPerDay };
+    }
+
+    return json(200, {
+        api_key: maskApiKey(apiKey),
+        rate_limit: {
+            limit: maxPerDay,
+            used: statusResult.used,
+            remaining: statusResult.remaining,
+            resets_at: getMidnightUTCISO(),
+            resets_in_seconds: getSecondsUntilMidnightUTC()
+        }
+    });
 }

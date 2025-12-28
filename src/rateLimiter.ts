@@ -59,44 +59,19 @@ export class RateLimiter implements DurableObject {
     }
 
     async fetch(request: Request): Promise<Response> {
-        const { dailyLimit, perSecondLimit } = await request.json<{
+        const url = new URL(request.url);
+        const body = await request.json<{
             dailyLimit: number;
-            perSecondLimit: number;
+            perSecondLimit?: number;
         }>();
+        const { dailyLimit, perSecondLimit } = body;
 
         const now = Date.now();
-
-        // --- 1. Per-Second Limit (Memory Only) ---
-        if (!this.perSecondBucket) {
-            this.perSecondBucket = { tokens: perSecondLimit, lastRefill: now };
-        }
-
-        const elapsedSeconds = (now - this.perSecondBucket.lastRefill) / 1000;
-        if (elapsedSeconds > 0) {
-            this.perSecondBucket.tokens = Math.min(
-                perSecondLimit,
-                this.perSecondBucket.tokens + (elapsedSeconds * perSecondLimit)
-            );
-            this.perSecondBucket.lastRefill = now;
-        }
-
-        if (this.perSecondBucket.tokens < 1) {
-            const retryAfter = (1 - this.perSecondBucket.tokens) / perSecondLimit;
-            return Response.json({
-                success: false,
-                remaining: 0,
-                retryAfter,
-                limitType: 'per_second'
-            });
-        }
-
-        // --- 2. Daily Limit ---
         const today = new Date().toISOString().split('T')[0];
 
         // Handle day rollover
         if (this.dailyCounter!.date !== today) {
             if (this.dailyCounter!.dirty) {
-                // Must await here to ensure yesterday's data is saved before we zero it out
                 await this.persist();
             }
             this.dailyCounter = {
@@ -105,6 +80,38 @@ export class RateLimiter implements DurableObject {
                 lastPersisted: now,
                 dirty: false
             };
+        }
+
+        // Status endpoint - returns current usage without incrementing
+        if (url.pathname === '/status') {
+            return Response.json({
+                used: this.dailyCounter!.count,
+                remaining: Math.max(0, dailyLimit - this.dailyCounter!.count)
+            });
+        }
+
+        // --- 1. Per-Second Limit (Memory Only) ---
+        if (!this.perSecondBucket) {
+            this.perSecondBucket = { tokens: perSecondLimit!, lastRefill: now };
+        }
+
+        const elapsedSeconds = (now - this.perSecondBucket.lastRefill) / 1000;
+        if (elapsedSeconds > 0) {
+            this.perSecondBucket.tokens = Math.min(
+                perSecondLimit!,
+                this.perSecondBucket.tokens + (elapsedSeconds * perSecondLimit!)
+            );
+            this.perSecondBucket.lastRefill = now;
+        }
+
+        if (this.perSecondBucket.tokens < 1) {
+            const retryAfter = (1 - this.perSecondBucket.tokens) / perSecondLimit!;
+            return Response.json({
+                success: false,
+                remaining: 0,
+                retryAfter,
+                limitType: 'per_second'
+            });
         }
 
         if (this.dailyCounter!.count >= dailyLimit) {
