@@ -89,13 +89,6 @@ export default {
             maxPerDay = authResult.maxPerDay ?? 100000;
             maxCreditsPerDay = authResult.maxCreditsPerDay ?? maxPerDay;
             isGrandfathered = authResult.isGrandfathered || false;
-
-            // 2026-01-28: TEMPORARY HACK - throttle jenni.ai during API slowdown incident
-            // Their title.search queries are contributing to ES cluster stress
-            // TODO: Remove this once API is stable
-            if (apiKey === "AmZLwH58h62pBmv7DkDjPK") {
-                maxCreditsPerDay = 351000;  // Effectively turns them off for rest of day
-            }
         }
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
