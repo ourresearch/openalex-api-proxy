@@ -63,8 +63,9 @@ export class RateLimiter implements DurableObject {
         const body = await request.json<{
             dailyLimit: number;
             perSecondLimit?: number;
+            credits?: number;
         }>();
-        const { dailyLimit, perSecondLimit } = body;
+        const { dailyLimit, perSecondLimit, credits = 1 } = body;
 
         const now = Date.now();
         const today = new Date().toISOString().split('T')[0];
@@ -86,6 +87,19 @@ export class RateLimiter implements DurableObject {
         if (url.pathname === '/status') {
             return Response.json({
                 used: this.dailyCounter!.count,
+                remaining: Math.max(0, dailyLimit - this.dailyCounter!.count)
+            });
+        }
+
+        // Refund endpoint - returns credits when actual cost < charged cost
+        if (url.pathname === '/refund') {
+            const refundAmount = Math.min(credits, this.dailyCounter!.count);
+            if (refundAmount > 0) {
+                this.dailyCounter!.count -= refundAmount;
+                this.dailyCounter!.dirty = true;
+            }
+            return Response.json({
+                refunded: refundAmount,
                 remaining: Math.max(0, dailyLimit - this.dailyCounter!.count)
             });
         }
@@ -114,21 +128,22 @@ export class RateLimiter implements DurableObject {
             });
         }
 
-        if (this.dailyCounter!.count >= dailyLimit) {
+        if (this.dailyCounter!.count + credits > dailyLimit) {
             const tomorrow = new Date();
             tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
             tomorrow.setUTCHours(0, 0, 0, 0);
             return Response.json({
                 success: false,
-                remaining: 0,
+                remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
                 retryAfter: Math.ceil((tomorrow.getTime() - now) / 1000),
-                limitType: 'daily'
+                limitType: 'daily',
+                creditsRequired: credits
             });
         }
 
-        // Increment
+        // Increment by credits consumed
         this.perSecondBucket.tokens -= 1;
-        this.dailyCounter!.count++;
+        this.dailyCounter!.count += credits;
 
         // --- 3. Persistence Strategy ---
 
@@ -145,7 +160,8 @@ export class RateLimiter implements DurableObject {
 
         return Response.json({
             success: true,
-            remaining: dailyLimit - this.dailyCounter!.count
+            remaining: dailyLimit - this.dailyCounter!.count,
+            creditsUsed: credits
         });
     }
 

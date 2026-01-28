@@ -18,6 +18,8 @@ export function logAnalytics(params: {
     statusCode: number;
     rateLimit: number;
     rateLimitRemaining: number;
+    endpointType?: string;
+    creditCost?: number;
 }): void {
     params.ctx.waitUntil(
         (async () => {
@@ -46,15 +48,17 @@ export function logAnalytics(params: {
                         params.req.method,                                         // blob4: HTTP method
                         params.scope,                                              // blob5: scope
                         params.req.headers.get('User-Agent') || '',               // blob6: user agent
-                        params.req.headers.get('Referer') || ''                   // blob7: referrer
+                        params.req.headers.get('Referer') || '',                  // blob7: referrer
+                        params.endpointType || 'unknown'                          // blob8: endpoint type (singleton, list, text, etc.)
                     ],
 
                     // Doubles: numeric data (for aggregation/math)
                     doubles: [
                         params.responseTime,        // double1: response time (ms)
                         params.statusCode,          // double2: HTTP status
-                        params.rateLimit,           // double3: rate limit
-                        params.rateLimitRemaining   // double4: tokens remaining
+                        params.rateLimit,           // double3: rate limit (credits)
+                        params.rateLimitRemaining,  // double4: credits remaining
+                        params.creditCost || 1      // double5: credits consumed for this request
                     ]
                 });
             } catch (error) {

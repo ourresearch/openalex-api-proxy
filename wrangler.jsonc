@@ -3,6 +3,7 @@
 	"name": "openalex-api-proxy",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-10-03",
+	"compatibility_flags": ["nodejs_compat"],
 	"workers_dev": true,
 	"preview_urls": true,
 	"keep_vars": true,  // warning: this allows us to put plain text settings in the UI. If false it will delete them.
@@ -16,6 +17,13 @@
 			"dataset": "openalex_requests_v2"
 		}
 	],
+	"hyperdrive": [
+		{
+			"binding": "HYPERDRIVE",
+			"id": "0631da2956b94f12812215860e67cc2b"
+		}
+	],
+	// D1 kept for rollback - remove after Hyperdrive is verified
 	"d1_databases": [
 		{
 			"binding": "openalex_db",
@@ -24,10 +32,8 @@
 		}
 	],
 	"routes": [
-		{
-		  "pattern": "api.openalex.org/*",
-		  "zone_name": "openalex.org"
-		}
+		{ "pattern": "api.openalex.org/*", "zone_name": "openalex.org" },
+		{ "pattern": "content.openalex.org/*", "zone_name": "openalex.org" }
 	],
 	"durable_objects": {
 		"bindings": [
@@ -43,6 +49,12 @@
 			"new_classes": [
 				"RateLimiter"
 			]
+		}
+	],
+	"services": [
+		{
+			"binding": "CONTENT_WORKER",
+			"service": "openalex-content-worker"
 		}
 	]
 }

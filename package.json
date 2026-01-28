@@ -11,8 +11,12 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@types/pg": "^8.16.0",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.42.0"
+	},
+	"dependencies": {
+		"pg": "^8.17.1"
 	}
 }

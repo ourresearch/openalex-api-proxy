@@ -1,18 +1,24 @@
+import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics } from "./analytics";
+import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
 
 export interface Env {
-    openalex_db: D1Database;
+    HYPERDRIVE: Hyperdrive;
+    openalex_db: D1Database;  // Keep for rollback - remove after Hyperdrive verified
     RATE_LIMITER: DurableObjectNamespace;
     ANALYTICS: AnalyticsEngineDataset;
     OPENALEX_API_URL: string;
     TEXT_API_URL: string;
+    CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
 }
 
 // In-memory cache for API key validation
 const API_KEY_CACHE = new Map<string, {
     valid: boolean;
     maxPerDay?: number;
+    maxCreditsPerDay?: number;
+    isGrandfathered?: boolean;
     error?: string;
     cachedAt: number;
 }>();
@@ -39,7 +45,12 @@ export default {
 
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
-        let maxPerDay = 100000;  // Default daily rate limit for unauthenticated users
+        // TODO Feb 13, 2026: Change these to 100 to require API key for normal usage.
+        // 2026-01-26: Reduced from 100K to 10K during API slowdown incident to shift capacity to API key holders.
+        // With list=1 credit, users can make 10K list requests/day without an API key.
+        let maxPerDay = 10000;  // Default daily rate limit for unauthenticated users
+        let maxCreditsPerDay = 10000;  // Default credits for unauthenticated users (1:1)
+        let isGrandfathered = false;  // Unauthenticated users are not grandfathered
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -65,7 +76,7 @@ export default {
                     apiKey,
                     req,
                     url,
-                    scope: 'main',
+                    scope: 'credits',
                     responseTime: Date.now() - startTime,
                     statusCode: 401,
                     rateLimit: 0,
@@ -76,6 +87,8 @@ export default {
             }
             hasValidApiKey = true;
             maxPerDay = authResult.maxPerDay || 100000;
+            maxCreditsPerDay = authResult.maxCreditsPerDay || maxPerDay;
+            isGrandfathered = authResult.isGrandfathered || false;
         }
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
@@ -105,23 +118,18 @@ export default {
         // Handle /rate-limit endpoint
         const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
         if (normalizedPath === 'rate-limit') {
-            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxPerDay);
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered);
         }
 
-        // Determine rate limits based on path
-        const isTextPath = /^text\/?/.test(normalizedPath);
+        // Classify endpoint and determine credit cost
+        const classification = classifyEndpoint(url.pathname);
+        const creditCost = classification.creditCost;
 
-        let limit: number;
-        if (isTextPath) {
-            limit = 1000;
-        } else {
-            limit = maxPerDay;
-        }
-
-        // Create rate limit key
-        const scope = isTextPath ? "text" : "main";
+        // Use unified credits-based rate limiting
+        const scope = "credits";
         const identifier = apiKey || req.headers.get("CF-Connecting-IP") || "anon";
         const rateLimitKey = `${scope}:${identifier}`;
+        const limit = maxCreditsPerDay;
 
         // Check rate limit using Durable Object
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
@@ -132,38 +140,43 @@ export default {
             retryAfter?: number;
             remaining?: number;
             limitType?: 'per_second' | 'daily';
+            creditsUsed?: number;
+            creditsRequired?: number;
         };
 
         try {
             rateLimitResult = await limiter.fetch("http://internal/check", {
                 method: "POST",
-                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100 })
+                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost })
             }).then(res => res.json());
         } catch (error) {
             // If DO fails, allow the request through but log the error
             console.error("Rate limiter DO error:", error);
-            rateLimitResult = { success: true, remaining: limit };
+            rateLimitResult = { success: true, remaining: limit, creditsUsed: creditCost };
         }
 
         // Handle rate limit exceeded
         if (!rateLimitResult.success) {
             const isPerSecond = rateLimitResult.limitType === 'per_second';
             const message = isPerSecond
-                ? `You have exceeded the rate limit of 100 requests per second. Please slow down.`
-                : `You have exceeded the rate limit of ${limit} requests per day. Please try again tomorrow.`;
+                ? `Rate limit exceeded: 100 requests per second. Please slow down.`
+                : `Insufficient credits. This request requires ${creditCost} credits but you only have ${rateLimitResult.remaining} remaining. Resets at midnight UTC.`;
 
             const errorResponse = new Response(JSON.stringify({
                 error: "Rate limit exceeded",
                 message,
-                retryAfter: rateLimitResult.retryAfter
+                retryAfter: rateLimitResult.retryAfter,
+                creditsRequired: creditCost,
+                creditsRemaining: rateLimitResult.remaining
             }), {
                 status: 429,
                 headers: {
                     "Content-Type": "application/json",
                     "Retry-After": Math.ceil(rateLimitResult.retryAfter || 1).toString(),
-                    "RateLimit-Limit": isPerSecond ? "100" : limit.toString(),
-                    "RateLimit-Remaining": "0",
-                    "RateLimit-Reset": Math.ceil(rateLimitResult.retryAfter || 1).toString(),
+                    "X-RateLimit-Limit": limit.toString(),
+                    "X-RateLimit-Remaining": (rateLimitResult.remaining ?? 0).toString(),
+                    "X-RateLimit-Credits-Required": creditCost.toString(),
+                    "X-RateLimit-Reset": getSecondsUntilMidnightUTC().toString(),
                     ...Object.fromEntries(getCorsHeaders())
                 }
             });
@@ -179,10 +192,89 @@ export default {
                 responseTime: Date.now() - startTime,
                 statusCode: 429,
                 rateLimit: limit,
-                rateLimitRemaining: 0
+                rateLimitRemaining: rateLimitResult.remaining ?? 0,
+                endpointType: classification.type,
+                creditCost
             });
 
             return errorResponse;
+        }
+
+        // Route content.openalex.org/* OR /content/* to content worker
+        const isContentRequest = url.hostname === 'content.openalex.org' || /^\/content(\/|$)/i.test(url.pathname);
+
+        if (isContentRequest) {
+            // Normalize path: content.openalex.org/works/X → /works/X for content worker
+            // api.openalex.org/content/X → /X for content worker (strip /content prefix)
+            const contentPath = url.hostname === 'content.openalex.org'
+                ? url.pathname
+                : url.pathname.replace(/^\/content/, '');
+
+            // Content downloads require an API key (but allow root docs endpoint)
+            const isContentDownload = /^\/works\//i.test(contentPath);
+            if (isContentDownload && !hasValidApiKey) {
+                return json(401, {
+                    error: "API key required",
+                    message: "Content downloads require an API key. Get one free at https://openalex.org/users"
+                });
+            }
+
+            const contentUrl = new URL(req.url);
+            contentUrl.pathname = contentPath;
+            const contentReq = new Request(contentUrl, req);
+
+            const contentResponse = await env.CONTENT_WORKER.fetch(contentReq);
+
+            // Check if content worker returned a different credit cost (e.g., 1 for 404)
+            const actualCostHeader = contentResponse.headers.get("X-Credits-Cost");
+            const actualCost = actualCostHeader ? parseInt(actualCostHeader, 10) : creditCost;
+            let adjustedRemaining = rateLimitResult.remaining ?? 0;
+
+            // Refund credits if actual cost < charged cost
+            if (actualCost < creditCost) {
+                const refundAmount = creditCost - actualCost;
+                try {
+                    const refundResult = await limiter.fetch("http://internal/refund", {
+                        method: "POST",
+                        body: JSON.stringify({ dailyLimit: limit, credits: refundAmount })
+                    }).then(res => res.json() as Promise<{ remaining: number }>);
+                    adjustedRemaining = refundResult.remaining;
+                } catch (error) {
+                    console.error("Failed to refund credits:", error);
+                }
+            }
+
+            // Add rate limit headers to the response
+            const newHeaders = new Headers(contentResponse.headers);
+            newHeaders.delete("X-Credits-Cost"); // Remove internal header
+            newHeaders.set("X-RateLimit-Limit", limit.toString());
+            newHeaders.set("X-RateLimit-Remaining", adjustedRemaining.toString());
+            newHeaders.set("X-RateLimit-Credits-Used", actualCost.toString());
+            newHeaders.set("X-RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
+
+            const finalResponse = addCorsHeaders(new Response(contentResponse.body, {
+                status: contentResponse.status,
+                statusText: contentResponse.statusText,
+                headers: newHeaders
+            }));
+
+            // Log analytics with actual cost
+            logAnalytics({
+                ctx,
+                env,
+                apiKey,
+                req,
+                url,
+                scope,
+                responseTime: Date.now() - startTime,
+                statusCode: contentResponse.status,
+                rateLimit: limit,
+                rateLimitRemaining: adjustedRemaining,
+                endpointType: classification.type,
+                creditCost: actualCost
+            });
+
+            return finalResponse;
         }
 
         const targetApiUrl = getTargetApiUrl(url, env);
@@ -215,11 +307,12 @@ export default {
 
         const response = await fetch(proxyReq);
 
-        // Return response with rate limit headers
+        // Return response with rate limit headers (credits-based)
         const newHeaders = new Headers(response.headers);
-        newHeaders.set("RateLimit-Limit", limit.toString());
-        newHeaders.set("RateLimit-Remaining", (rateLimitResult.remaining ?? 0).toString());
-        newHeaders.set("RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
+        newHeaders.set("X-RateLimit-Limit", limit.toString());
+        newHeaders.set("X-RateLimit-Remaining", (rateLimitResult.remaining ?? 0).toString());
+        newHeaders.set("X-RateLimit-Credits-Used", creditCost.toString());
+        newHeaders.set("X-RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
 
         const finalResponse = addCorsHeaders(new Response(response.body, {
             status: response.status,
@@ -238,7 +331,9 @@ export default {
             responseTime: Date.now() - startTime,
             statusCode: response.status,
             rateLimit: limit,
-            rateLimitRemaining: rateLimitResult.remaining ?? 0
+            rateLimitRemaining: rateLimitResult.remaining ?? 0,
+            endpointType: classification.type,
+            creditCost
         });
 
         return finalResponse;
@@ -265,7 +360,7 @@ function getApiKeyFromRequest(req: Request): string | null {
     );
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number}> {
+async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number, maxCreditsPerDay?: number, isGrandfathered?: boolean}> {
     const apiKey = getApiKeyFromRequest(req);
     if (!apiKey) return { valid: false };
 
@@ -277,34 +372,44 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         return {
             valid: cached.valid,
             error: cached.error,
-            maxPerDay: cached.maxPerDay
+            maxPerDay: cached.maxPerDay,
+            maxCreditsPerDay: cached.maxCreditsPerDay,
+            isGrandfathered: cached.isGrandfathered
         };
     }
 
-    // Cache miss - query D1
+    // Cache miss - query Postgres via Hyperdrive
     try {
-        const keyData = await env.openalex_db
-            .prepare("SELECT max_per_day FROM api_keys WHERE api_key = ?")
-            .bind(apiKey)
-            .first();
+        const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
+        await client.connect();
 
-        if (!keyData) {
+        const queryResult = await client.query(
+            "SELECT max_per_day, max_credits_per_day, is_grandfathered FROM api_keys_view WHERE api_key = $1",
+            [apiKey]
+        );
+
+        await client.end();
+
+        if (queryResult.rows.length === 0) {
             const result = { valid: false, error: "API key not found" };
             API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
             return result;
         }
 
-        // API key exists - consider it valid (expiration checking removed)
+        // API key exists - consider it valid
         const result = {
             valid: true,
-            maxPerDay: keyData.max_per_day as number
+            maxPerDay: queryResult.rows[0].max_per_day as number,
+            maxCreditsPerDay: queryResult.rows[0].max_credits_per_day as number,
+            isGrandfathered: queryResult.rows[0].is_grandfathered as boolean
         };
         API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
         return result;
 
     } catch (error) {
-        console.error("Error checking API key:", error);
-        return { valid: false, error: "Database error" };
+        // Fail-open: on DB errors, allow request with default rate limit
+        console.error("Error checking API key via Hyperdrive:", error);
+        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false };
     }
 }
 
@@ -313,7 +418,7 @@ function getCorsHeaders(): Headers {
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type");
-    headers.set("Access-Control-Expose-Headers", "Cache-Control, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After");
+    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, Retry-After");
     return headers;
 }
 
@@ -414,7 +519,8 @@ async function handleRateLimitEndpoint(
     env: Env,
     apiKey: string | null,
     hasValidApiKey: boolean,
-    maxPerDay: number
+    maxCreditsPerDay: number,
+    isGrandfathered: boolean = false
 ): Promise<Response> {
     // Require a valid API key
     if (!hasValidApiKey || !apiKey) {
@@ -425,7 +531,7 @@ async function handleRateLimitEndpoint(
     }
 
     // Query the rate limiter DO for current status (without incrementing)
-    const rateLimitKey = `main:${apiKey}`;
+    const rateLimitKey = `credits:${apiKey}`;
     const id = env.RATE_LIMITER.idFromName(rateLimitKey);
     const limiter = env.RATE_LIMITER.get(id);
 
@@ -433,21 +539,29 @@ async function handleRateLimitEndpoint(
     try {
         statusResult = await limiter.fetch("http://internal/status", {
             method: "POST",
-            body: JSON.stringify({ dailyLimit: maxPerDay })
+            body: JSON.stringify({ dailyLimit: maxCreditsPerDay })
         }).then(res => res.json());
     } catch (error) {
         console.error("Rate limiter status error:", error);
-        statusResult = { used: 0, remaining: maxPerDay };
+        statusResult = { used: 0, remaining: maxCreditsPerDay };
     }
 
     return json(200, {
         api_key: maskApiKey(apiKey),
+        is_grandfathered: isGrandfathered,
         rate_limit: {
-            limit: maxPerDay,
-            used: statusResult.used,
-            remaining: statusResult.remaining,
+            credits_limit: maxCreditsPerDay,
+            credits_used: statusResult.used,
+            credits_remaining: statusResult.remaining,
             resets_at: getMidnightUTCISO(),
-            resets_in_seconds: getSecondsUntilMidnightUTC()
+            resets_in_seconds: getSecondsUntilMidnightUTC(),
+            credit_costs: {
+                singleton: 0,
+                list: 1,
+                content: 100,
+                vector: 1000,
+                text: 1000
+            }
         }
     });
 }
