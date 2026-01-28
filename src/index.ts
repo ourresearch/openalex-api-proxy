@@ -86,8 +86,8 @@ export default {
                 return errorResponse;
             }
             hasValidApiKey = true;
-            maxPerDay = authResult.maxPerDay || 100000;
-            maxCreditsPerDay = authResult.maxCreditsPerDay || maxPerDay;
+            maxPerDay = authResult.maxPerDay ?? 100000;
+            maxCreditsPerDay = authResult.maxCreditsPerDay ?? maxPerDay;
             isGrandfathered = authResult.isGrandfathered || false;
 
             // 2026-01-28: TEMPORARY HACK - throttle jenni.ai during API slowdown incident
