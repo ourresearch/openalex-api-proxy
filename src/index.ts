@@ -10,6 +10,7 @@ export interface Env {
     ANALYTICS: AnalyticsEngineDataset;
     OPENALEX_API_URL: string;
     TEXT_API_URL: string;
+    SEARCH_API_URL?: string;  // Optional - falls back to OPENALEX_API_URL if not set
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
 }
 
@@ -439,9 +440,28 @@ function getTargetApiUrl(url: URL, env: Env): string {
     const pathname = url.pathname;
     const normalizedPath = pathname.replace(/^\/*|\/*$/g, '').toLowerCase();
 
+    // Route /text/* to TEXT_API_URL
     if (/^text\/?/.test(normalizedPath)) {
         return env.TEXT_API_URL;
     }
+
+    // Route entity list endpoints with "search" parameter to SEARCH_API_URL
+    if (url.searchParams.has('search') && env.SEARCH_API_URL) {
+        const segments = normalizedPath.split('/');
+        const ENTITY_TYPES = ['works', 'authors', 'sources', 'institutions',
+                              'topics', 'publishers', 'funders', 'concepts'];
+
+        if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
+            // Don't route singletons (e.g., /works/W123) - only list endpoints
+            const OPENALEX_ID_PATTERN = /^[A-Za-z]?\d+$/;
+            const isSingleton = segments.length >= 2 && OPENALEX_ID_PATTERN.test(segments[1]);
+
+            if (!isSingleton) {
+                return env.SEARCH_API_URL;
+            }
+        }
+    }
+
     return env.OPENALEX_API_URL;
 }
 
