@@ -445,19 +445,41 @@ function getTargetApiUrl(url: URL, env: Env): string {
         return env.TEXT_API_URL;
     }
 
-    // Route entity list endpoints with "search" parameter to SEARCH_API_URL
-    if (url.searchParams.has('search') && env.SEARCH_API_URL) {
+    // Check if this is an entity list endpoint (not a singleton)
+    if (env.SEARCH_API_URL) {
         const segments = normalizedPath.split('/');
         const ENTITY_TYPES = ['works', 'authors', 'sources', 'institutions',
                               'topics', 'publishers', 'funders', 'concepts'];
 
         if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
-            // Don't route singletons (e.g., /works/W123) - only list endpoints
             const OPENALEX_ID_PATTERN = /^[A-Za-z]?\d+$/;
             const isSingleton = segments.length >= 2 && OPENALEX_ID_PATTERN.test(segments[1]);
 
             if (!isSingleton) {
-                return env.SEARCH_API_URL;
+                // Route to SEARCH_API_URL if request has search query param
+                if (url.searchParams.has('search')) {
+                    return env.SEARCH_API_URL;
+                }
+
+                // Route to SEARCH_API_URL if filter contains search filters (except semantic.search)
+                const filterParam = url.searchParams.get('filter');
+                if (filterParam) {
+                    const SEARCH_FILTERS = [
+                        'abstract.search',
+                        'default.search',
+                        'display_name.search',
+                        'fulltext.search',
+                        'keyword.search',
+                        'raw_affiliation_strings.search',
+                        'raw_author_name.search',
+                        'title.search',
+                        'title_and_abstract.search'
+                    ];
+                    const hasSearchFilter = SEARCH_FILTERS.some(f => filterParam.includes(f));
+                    if (hasSearchFilter) {
+                        return env.SEARCH_API_URL;
+                    }
+                }
             }
         }
     }
