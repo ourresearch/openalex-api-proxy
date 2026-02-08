@@ -123,7 +123,7 @@ export default {
         }
 
         // Classify endpoint and determine credit cost
-        const classification = classifyEndpoint(url.pathname);
+        const classification = classifyEndpoint(url.pathname, url.searchParams);
         const creditCost = classification.creditCost;
 
         // Use unified credits-based rate limiting
@@ -456,12 +456,17 @@ function getTargetApiUrl(url: URL, env: Env): string {
             const isSingleton = segments.length >= 2 && OPENALEX_ID_PATTERN.test(segments[1]);
 
             if (!isSingleton) {
-                // Route to SEARCH_API_URL if request has search query param
+                // Route to SEARCH_API_URL if request has search or search.* params
                 if (url.searchParams.has('search')) {
                     return env.SEARCH_API_URL;
                 }
+                for (const key of url.searchParams.keys()) {
+                    if (key.startsWith('search.')) {
+                        return env.SEARCH_API_URL;
+                    }
+                }
 
-                // Route to SEARCH_API_URL if filter contains search filters (except semantic.search)
+                // Route to SEARCH_API_URL if filter contains search filters
                 const filterParam = url.searchParams.get('filter');
                 if (filterParam) {
                     const SEARCH_FILTERS = [
@@ -600,6 +605,7 @@ async function handleRateLimitEndpoint(
             credit_costs: {
                 singleton: 0,
                 list: 1,
+                search: 10,
                 content: 100,
                 vector: 1000,
                 text: 1000

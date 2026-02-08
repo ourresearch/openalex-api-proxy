@@ -114,6 +114,64 @@ describe('endpointClassifier', () => {
         });
     });
 
+    describe('search endpoints (10 credits)', () => {
+        it('classifies /works?search=cancer as search (10 credits)', () => {
+            const params = new URLSearchParams('search=cancer');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('classifies /works?search.semantic=machine+learning as search (10 credits)', () => {
+            const params = new URLSearchParams('search.semantic=machine+learning');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('classifies /works?search.exact=running as search (10 credits)', () => {
+            const params = new URLSearchParams('search.exact=running');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('classifies /works?filter=title.search:cancer as search (10 credits)', () => {
+            const params = new URLSearchParams('filter=title.search:cancer');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('classifies /works?filter=abstract.search:climate as search (10 credits)', () => {
+            const params = new URLSearchParams('filter=abstract.search:climate');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('classifies /works?filter=type:article (no search) as list (1 credit)', () => {
+            const params = new URLSearchParams('filter=type:article');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
+        });
+
+        it('classifies /authors?search=smith as search (10 credits)', () => {
+            const params = new URLSearchParams('search=smith');
+            const result = classifyEndpoint('/authors', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('still classifies singleton even with search params (0 credits)', () => {
+            const params = new URLSearchParams('search=test');
+            const result = classifyEndpoint('/works/W123', params);
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+    });
+
     describe('edge cases', () => {
         it('handles leading/trailing slashes', () => {
             const result = classifyEndpoint('///works/W123///');
