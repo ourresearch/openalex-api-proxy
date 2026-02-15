@@ -67,22 +67,22 @@ describe('endpointClassifier', () => {
     });
 
     describe('text endpoints', () => {
-        it('classifies /text/topics as text (1000 credits)', () => {
+        it('classifies /text/topics as text (100 credits)', () => {
             const result = classifyEndpoint('/text/topics');
             expect(result.type).toBe('text');
-            expect(result.creditCost).toBe(1000);
+            expect(result.creditCost).toBe(100);
         });
 
-        it('classifies /text/topics?title=test as text (1000 credits)', () => {
+        it('classifies /text/topics?title=test as text (100 credits)', () => {
             const result = classifyEndpoint('/text/topics?title=test');
             expect(result.type).toBe('text');
-            expect(result.creditCost).toBe(1000);
+            expect(result.creditCost).toBe(100);
         });
 
-        it('classifies /text as text (1000 credits)', () => {
+        it('classifies /text as text (100 credits)', () => {
             const result = classifyEndpoint('/text');
             expect(result.type).toBe('text');
-            expect(result.creditCost).toBe(1000);
+            expect(result.creditCost).toBe(100);
         });
     });
 
@@ -101,16 +101,16 @@ describe('endpointClassifier', () => {
     });
 
     describe('vector endpoints (future)', () => {
-        it('classifies /vector/search as vector (1000 credits)', () => {
+        it('classifies /vector/search as vector (10 credits)', () => {
             const result = classifyEndpoint('/vector/search');
             expect(result.type).toBe('vector');
-            expect(result.creditCost).toBe(1000);
+            expect(result.creditCost).toBe(10);
         });
 
-        it('classifies /search/works as vector (1000 credits)', () => {
+        it('classifies /search/works as vector (10 credits)', () => {
             const result = classifyEndpoint('/search/works');
             expect(result.type).toBe('vector');
-            expect(result.creditCost).toBe(1000);
+            expect(result.creditCost).toBe(10);
         });
     });
 

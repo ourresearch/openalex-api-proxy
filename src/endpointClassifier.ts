@@ -30,12 +30,12 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
 
     // Text/Aboutness endpoint - ML inference (expensive)
     if (/^text\/?/.test(normalized)) {
-        return { type: 'text', creditCost: 1000 };
+        return { type: 'text', creditCost: 100 };
     }
 
     // Vector search endpoints (legacy /vector/ and /search/ paths)
     if (/^(vector|search)\//.test(normalized)) {
-        return { type: 'vector', creditCost: 1000 };
+        return { type: 'vector', creditCost: 10 };
     }
 
     // Content downloads: /works/{work_id}.pdf or .grobid-xml (for content.openalex.org)

@@ -607,8 +607,8 @@ async function handleRateLimitEndpoint(
                 list: 1,
                 search: 10,
                 content: 100,
-                vector: 1000,
-                text: 1000
+                vector: 10,
+                text: 100
             }
         }
     });
