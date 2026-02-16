@@ -139,7 +139,10 @@ export default {
 
         // Classify endpoint and determine credit cost
         const classification = classifyEndpoint(url.pathname, url.searchParams);
-        const creditCost = classification.creditCost;
+        // Grandfathered users get search at 1 credit instead of 10
+        const creditCost = (isGrandfathered && classification.type === 'search')
+            ? 1
+            : classification.creditCost;
 
         // Use unified credits-based rate limiting
         const scope = "credits";
@@ -709,7 +712,7 @@ async function handleRateLimitEndpoint(
             credit_costs: {
                 singleton: 0,
                 list: 1,
-                search: 10,
+                search: isGrandfathered ? 1 : 10,
                 content: 100,
                 vector: 10,
                 text: 100
