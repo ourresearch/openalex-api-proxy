@@ -20,6 +20,8 @@ const API_KEY_CACHE = new Map<string, {
     maxPerDay?: number;
     maxCreditsPerDay?: number;
     isGrandfathered?: boolean;
+    onetimeCreditsBalance?: number;
+    onetimeCreditsExpiresAt?: string;
     error?: string;
     cachedAt: number;
 }>();
@@ -52,6 +54,9 @@ export default {
         let maxPerDay = 10000;  // Default daily rate limit for unauthenticated users
         let maxCreditsPerDay = 10000;  // Default credits for unauthenticated users (1:1)
         let isGrandfathered = false;  // Unauthenticated users are not grandfathered
+
+        let onetimeCreditsBalance = 0;
+        let onetimeCreditsExpiresAt: string | undefined;
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -90,6 +95,16 @@ export default {
             maxPerDay = authResult.maxPerDay ?? 100000;
             maxCreditsPerDay = authResult.maxCreditsPerDay ?? maxPerDay;
             isGrandfathered = authResult.isGrandfathered || false;
+            onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
+            onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
+
+            // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
+            if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
+                const wbRateLimitKey = `credits:${apiKey}`;
+                ctx.waitUntil(
+                    writebackOnetimeCredits(env, apiKey, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
+                );
+            }
         }
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
@@ -119,7 +134,7 @@ export default {
         // Handle /rate-limit endpoint
         const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
         if (normalizedPath === 'rate-limit') {
-            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered);
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt);
         }
 
         // Classify endpoint and determine credit cost
@@ -140,35 +155,43 @@ export default {
             success: boolean;
             retryAfter?: number;
             remaining?: number;
+            onetimeRemaining?: number;
             limitType?: 'per_second' | 'daily';
             creditsUsed?: number;
             creditsRequired?: number;
+            fromOnetime?: boolean;
         };
 
         try {
             rateLimitResult = await limiter.fetch("http://internal/check", {
                 method: "POST",
-                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost })
+                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
             }).then(res => res.json());
         } catch (error) {
             // If DO fails, allow the request through but log the error
             console.error("Rate limiter DO error:", error);
-            rateLimitResult = { success: true, remaining: limit, creditsUsed: creditCost };
+            rateLimitResult = { success: true, remaining: limit, creditsUsed: creditCost, onetimeRemaining: onetimeCreditsBalance };
         }
 
         // Handle rate limit exceeded
         if (!rateLimitResult.success) {
             const isPerSecond = rateLimitResult.limitType === 'per_second';
-            const message = isPerSecond
-                ? `Rate limit exceeded: 100 requests per second. Please slow down.`
-                : `Insufficient credits. This request requires ${creditCost} credits but you only have ${rateLimitResult.remaining} remaining. Resets at midnight UTC.`;
+            let message: string;
+            if (isPerSecond) {
+                message = `Rate limit exceeded: 100 requests per second. Please slow down.`;
+            } else if (onetimeCreditsBalance > 0) {
+                message = `Insufficient credits. This request requires ${creditCost} credits but you have ${rateLimitResult.remaining} daily and ${rateLimitResult.onetimeRemaining ?? 0} purchased credits remaining. Daily credits reset at midnight UTC. Buy more at https://openalex.org/pricing`;
+            } else {
+                message = `Insufficient credits. This request requires ${creditCost} credits but you only have ${rateLimitResult.remaining} remaining. Resets at midnight UTC. Need more? Buy credits at https://openalex.org/pricing`;
+            }
 
             const errorResponse = new Response(JSON.stringify({
                 error: "Rate limit exceeded",
                 message,
                 retryAfter: rateLimitResult.retryAfter,
                 creditsRequired: creditCost,
-                creditsRemaining: rateLimitResult.remaining
+                creditsRemaining: rateLimitResult.remaining,
+                onetimeCreditsRemaining: rateLimitResult.onetimeRemaining ?? 0
             }), {
                 status: 429,
                 headers: {
@@ -176,6 +199,7 @@ export default {
                     "Retry-After": Math.ceil(rateLimitResult.retryAfter || 1).toString(),
                     "X-RateLimit-Limit": limit.toString(),
                     "X-RateLimit-Remaining": (rateLimitResult.remaining ?? 0).toString(),
+                    "X-RateLimit-Onetime-Remaining": (rateLimitResult.onetimeRemaining ?? 0).toString(),
                     "X-RateLimit-Credits-Required": creditCost.toString(),
                     "X-RateLimit-Reset": getSecondsUntilMidnightUTC().toString(),
                     ...Object.fromEntries(getCorsHeaders())
@@ -232,14 +256,16 @@ export default {
             let adjustedRemaining = rateLimitResult.remaining ?? 0;
 
             // Refund credits if actual cost < charged cost
+            let adjustedOnetimeRemaining = rateLimitResult.onetimeRemaining ?? 0;
             if (actualCost < creditCost) {
                 const refundAmount = creditCost - actualCost;
                 try {
                     const refundResult = await limiter.fetch("http://internal/refund", {
                         method: "POST",
-                        body: JSON.stringify({ dailyLimit: limit, credits: refundAmount })
-                    }).then(res => res.json() as Promise<{ remaining: number }>);
+                        body: JSON.stringify({ dailyLimit: limit, credits: refundAmount, onetimeBalance: onetimeCreditsBalance })
+                    }).then(res => res.json() as Promise<{ remaining: number; onetimeRemaining: number }>);
                     adjustedRemaining = refundResult.remaining;
+                    adjustedOnetimeRemaining = refundResult.onetimeRemaining;
                 } catch (error) {
                     console.error("Failed to refund credits:", error);
                 }
@@ -250,6 +276,7 @@ export default {
             newHeaders.delete("X-Credits-Cost"); // Remove internal header
             newHeaders.set("X-RateLimit-Limit", limit.toString());
             newHeaders.set("X-RateLimit-Remaining", adjustedRemaining.toString());
+            newHeaders.set("X-RateLimit-Onetime-Remaining", adjustedOnetimeRemaining.toString());
             newHeaders.set("X-RateLimit-Credits-Used", actualCost.toString());
             newHeaders.set("X-RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
 
@@ -312,6 +339,7 @@ export default {
         const newHeaders = new Headers(response.headers);
         newHeaders.set("X-RateLimit-Limit", limit.toString());
         newHeaders.set("X-RateLimit-Remaining", (rateLimitResult.remaining ?? 0).toString());
+        newHeaders.set("X-RateLimit-Onetime-Remaining", (rateLimitResult.onetimeRemaining ?? 0).toString());
         newHeaders.set("X-RateLimit-Credits-Used", creditCost.toString());
         newHeaders.set("X-RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
 
@@ -361,7 +389,7 @@ function getApiKeyFromRequest(req: Request): string | null {
     );
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number, maxCreditsPerDay?: number, isGrandfathered?: boolean}> {
+async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number, maxCreditsPerDay?: number, isGrandfathered?: boolean, onetimeCreditsBalance?: number, onetimeCreditsExpiresAt?: string, cacheRefreshed?: boolean}> {
     const apiKey = getApiKeyFromRequest(req);
     if (!apiKey) return { valid: false };
 
@@ -375,42 +403,103 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             error: cached.error,
             maxPerDay: cached.maxPerDay,
             maxCreditsPerDay: cached.maxCreditsPerDay,
-            isGrandfathered: cached.isGrandfathered
+            isGrandfathered: cached.isGrandfathered,
+            onetimeCreditsBalance: cached.onetimeCreditsBalance,
+            onetimeCreditsExpiresAt: cached.onetimeCreditsExpiresAt,
+            cacheRefreshed: false
         };
     }
 
-    // Cache miss - query Postgres via Hyperdrive
+    // Cache miss — query Postgres via Hyperdrive
+    let client: Client | null = null;
+
     try {
-        const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
+        client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
         await client.connect();
 
         const queryResult = await client.query(
-            "SELECT max_per_day, max_credits_per_day, is_grandfathered FROM api_keys_view WHERE api_key = $1",
+            "SELECT max_per_day, max_credits_per_day, is_grandfathered, onetime_credits_balance, onetime_credits_expires_at FROM api_keys_view WHERE api_key = $1",
             [apiKey]
         );
 
-        await client.end();
-
         if (queryResult.rows.length === 0) {
+            await client.end();
             const result = { valid: false, error: "API key not found" };
             API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
             return result;
         }
 
+        const row = queryResult.rows[0];
+
         // API key exists - consider it valid
         const result = {
             valid: true,
-            maxPerDay: queryResult.rows[0].max_per_day as number,
-            maxCreditsPerDay: queryResult.rows[0].max_credits_per_day as number,
-            isGrandfathered: queryResult.rows[0].is_grandfathered as boolean
+            maxPerDay: row.max_per_day as number,
+            maxCreditsPerDay: row.max_credits_per_day as number,
+            isGrandfathered: row.is_grandfathered as boolean,
+            onetimeCreditsBalance: (row.onetime_credits_balance as number) ?? 0,
+            onetimeCreditsExpiresAt: row.onetime_credits_expires_at ? String(row.onetime_credits_expires_at) : undefined,
+            cacheRefreshed: true
         };
+
+        await client.end();
         API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
         return result;
 
     } catch (error) {
         // Fail-open: on DB errors, allow request with default rate limit
         console.error("Error checking API key via Hyperdrive:", error);
-        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false };
+        if (client) {
+            try { await client.end(); } catch { /* ignore */ }
+        }
+        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false, onetimeCreditsBalance: 0 };
+    }
+}
+
+/**
+ * Write back consumed one-time credits to the DB and sync with the DO.
+ * Called in waitUntil() to not block requests.
+ */
+async function writebackOnetimeCredits(
+    env: Env,
+    apiKey: string,
+    rateLimitKey: string,
+    dailyLimit: number,
+    onetimeBalance: number
+): Promise<void> {
+    try {
+        // Get current consumed count from DO
+        const id = env.RATE_LIMITER.idFromName(rateLimitKey);
+        const limiter = env.RATE_LIMITER.get(id);
+
+        const statusResult = await limiter.fetch("http://internal/status", {
+            method: "POST",
+            body: JSON.stringify({ dailyLimit, onetimeBalance })
+        }).then(res => res.json() as Promise<{ onetime: { consumed: number } }>);
+
+        const consumed = statusResult.onetime?.consumed ?? 0;
+        if (consumed <= 0) return;
+
+        // Write consumed credits to DB
+        const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
+        await client.connect();
+
+        await client.query(
+            "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE api_key = $2",
+            [consumed, apiKey]
+        );
+
+        await client.end();
+
+        // Tell DO to subtract what we wrote back
+        await limiter.fetch("http://internal/sync", {
+            method: "POST",
+            body: JSON.stringify({ consumedWriteback: consumed })
+        });
+
+        console.log(`Writeback: ${consumed} onetime credits for key ${maskApiKey(apiKey)}`);
+    } catch (error) {
+        console.error("Onetime credits writeback error:", error);
     }
 }
 
@@ -419,7 +508,7 @@ function getCorsHeaders(): Headers {
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type");
-    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, Retry-After");
+    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, Retry-After");
     return headers;
 }
 
@@ -567,7 +656,9 @@ async function handleRateLimitEndpoint(
     apiKey: string | null,
     hasValidApiKey: boolean,
     maxCreditsPerDay: number,
-    isGrandfathered: boolean = false
+    isGrandfathered: boolean = false,
+    onetimeCreditsBalance: number = 0,
+    onetimeCreditsExpiresAt?: string
 ): Promise<Response> {
     // Require a valid API key
     if (!hasValidApiKey || !apiKey) {
@@ -582,15 +673,25 @@ async function handleRateLimitEndpoint(
     const id = env.RATE_LIMITER.idFromName(rateLimitKey);
     const limiter = env.RATE_LIMITER.get(id);
 
-    let statusResult: { used: number; remaining: number };
+    let statusResult: {
+        daily: { used: number; remaining: number };
+        onetime: { consumed: number; remaining: number; balance: number };
+        used: number;
+        remaining: number;
+    };
     try {
         statusResult = await limiter.fetch("http://internal/status", {
             method: "POST",
-            body: JSON.stringify({ dailyLimit: maxCreditsPerDay })
+            body: JSON.stringify({ dailyLimit: maxCreditsPerDay, onetimeBalance: onetimeCreditsBalance })
         }).then(res => res.json());
     } catch (error) {
         console.error("Rate limiter status error:", error);
-        statusResult = { used: 0, remaining: maxCreditsPerDay };
+        statusResult = {
+            daily: { used: 0, remaining: maxCreditsPerDay },
+            onetime: { consumed: 0, remaining: onetimeCreditsBalance, balance: onetimeCreditsBalance },
+            used: 0,
+            remaining: maxCreditsPerDay
+        };
     }
 
     return json(200, {
@@ -598,8 +699,11 @@ async function handleRateLimitEndpoint(
         is_grandfathered: isGrandfathered,
         rate_limit: {
             credits_limit: maxCreditsPerDay,
-            credits_used: statusResult.used,
-            credits_remaining: statusResult.remaining,
+            credits_used: statusResult.daily?.used ?? statusResult.used,
+            credits_remaining: statusResult.daily?.remaining ?? statusResult.remaining,
+            onetime_credits_balance: onetimeCreditsBalance,
+            onetime_credits_remaining: statusResult.onetime?.remaining ?? 0,
+            onetime_credits_expires_at: onetimeCreditsExpiresAt || null,
             resets_at: getMidnightUTCISO(),
             resets_in_seconds: getSecondsUntilMidnightUTC(),
             credit_costs: {
