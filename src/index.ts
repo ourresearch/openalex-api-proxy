@@ -139,6 +139,15 @@ export default {
         // Handle /rate-limit endpoint
         const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
         if (normalizedPath === 'rate-limit') {
+            // Support ?fresh=1 to bypass cache (used after purchase redirect)
+            if (apiKey && url.searchParams.get('fresh') === '1') {
+                API_KEY_CACHE.delete(apiKey);
+                const freshAuth = await checkApiKey(req, env);
+                if (freshAuth.valid) {
+                    onetimeCreditsBalance = freshAuth.onetimeCreditsBalance ?? 0;
+                    onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
+                }
+            }
             return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt);
         }
 
