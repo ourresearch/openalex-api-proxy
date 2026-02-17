@@ -48,6 +48,11 @@ export default {
 
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
+
+        // Changefiles browsing: skip API key validation so placeholder keys
+        // (e.g., "YOUR_API_KEY") don't trigger 401.  Users should be able to
+        // browse available files without a real key.
+        const isChangefilesBrowse = /^\/changefiles(\/\d{4}-\d{2}-\d{2})?\/?$/i.test(url.pathname);
         // TODO Feb 13, 2026: Change these to 100 to require API key for normal usage.
         // 2026-01-26: Reduced from 100K to 10K during API slowdown incident to shift capacity to API key holders.
         // With list=1 credit, users can make 10K list requests/day without an API key.
@@ -58,7 +63,7 @@ export default {
         let onetimeCreditsBalance = 0;
         let onetimeCreditsExpiresAt: string | undefined;
 
-        if (apiKey) {
+        if (apiKey && !isChangefilesBrowse) {
             const authResult = await checkApiKey(req, env);
             if (!authResult.valid) {
                 // Log invalid API key attempts for security monitoring
@@ -226,6 +231,14 @@ export default {
             });
 
             return errorResponse;
+        }
+
+        // Changefiles downloads require a valid API key
+        if (/^\/changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/i.test(url.pathname) && !hasValidApiKey) {
+            return json(401, {
+                error: "API key required",
+                message: "Changefile downloads require an API key. Get one at https://openalex.org/pricing"
+            });
         }
 
         // Route content.openalex.org/* OR /content/* to content worker
