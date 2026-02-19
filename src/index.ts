@@ -27,6 +27,13 @@ const API_KEY_CACHE = new Map<string, {
 }>();
 const CACHE_TTL = 60000; // 60 seconds
 
+// Conversion: 1 credit = $0.0001 (10,000 credits = $1)
+const CREDIT_TO_USD = 0.0001;
+
+function creditsToUsd(credits: number): number {
+    return Math.round(credits * CREDIT_TO_USD * 10000) / 10000; // 4 decimal places
+}
+
 export { RateLimiter };
 
 export default {
@@ -193,19 +200,28 @@ export default {
         // Handle rate limit exceeded
         if (!rateLimitResult.success) {
             const isPerSecond = rateLimitResult.limitType === 'per_second';
+            const costUsd = creditsToUsd(creditCost);
+            const dailyRemainingUsd = creditsToUsd(rateLimitResult.remaining ?? 0);
+            const prepaidRemainingUsd = creditsToUsd(rateLimitResult.onetimeRemaining ?? 0);
+
             let message: string;
             if (isPerSecond) {
                 message = `Rate limit exceeded: 100 requests per second. Please slow down.`;
             } else if (onetimeCreditsBalance > 0) {
-                message = `Insufficient credits. This request requires ${creditCost} credits but you have ${rateLimitResult.remaining} daily and ${rateLimitResult.onetimeRemaining ?? 0} purchased credits remaining. Daily credits reset at midnight UTC. Buy more at https://openalex.org/pricing`;
+                message = `Insufficient budget. This request costs $${costUsd} but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else {
-                message = `Insufficient credits. This request requires ${creditCost} credits but you only have ${rateLimitResult.remaining} remaining. Resets at midnight UTC. Need more? Buy credits at https://openalex.org/pricing`;
+                message = `Insufficient budget. This request costs $${costUsd} but you only have $${dailyRemainingUsd} remaining. Resets at midnight UTC. Need more? Add funds at https://openalex.org/pricing`;
             }
 
             const errorResponse = new Response(JSON.stringify({
                 error: "Rate limit exceeded",
                 message,
                 retryAfter: rateLimitResult.retryAfter,
+                // New USD fields
+                costUsd,
+                dailyRemainingUsd,
+                prepaidRemainingUsd,
+                // Legacy credit fields (kept for backward compat during transition)
                 creditsRequired: creditCost,
                 creditsRemaining: rateLimitResult.remaining,
                 onetimeCreditsRemaining: rateLimitResult.onetimeRemaining ?? 0
@@ -214,6 +230,12 @@ export default {
                 headers: {
                     "Content-Type": "application/json",
                     "Retry-After": Math.ceil(rateLimitResult.retryAfter || 1).toString(),
+                    // New USD headers
+                    "X-RateLimit-Limit-USD": creditsToUsd(limit).toString(),
+                    "X-RateLimit-Remaining-USD": dailyRemainingUsd.toString(),
+                    "X-RateLimit-Prepaid-Remaining-USD": prepaidRemainingUsd.toString(),
+                    "X-RateLimit-Cost-Required-USD": costUsd.toString(),
+                    // Legacy headers (kept for backward compat during transition)
                     "X-RateLimit-Limit": limit.toString(),
                     "X-RateLimit-Remaining": (rateLimitResult.remaining ?? 0).toString(),
                     "X-RateLimit-Onetime-Remaining": (rateLimitResult.onetimeRemaining ?? 0).toString(),
@@ -299,6 +321,12 @@ export default {
             // Add rate limit headers to the response
             const newHeaders = new Headers(contentResponse.headers);
             newHeaders.delete("X-Credits-Cost"); // Remove internal header
+            // New USD headers
+            newHeaders.set("X-RateLimit-Limit-USD", creditsToUsd(limit).toString());
+            newHeaders.set("X-RateLimit-Remaining-USD", creditsToUsd(adjustedRemaining).toString());
+            newHeaders.set("X-RateLimit-Prepaid-Remaining-USD", creditsToUsd(adjustedOnetimeRemaining).toString());
+            newHeaders.set("X-RateLimit-Cost-USD", creditsToUsd(actualCost).toString());
+            // Legacy headers (kept for backward compat during transition)
             newHeaders.set("X-RateLimit-Limit", limit.toString());
             newHeaders.set("X-RateLimit-Remaining", adjustedRemaining.toString());
             newHeaders.set("X-RateLimit-Onetime-Remaining", adjustedOnetimeRemaining.toString());
@@ -360,8 +388,14 @@ export default {
 
         const response = await fetch(proxyReq);
 
-        // Return response with rate limit headers (credits-based)
+        // Return response with rate limit headers
         const newHeaders = new Headers(response.headers);
+        // New USD headers
+        newHeaders.set("X-RateLimit-Limit-USD", creditsToUsd(limit).toString());
+        newHeaders.set("X-RateLimit-Remaining-USD", creditsToUsd(rateLimitResult.remaining ?? 0).toString());
+        newHeaders.set("X-RateLimit-Prepaid-Remaining-USD", creditsToUsd(rateLimitResult.onetimeRemaining ?? 0).toString());
+        newHeaders.set("X-RateLimit-Cost-USD", creditsToUsd(creditCost).toString());
+        // Legacy headers (kept for backward compat during transition)
         newHeaders.set("X-RateLimit-Limit", limit.toString());
         newHeaders.set("X-RateLimit-Remaining", (rateLimitResult.remaining ?? 0).toString());
         newHeaders.set("X-RateLimit-Onetime-Remaining", (rateLimitResult.onetimeRemaining ?? 0).toString());
@@ -533,7 +567,7 @@ function getCorsHeaders(): Headers {
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type");
-    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, Retry-After");
+    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, X-RateLimit-Limit-USD, X-RateLimit-Remaining-USD, X-RateLimit-Prepaid-Remaining-USD, X-RateLimit-Cost-USD, X-RateLimit-Cost-Required-USD, Retry-After");
     return headers;
 }
 
@@ -719,22 +753,43 @@ async function handleRateLimitEndpoint(
         };
     }
 
+    const dailyUsed = statusResult.daily?.used ?? statusResult.used;
+    const dailyRemaining = statusResult.daily?.remaining ?? statusResult.remaining;
+    const onetimeRemaining = statusResult.onetime?.remaining ?? 0;
+    const searchCreditCost = isGrandfathered ? 1 : 10;
+
     return json(200, {
         api_key: maskApiKey(apiKey),
         is_grandfathered: isGrandfathered,
         rate_limit: {
-            credits_limit: maxCreditsPerDay,
-            credits_used: statusResult.daily?.used ?? statusResult.used,
-            credits_remaining: statusResult.daily?.remaining ?? statusResult.remaining,
-            onetime_credits_balance: onetimeCreditsBalance,
-            onetime_credits_remaining: statusResult.onetime?.remaining ?? 0,
-            onetime_credits_expires_at: onetimeCreditsExpiresAt || null,
+            // New USD fields
+            daily_budget_usd: creditsToUsd(maxCreditsPerDay),
+            daily_used_usd: creditsToUsd(dailyUsed),
+            daily_remaining_usd: creditsToUsd(dailyRemaining),
+            prepaid_balance_usd: creditsToUsd(onetimeCreditsBalance),
+            prepaid_remaining_usd: creditsToUsd(onetimeRemaining),
+            prepaid_expires_at: onetimeCreditsExpiresAt || null,
             resets_at: getMidnightUTCISO(),
             resets_in_seconds: getSecondsUntilMidnightUTC(),
+            endpoint_costs_usd: {
+                singleton: 0,
+                list: creditsToUsd(1),
+                search: creditsToUsd(searchCreditCost),
+                content: creditsToUsd(100),
+                vector: creditsToUsd(10),
+                text: creditsToUsd(100)
+            },
+            // Legacy credit fields (kept for backward compat during transition)
+            credits_limit: maxCreditsPerDay,
+            credits_used: dailyUsed,
+            credits_remaining: dailyRemaining,
+            onetime_credits_balance: onetimeCreditsBalance,
+            onetime_credits_remaining: onetimeRemaining,
+            onetime_credits_expires_at: onetimeCreditsExpiresAt || null,
             credit_costs: {
                 singleton: 0,
                 list: 1,
-                search: isGrandfathered ? 1 : 10,
+                search: searchCreditCost,
                 content: 100,
                 vector: 10,
                 text: 100
