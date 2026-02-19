@@ -130,6 +130,29 @@ describe('endpointClassifier', () => {
         });
     });
 
+    describe('group_by endpoints (1 credit override)', () => {
+        it('classifies search + group_by as list (1 credit)', () => {
+            const params = new URLSearchParams('search=frogs&group_by=type');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
+        });
+
+        it('classifies search + group-by (hyphenated) as list (1 credit)', () => {
+            const params = new URLSearchParams('search=frogs&group-by=type');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
+        });
+
+        it('classifies group_by without search as list (1 credit)', () => {
+            const params = new URLSearchParams('group_by=type');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
+        });
+    });
+
     describe('search endpoints (10 credits)', () => {
         it('classifies /works?search=cancer as search (10 credits)', () => {
             const params = new URLSearchParams('search=cancer');

@@ -46,6 +46,12 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
             return { type: 'singleton', creditCost: 0 };
         }
 
+        // group_by requests are capped at 1 credit (list pricing) regardless of
+        // other params, to keep GUI facet calls affordable
+        if (searchParams && (searchParams.has('group_by') || searchParams.has('group-by'))) {
+            return { type: 'list', creditCost: 1 };
+        }
+
         // Semantic search (search.semantic=) → 100 credits
         if (searchParams && hasSemanticSearch(searchParams)) {
             return { type: 'semantic', creditCost: 100 };
