@@ -552,18 +552,27 @@ async function writebackOnetimeCredits(
                 [consumed, apiKey]
             );
         } catch (dbError) {
-            // DB write failed — restore consumed credits to the DO so they aren't lost
+            // DB write failed — restore consumed credits to the DO so they aren't lost.
+            // /begin-writeback already reset consumed to 0, so we must re-add.
             console.error("DB writeback failed, restoring credits to DO:", dbError);
             try {
-                await limiter.fetch("http://internal/check", {
+                await limiter.fetch("http://internal/restore-consumed", {
                     method: "POST",
-                    body: JSON.stringify({ dailyLimit, perSecondLimit: 100, credits: 0, onetimeBalance })
+                    body: JSON.stringify({ dailyLimit, consumedWriteback: consumed, onetimeBalance })
                 });
             } catch { /* best effort */ }
             throw dbError;
         }
 
         await client.end();
+
+        // Update the in-memory cache so subsequent requests (within the 60s TTL)
+        // see the correct post-writeback balance. Without this, the stale cache
+        // feeds the old (higher) balance to the DO, allowing overspend.
+        const cached = API_KEY_CACHE.get(apiKey);
+        if (cached && cached.onetimeCreditsBalance !== undefined) {
+            cached.onetimeCreditsBalance = Math.max(0, cached.onetimeCreditsBalance - consumed);
+        }
 
         console.log(`Writeback: ${consumed} onetime credits for key ${maskApiKey(apiKey)}`);
     } catch (error) {
@@ -659,8 +668,10 @@ function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
 }
 
 function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boolean; error?: string } {
-    const filterParam = url.searchParams.get('filter');
-    if (filterParam) {
+    // Use getAll() to check ALL values — duplicate params (e.g., ?filter=safe&filter=date_filter)
+    // could bypass the check if we only inspect the first value.
+    const filterParams = url.searchParams.getAll('filter');
+    for (const filterParam of filterParams) {
         const filterPattern = /(?:from_|to_)?(?:updated|created)_date:[><]?\d{4}-\d{2}-\d{2}/;
         const matches = filterParam.match(filterPattern);
         if (matches && !hasValidApiKey) {
@@ -671,8 +682,8 @@ function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boole
         }
     }
 
-    const sortParam = url.searchParams.get('sort');
-    if (sortParam) {
+    const sortParams = url.searchParams.getAll('sort');
+    for (const sortParam of sortParams) {
         const sortPattern = /(?:from_|to_)?(?:updated|created)_date(?::(?:asc|desc))?/;
         const matches = sortParam.match(sortPattern);
         if (matches && !hasValidApiKey) {

@@ -162,6 +162,19 @@ export class RateLimiter implements DurableObject {
             return Response.json({ consumed });
         }
 
+        // Restore consumed credits to the DO after a failed DB writeback.
+        // This re-adds credits that /begin-writeback claimed but couldn't write to DB.
+        if (url.pathname === '/restore-consumed') {
+            const restoreAmount = body.consumedWriteback ?? 0;
+            if (restoreAmount > 0 && this.onetimeCounter) {
+                this.onetimeCounter.consumed += restoreAmount;
+                await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
+                this.onetimeCounter.dirty = false;
+                this.onetimeCounter.lastPersisted = Date.now();
+            }
+            return Response.json({ consumed: this.onetimeCounter!.consumed });
+        }
+
         // Sync endpoint - called after writeback to DB to reconcile consumed counter
         // DEPRECATED: prefer /begin-writeback for atomic claim-and-reset
         if (url.pathname === '/sync') {
@@ -188,7 +201,10 @@ export class RateLimiter implements DurableObject {
                 const onetimeRefund = Math.min(refundRemaining, this.onetimeCounter.consumed);
                 if (onetimeRefund > 0) {
                     this.onetimeCounter.consumed -= onetimeRefund;
-                    this.onetimeCounter.dirty = true;
+                    // Persist immediately — DO eviction before next /check would lose the refund
+                    await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
+                    this.onetimeCounter.dirty = false;
+                    this.onetimeCounter.lastPersisted = Date.now();
                     refundRemaining -= onetimeRefund;
                 }
             }
@@ -198,7 +214,10 @@ export class RateLimiter implements DurableObject {
                 const dailyRefund = Math.min(refundRemaining, this.dailyCounter!.count);
                 if (dailyRefund > 0) {
                     this.dailyCounter!.count -= dailyRefund;
-                    this.dailyCounter!.dirty = true;
+                    // Persist immediately — same reason as onetime
+                    await this.state.storage.put('counter', { count: this.dailyCounter!.count, date: this.dailyCounter!.date });
+                    this.dailyCounter!.dirty = false;
+                    this.dailyCounter!.lastPersisted = Date.now();
                 }
             }
 
@@ -245,7 +264,13 @@ export class RateLimiter implements DurableObject {
         } else if (onetimeAvailable >= credits) {
             // Daily exhausted, use one-time pool
             this.onetimeCounter!.consumed += credits;
-            this.onetimeCounter!.dirty = true;
+            // Persist immediately — prepaid credits are real money.
+            // The old dirty-flag + alarm pattern was dead code (dirty already true
+            // when the alarm check ran), so onetime consumption was never persisted
+            // via alarm. DO eviction = lost consumption = free API calls.
+            await this.state.storage.put('onetime', { consumed: this.onetimeCounter!.consumed });
+            this.onetimeCounter!.dirty = false;
+            this.onetimeCounter!.lastPersisted = Date.now();
             fromOnetime = true;
         } else {
             // Both pools exhausted
@@ -272,10 +297,8 @@ export class RateLimiter implements DurableObject {
             await this.state.storage.setAlarm(Date.now() + PERSIST_INTERVAL_MS);
         }
 
-        if (fromOnetime && !this.onetimeCounter!.dirty) {
-            // Already set dirty above, just ensure alarm
-            await this.state.storage.setAlarm(Date.now() + PERSIST_INTERVAL_MS);
-        }
+        // Onetime counter is now persisted immediately in the consumption path above.
+        // No alarm scheduling needed for onetime.
 
         // Write-behind: If it's been a while, save now
         const oldestPersist = Math.min(
