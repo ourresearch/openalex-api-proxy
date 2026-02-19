@@ -148,16 +148,31 @@ export class RateLimiter implements DurableObject {
             });
         }
 
+        // Atomic writeback: read consumed AND reset to 0 in one serialized call.
+        // This prevents concurrent writebacks from reading the same consumed value.
+        if (url.pathname === '/begin-writeback') {
+            const consumed = this.onetimeCounter!.consumed;
+            if (consumed <= 0) return Response.json({ consumed: 0 });
+            // Atomically claim: reset consumed, preserving 0 for concurrent callers
+            this.onetimeCounter!.consumed = 0;
+            // Persist immediately so DO eviction doesn't revert to stale value
+            await this.state.storage.put('onetime', { consumed: 0 });
+            this.onetimeCounter!.dirty = false;
+            this.onetimeCounter!.lastPersisted = Date.now();
+            return Response.json({ consumed });
+        }
+
         // Sync endpoint - called after writeback to DB to reconcile consumed counter
+        // DEPRECATED: prefer /begin-writeback for atomic claim-and-reset
         if (url.pathname === '/sync') {
             const consumedWriteback = body.consumedWriteback ?? 0;
             if (consumedWriteback > 0 && this.onetimeCounter) {
                 // Subtract what was written back, preserving any credits consumed during the sync window
                 this.onetimeCounter.consumed = Math.max(0, this.onetimeCounter.consumed - consumedWriteback);
-                this.onetimeCounter.dirty = true;
-                if (!this.onetimeCounter.dirty) {
-                    await this.state.storage.setAlarm(Date.now() + PERSIST_INTERVAL_MS);
-                }
+                // Persist immediately so DO eviction doesn't revert to stale consumed value
+                await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
+                this.onetimeCounter.dirty = false;
+                this.onetimeCounter.lastPersisted = Date.now();
             }
             return Response.json({
                 onetimeConsumed: this.onetimeCounter!.consumed,

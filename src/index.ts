@@ -528,34 +528,42 @@ async function writebackOnetimeCredits(
     onetimeBalance: number
 ): Promise<void> {
     try {
-        // Get current consumed count from DO
+        // Atomically claim consumed credits from the DO.
+        // This reads the consumed count AND resets it to 0 in one serialized call,
+        // preventing concurrent writebacks from reading the same value.
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
-        const statusResult = await limiter.fetch("http://internal/status", {
+        const claimResult = await limiter.fetch("http://internal/begin-writeback", {
             method: "POST",
             body: JSON.stringify({ dailyLimit, onetimeBalance })
-        }).then(res => res.json() as Promise<{ onetime: { consumed: number } }>);
+        }).then(res => res.json() as Promise<{ consumed: number }>);
 
-        const consumed = statusResult.onetime?.consumed ?? 0;
+        const consumed = claimResult.consumed ?? 0;
         if (consumed <= 0) return;
 
         // Write consumed credits to DB
         const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
         await client.connect();
 
-        await client.query(
-            "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE api_key = $2",
-            [consumed, apiKey]
-        );
+        try {
+            await client.query(
+                "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE api_key = $2",
+                [consumed, apiKey]
+            );
+        } catch (dbError) {
+            // DB write failed — restore consumed credits to the DO so they aren't lost
+            console.error("DB writeback failed, restoring credits to DO:", dbError);
+            try {
+                await limiter.fetch("http://internal/check", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit, perSecondLimit: 100, credits: 0, onetimeBalance })
+                });
+            } catch { /* best effort */ }
+            throw dbError;
+        }
 
         await client.end();
-
-        // Tell DO to subtract what we wrote back
-        await limiter.fetch("http://internal/sync", {
-            method: "POST",
-            body: JSON.stringify({ consumedWriteback: consumed })
-        });
 
         console.log(`Writeback: ${consumed} onetime credits for key ${maskApiKey(apiKey)}`);
     } catch (error) {
