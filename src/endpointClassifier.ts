@@ -1,4 +1,4 @@
-export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'vector' | 'text';
+export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text';
 
 export interface EndpointClassification {
     type: EndpointType;
@@ -11,7 +11,7 @@ const ENTITY_TYPES = ['works', 'authors', 'sources', 'institutions',
 // OpenAlex IDs: optional letter prefix followed by digits (e.g., W123, 123, A456)
 const OPENALEX_ID_PATTERN = /^[A-Za-z]?\d+$/;
 
-// Search-type filters in the filter= param that trigger 10-credit pricing
+// Search-type filters in the filter= param that trigger 10-credit search pricing
 const SEARCH_FILTERS = [
     'abstract.search',
     'default.search',
@@ -33,11 +33,6 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
         return { type: 'text', creditCost: 100 };
     }
 
-    // Vector search endpoints (legacy /vector/ and /search/ paths)
-    if (/^(vector|search)\//.test(normalized)) {
-        return { type: 'vector', creditCost: 10 };
-    }
-
     // Content downloads: /works/{work_id}.pdf or .grobid-xml (for content.openalex.org)
     // Match paths with file extensions or legacy /content/* paths
     if (/^works\/[^/]+\.(pdf|grobid-xml)$/i.test(normalized)) {
@@ -49,6 +44,11 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
         // Singleton: /entity/ID or /entity/ID/subpath (e.g., /works/W123/ngrams)
         if (segments.length >= 2 && OPENALEX_ID_PATTERN.test(segments[1])) {
             return { type: 'singleton', creditCost: 0 };
+        }
+
+        // Semantic search (search.semantic=) → 100 credits
+        if (searchParams && hasSemanticSearch(searchParams)) {
+            return { type: 'semantic', creditCost: 100 };
         }
 
         // Check if request has search params → 10 credits
@@ -70,19 +70,28 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
 }
 
 /**
- * Check if the request contains any search parameters that trigger 10-credit pricing.
+ * Check if the request contains search.semantic parameter (100-credit semantic search).
+ */
+function hasSemanticSearch(searchParams: URLSearchParams): boolean {
+    for (const key of searchParams.keys()) {
+        if (key === 'search.semantic') return true;
+    }
+    return false;
+}
+
+/**
+ * Check if the request contains search parameters that trigger 10-credit pricing.
  *
  * This includes:
  * - search= (bare search param)
- * - search.semantic= (vector search)
  * - search.exact= (exact search)
- * - Any search.* dot notation param
+ * - Any search.* dot notation param (except search.semantic, which is 100 credits)
  * - Search-type filters in filter= (e.g., title.search:, abstract.search:)
  */
 function hasSearchParams(searchParams: URLSearchParams): boolean {
-    // Check for search or search.* params
+    // Check for search or search.* params (excluding search.semantic)
     for (const key of searchParams.keys()) {
-        if (key === 'search' || key.startsWith('search.')) {
+        if (key === 'search' || (key.startsWith('search.') && key !== 'search.semantic')) {
             return true;
         }
     }

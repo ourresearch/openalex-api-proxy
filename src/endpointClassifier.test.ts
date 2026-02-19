@@ -100,17 +100,33 @@ describe('endpointClassifier', () => {
         });
     });
 
-    describe('vector endpoints (future)', () => {
-        it('classifies /vector/search as vector (10 credits)', () => {
-            const result = classifyEndpoint('/vector/search');
-            expect(result.type).toBe('vector');
-            expect(result.creditCost).toBe(10);
+    describe('semantic search endpoints (100 credits)', () => {
+        it('classifies ?search.semantic=ML as semantic (100 credits)', () => {
+            const params = new URLSearchParams('search.semantic=machine+learning');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('semantic');
+            expect(result.creditCost).toBe(100);
         });
 
-        it('classifies /search/works as vector (10 credits)', () => {
+        it('semantic takes priority when mixed with regular search', () => {
+            const params = new URLSearchParams('search=cancer&search.semantic=ML');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('semantic');
+            expect(result.creditCost).toBe(100);
+        });
+    });
+
+    describe('legacy vector paths (no longer special)', () => {
+        it('classifies /vector/search as default list (1 credit)', () => {
+            const result = classifyEndpoint('/vector/search');
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
+        });
+
+        it('classifies /search/works as default list (1 credit)', () => {
             const result = classifyEndpoint('/search/works');
-            expect(result.type).toBe('vector');
-            expect(result.creditCost).toBe(10);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
         });
     });
 
@@ -122,11 +138,11 @@ describe('endpointClassifier', () => {
             expect(result.creditCost).toBe(10);
         });
 
-        it('classifies /works?search.semantic=machine+learning as search (10 credits)', () => {
+        it('classifies /works?search.semantic=machine+learning as semantic (100 credits)', () => {
             const params = new URLSearchParams('search.semantic=machine+learning');
             const result = classifyEndpoint('/works', params);
-            expect(result.type).toBe('search');
-            expect(result.creditCost).toBe(10);
+            expect(result.type).toBe('semantic');
+            expect(result.creditCost).toBe(100);
         });
 
         it('classifies /works?search.exact=running as search (10 credits)', () => {

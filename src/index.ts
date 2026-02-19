@@ -796,7 +796,7 @@ async function handleRateLimitEndpoint(
                 list: creditsToUsd(1),
                 search: creditsToUsd(searchCreditCost),
                 content: creditsToUsd(100),
-                vector: creditsToUsd(10),
+                semantic: creditsToUsd(100),
                 text: creditsToUsd(100)
             },
             // Legacy credit fields (kept for backward compat during transition)
@@ -811,7 +811,7 @@ async function handleRateLimitEndpoint(
                 list: 1,
                 search: searchCreditCost,
                 content: 100,
-                vector: 10,
+                semantic: 100,
                 text: 100
             }
         }
