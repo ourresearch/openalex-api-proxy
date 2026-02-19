@@ -372,7 +372,8 @@ export default {
         const proxyHeaders = new Headers({
             "User-Agent": "OpenAlex-Proxy/1.0",
             "Accept": req.headers.get("Accept") || "application/json",
-            "Accept-Encoding": req.headers.get("Accept-Encoding") || ""
+            "Accept-Encoding": req.headers.get("Accept-Encoding") || "",
+            "X-Cost-USD": creditsToUsd(creditCost).toString()
         });
 
         // Only add Content-Type for POST requests
