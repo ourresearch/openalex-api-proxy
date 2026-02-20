@@ -100,19 +100,19 @@ describe('endpointClassifier', () => {
         });
     });
 
-    describe('semantic search endpoints (100 credits)', () => {
-        it('classifies ?search.semantic=ML as semantic (100 credits)', () => {
+    describe('semantic search endpoints (10 credits)', () => {
+        it('classifies ?search.semantic=ML as semantic (10 credits)', () => {
             const params = new URLSearchParams('search.semantic=machine+learning');
             const result = classifyEndpoint('/works', params);
             expect(result.type).toBe('semantic');
-            expect(result.creditCost).toBe(100);
+            expect(result.creditCost).toBe(10);
         });
 
         it('semantic takes priority when mixed with regular search', () => {
             const params = new URLSearchParams('search=cancer&search.semantic=ML');
             const result = classifyEndpoint('/works', params);
             expect(result.type).toBe('semantic');
-            expect(result.creditCost).toBe(100);
+            expect(result.creditCost).toBe(10);
         });
     });
 
@@ -161,11 +161,11 @@ describe('endpointClassifier', () => {
             expect(result.creditCost).toBe(10);
         });
 
-        it('classifies /works?search.semantic=machine+learning as semantic (100 credits)', () => {
+        it('classifies /works?search.semantic=machine+learning as semantic (10 credits)', () => {
             const params = new URLSearchParams('search.semantic=machine+learning');
             const result = classifyEndpoint('/works', params);
             expect(result.type).toBe('semantic');
-            expect(result.creditCost).toBe(100);
+            expect(result.creditCost).toBe(10);
         });
 
         it('classifies /works?search.exact=running as search (10 credits)', () => {

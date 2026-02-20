@@ -52,9 +52,9 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
             return { type: 'list', creditCost: 1 };
         }
 
-        // Semantic search (search.semantic=) → 100 credits
+        // Semantic search (search.semantic=) → 10 credits
         if (searchParams && hasSemanticSearch(searchParams)) {
-            return { type: 'semantic', creditCost: 100 };
+            return { type: 'semantic', creditCost: 10 };
         }
 
         // Check if request has search params → 10 credits
@@ -76,7 +76,7 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
 }
 
 /**
- * Check if the request contains search.semantic parameter (100-credit semantic search).
+ * Check if the request contains search.semantic parameter (10-credit semantic search).
  */
 function hasSemanticSearch(searchParams: URLSearchParams): boolean {
     for (const key of searchParams.keys()) {
@@ -91,7 +91,7 @@ function hasSemanticSearch(searchParams: URLSearchParams): boolean {
  * This includes:
  * - search= (bare search param)
  * - search.exact= (exact search)
- * - Any search.* dot notation param (except search.semantic, which is 100 credits)
+ * - Any search.* dot notation param (except search.semantic, which is 10 credits)
  * - Search-type filters in filter= (e.g., title.search:, abstract.search:)
  */
 function hasSearchParams(searchParams: URLSearchParams): boolean {
