@@ -52,6 +52,13 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
             return { type: 'list', creditCost: 1 };
         }
 
+        // Autocomplete-style searches: search + per_page ≤ 10 + select present
+        // These lightweight queries power the GUI search box autocomplete and
+        // are free for everyone
+        if (searchParams && isAutocompleteSearch(searchParams)) {
+            return { type: 'list', creditCost: 0 };
+        }
+
         // Semantic search (search.semantic=) → 10 credits
         if (searchParams && hasSemanticSearch(searchParams)) {
             return { type: 'semantic', creditCost: 10 };
@@ -73,6 +80,19 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
 
     // Default: treat as list (safe default)
     return { type: 'list', creditCost: 1 };
+}
+
+/**
+ * Detect autocomplete-style search requests: bare `search` param with small
+ * per_page and a `select` projection.  These are cheap queries used by the
+ * GUI's search-box autocomplete dropdown and are free for all callers.
+ */
+function isAutocompleteSearch(searchParams: URLSearchParams): boolean {
+    if (!searchParams.has('search')) return false;
+    const perPage = searchParams.get('per_page') || searchParams.get('per-page');
+    if (!perPage || parseInt(perPage, 10) > 10) return false;
+    if (searchParams.get('select') !== 'id,display_name,works_count') return false;
+    return true;
 }
 
 /**

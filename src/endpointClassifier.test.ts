@@ -153,6 +153,57 @@ describe('endpointClassifier', () => {
         });
     });
 
+    describe('autocomplete-style search (0 credits)', () => {
+        it('classifies search + per_page=10 + select as free', () => {
+            const params = new URLSearchParams('search=einstein&per_page=10&select=id,display_name,works_count');
+            const result = classifyEndpoint('/authors', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies search + per_page=5 + exact select as free', () => {
+            const params = new URLSearchParams('search=harvard&per_page=5&select=id,display_name,works_count');
+            const result = classifyEndpoint('/institutions', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('does NOT classify as free with a different select', () => {
+            const params = new URLSearchParams('search=harvard&per_page=10&select=id,display_name');
+            const result = classifyEndpoint('/institutions', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('does NOT classify as free when per_page > 10', () => {
+            const params = new URLSearchParams('search=cancer&per_page=25&select=id,display_name,works_count');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('does NOT classify as free when select is missing', () => {
+            const params = new URLSearchParams('search=cancer&per_page=10');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('does NOT classify as free when per_page is missing', () => {
+            const params = new URLSearchParams('search=cancer&select=id,display_name,works_count');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('group_by still overrides even with autocomplete pattern', () => {
+            const params = new URLSearchParams('search=frogs&per_page=10&select=id,display_name,works_count&group_by=type');
+            const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(1);
+        });
+    });
+
     describe('search endpoints (10 credits)', () => {
         it('classifies /works?search=cancer as search (10 credits)', () => {
             const params = new URLSearchParams('search=cancer');
