@@ -22,6 +22,7 @@ export class RateLimiter implements DurableObject {
     private perSecondBucket: TokenBucket | null = null;
     private dailyCounter: DailyCounter | null = null;
     private onetimeCounter: OnetimeCounter | null = null;
+    private lastSemanticTime: number = 0; // Temporary: 1 req/s limit for semantic search
 
     constructor(private readonly state: DurableObjectState) {
         this.state.blockConcurrencyWhile(async () => {
@@ -126,6 +127,18 @@ export class RateLimiter implements DurableObject {
                 lastPersisted: now,
                 dirty: false
             };
+        }
+
+        // Temporary: per-user 1 req/s limit for semantic search (in-memory only)
+        if (url.pathname === '/check-semantic') {
+            const SEMANTIC_INTERVAL_MS = 1000;
+            const elapsed = now - this.lastSemanticTime;
+            if (this.lastSemanticTime > 0 && elapsed < SEMANTIC_INTERVAL_MS) {
+                const retryAfter = (SEMANTIC_INTERVAL_MS - elapsed) / 1000;
+                return Response.json({ success: false, retryAfter });
+            }
+            this.lastSemanticTime = now;
+            return Response.json({ success: true });
         }
 
         // Status endpoint - returns current usage without incrementing

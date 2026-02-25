@@ -175,6 +175,47 @@ export default {
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
+        // Temporary: enforce 1 req/s per user for semantic search
+        if (classification.type === 'semantic') {
+            try {
+                const semanticCheck = await limiter.fetch("http://internal/check-semantic", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit: limit })
+                }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
+
+                if (!semanticCheck.success) {
+                    const retryAfter = Math.ceil(semanticCheck.retryAfter || 1);
+                    const errorResponse = new Response(JSON.stringify({
+                        error: "Rate limit exceeded",
+                        message: `Semantic search is limited to 1 request per second. Please wait and try again.`,
+                        retryAfter
+                    }), {
+                        status: 429,
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Retry-After": retryAfter.toString(),
+                            ...Object.fromEntries(getCorsHeaders())
+                        }
+                    });
+
+                    logAnalytics({
+                        ctx, env, apiKey, req, url, scope,
+                        responseTime: Date.now() - startTime,
+                        statusCode: 429,
+                        rateLimit: limit,
+                        rateLimitRemaining: 0,
+                        endpointType: classification.type,
+                        creditCost
+                    });
+
+                    return errorResponse;
+                }
+            } catch (error) {
+                // Fail-open: if DO call fails, allow the request through
+                console.error("Semantic rate limit check error:", error);
+            }
+        }
+
         let rateLimitResult: {
             success: boolean;
             retryAfter?: number;
