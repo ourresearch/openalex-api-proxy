@@ -34,8 +34,8 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
     }
 
     // Content downloads: /works/{work_id}.pdf or .grobid-xml (for content.openalex.org)
-    // Match paths with file extensions or legacy /content/* paths
-    if (/^works\/[^/]+\.(pdf|grobid-xml)$/i.test(normalized)) {
+    // Match paths with file extensions, including /content/* prefix from api.openalex.org
+    if (/^(content\/)?works\/[^/]+\.(pdf|grobid-xml)$/i.test(normalized)) {
         return { type: 'content', creditCost: 100 };
     }
 

@@ -58,7 +58,7 @@ export function logAnalytics(params: {
                         params.statusCode,          // double2: HTTP status
                         params.rateLimit,           // double3: rate limit (credits)
                         params.rateLimitRemaining,  // double4: credits remaining
-                        params.creditCost || 1      // double5: credits consumed for this request
+                        params.creditCost ?? 1      // double5: credits consumed for this request
                     ]
                 });
             } catch (error) {

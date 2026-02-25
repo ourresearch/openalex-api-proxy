@@ -205,32 +205,32 @@ export class RateLimiter implements DurableObject {
             });
         }
 
-        // Refund endpoint - returns credits (LIFO: one-time first, then daily)
+        // Refund endpoint - returns credits (daily first, matching charge order)
         if (url.pathname === '/refund') {
             let refundRemaining = credits;
 
-            // Refund to one-time pool first (LIFO)
-            if (this.onetimeCounter && this.onetimeCounter.consumed > 0 && refundRemaining > 0) {
-                const onetimeRefund = Math.min(refundRemaining, this.onetimeCounter.consumed);
-                if (onetimeRefund > 0) {
-                    this.onetimeCounter.consumed -= onetimeRefund;
-                    // Persist immediately — DO eviction before next /check would lose the refund
-                    await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
-                    this.onetimeCounter.dirty = false;
-                    this.onetimeCounter.lastPersisted = Date.now();
-                    refundRemaining -= onetimeRefund;
-                }
-            }
-
-            // Refund remainder to daily pool
+            // Refund to daily pool first (matches charge order: daily is charged first)
             if (refundRemaining > 0) {
                 const dailyRefund = Math.min(refundRemaining, this.dailyCounter!.count);
                 if (dailyRefund > 0) {
                     this.dailyCounter!.count -= dailyRefund;
-                    // Persist immediately — same reason as onetime
+                    // Persist immediately — DO eviction before next /check would lose the refund
                     await this.state.storage.put('counter', { count: this.dailyCounter!.count, date: this.dailyCounter!.date });
                     this.dailyCounter!.dirty = false;
                     this.dailyCounter!.lastPersisted = Date.now();
+                    refundRemaining -= dailyRefund;
+                }
+            }
+
+            // Refund remainder to one-time pool
+            if (this.onetimeCounter && this.onetimeCounter.consumed > 0 && refundRemaining > 0) {
+                const onetimeRefund = Math.min(refundRemaining, this.onetimeCounter.consumed);
+                if (onetimeRefund > 0) {
+                    this.onetimeCounter.consumed -= onetimeRefund;
+                    // Persist immediately — same reason as daily
+                    await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
+                    this.onetimeCounter.dirty = false;
+                    this.onetimeCounter.lastPersisted = Date.now();
                 }
             }
 

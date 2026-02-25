@@ -674,8 +674,8 @@ function getTargetApiUrl(url: URL, env: Env): string {
                 }
 
                 // Route to SEARCH_API_URL if filter contains search filters
-                const filterParam = url.searchParams.get('filter');
-                if (filterParam) {
+                const filterParams = url.searchParams.getAll('filter');
+                if (filterParams.length > 0) {
                     const SEARCH_FILTERS = [
                         'abstract.search',
                         'default.search',
@@ -687,7 +687,9 @@ function getTargetApiUrl(url: URL, env: Env): string {
                         'title.search',
                         'title_and_abstract.search'
                     ];
-                    const hasSearchFilter = SEARCH_FILTERS.some(f => filterParam.includes(f));
+                    const hasSearchFilter = filterParams.some(fp =>
+                        SEARCH_FILTERS.some(f => fp.includes(f))
+                    );
                     if (hasSearchFilter) {
                         return env.SEARCH_API_URL;
                     }
