@@ -22,6 +22,7 @@ const API_KEY_CACHE = new Map<string, {
     isGrandfathered?: boolean;
     onetimeCreditsBalance?: number;
     onetimeCreditsExpiresAt?: string;
+    plan?: string | null;
     error?: string;
     cachedAt: number;
 }>();
@@ -69,6 +70,7 @@ export default {
 
         let onetimeCreditsBalance = 0;
         let onetimeCreditsExpiresAt: string | undefined;
+        let userPlan: string | null = null;
 
         if (apiKey && !isChangefilesBrowse) {
             const authResult = await checkApiKey(req, env);
@@ -109,6 +111,7 @@ export default {
             isGrandfathered = authResult.isGrandfathered || false;
             onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
             onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
+            userPlan = authResult.plan ?? null;
 
             // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
             if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
@@ -119,14 +122,14 @@ export default {
             }
         }
 
-        const protectedParamCheck = checkProtectedParams(url, hasValidApiKey);
+        const protectedParamCheck = checkProtectedParams(url, hasValidApiKey, userPlan);
         if (!protectedParamCheck.valid) {
-            const errorResponse = json(403, {
-                error: "Forbidden",
+            const errorResponse = json(429, {
+                error: "Plan upgrade required",
                 message: protectedParamCheck.error
             });
 
-            // Log 403 error
+            // Log 429 plan-restriction error
             logAnalytics({
                 ctx,
                 env,
@@ -135,7 +138,7 @@ export default {
                 url,
                 scope: 'main',
                 responseTime: Date.now() - startTime,
-                statusCode: 403,
+                statusCode: 429,
                 rateLimit: 0,
                 rateLimitRemaining: 0
             });
@@ -490,7 +493,7 @@ function getApiKeyFromRequest(req: Request): string | null {
     );
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number, maxCreditsPerDay?: number, isGrandfathered?: boolean, onetimeCreditsBalance?: number, onetimeCreditsExpiresAt?: string, cacheRefreshed?: boolean}> {
+async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number, maxCreditsPerDay?: number, isGrandfathered?: boolean, onetimeCreditsBalance?: number, onetimeCreditsExpiresAt?: string, plan?: string | null, cacheRefreshed?: boolean}> {
     const apiKey = getApiKeyFromRequest(req);
     if (!apiKey) return { valid: false };
 
@@ -507,6 +510,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             isGrandfathered: cached.isGrandfathered,
             onetimeCreditsBalance: cached.onetimeCreditsBalance,
             onetimeCreditsExpiresAt: cached.onetimeCreditsExpiresAt,
+            plan: cached.plan,
             cacheRefreshed: false
         };
     }
@@ -519,7 +523,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         await client.connect();
 
         const queryResult = await client.query(
-            "SELECT max_per_day, max_credits_per_day, is_grandfathered, onetime_credits_balance, onetime_credits_expires_at FROM api_keys_view WHERE api_key = $1",
+            "SELECT max_per_day, max_credits_per_day, is_grandfathered, onetime_credits_balance, onetime_credits_expires_at, plan FROM api_keys_view WHERE api_key = $1",
             [apiKey]
         );
 
@@ -540,6 +544,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             isGrandfathered: row.is_grandfathered as boolean,
             onetimeCreditsBalance: (row.onetime_credits_balance as number) ?? 0,
             onetimeCreditsExpiresAt: row.onetime_credits_expires_at ? String(row.onetime_credits_expires_at) : undefined,
+            plan: (row.plan as string) ?? null,
             cacheRefreshed: true
         };
 
@@ -553,7 +558,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         if (client) {
             try { await client.end(); } catch { /* ignore */ }
         }
-        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false, onetimeCreditsBalance: 0 };
+        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false, onetimeCreditsBalance: 0, plan: null };
     }
 }
 
@@ -710,17 +715,26 @@ function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
     return pathname;
 }
 
-function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boolean; error?: string } {
+// Plans that are allowed to use from_created_date, from_updated_date, and related filters/sorts
+const PLANS_WITH_DATE_FILTERS = new Set([
+    'premium-1M', 'premium-2M', 'premium-5M', 'premium-10M',
+    'institutional', 'institutional-1M', 'institutional-2M',
+    'partner',
+]);
+
+function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | null): { valid: boolean; error?: string } {
+    const hasPlanAccess = plan !== null && PLANS_WITH_DATE_FILTERS.has(plan);
+
     // Use getAll() to check ALL values — duplicate params (e.g., ?filter=safe&filter=date_filter)
     // could bypass the check if we only inspect the first value.
     const filterParams = url.searchParams.getAll('filter');
     for (const filterParam of filterParams) {
         const filterPattern = /(?:from_|to_)?(?:updated|created)_date:[><]?\d{4}-\d{2}-\d{2}/;
         const matches = filterParam.match(filterPattern);
-        if (matches && !hasValidApiKey) {
+        if (matches && !hasPlanAccess) {
             return {
                 valid: false,
-                error: `You must include a valid API key to use "${matches[0]}" with filter`
+                error: `The "${matches[0]}" filter requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
             };
         }
     }
@@ -729,10 +743,10 @@ function checkProtectedParams(url: URL, hasValidApiKey: boolean): { valid: boole
     for (const sortParam of sortParams) {
         const sortPattern = /(?:from_|to_)?(?:updated|created)_date(?::(?:asc|desc))?/;
         const matches = sortParam.match(sortPattern);
-        if (matches && !hasValidApiKey) {
+        if (matches && !hasPlanAccess) {
             return {
                 valid: false,
-                error: `You must include a valid API key to use "${matches[0]}" with sort`
+                error: `Sorting by "${matches[0]}" requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
             };
         }
     }
