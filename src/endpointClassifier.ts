@@ -11,6 +11,12 @@ const ENTITY_TYPES = ['works', 'authors', 'sources', 'institutions',
 // OpenAlex IDs: optional letter prefix followed by digits (e.g., W123, 123, A456)
 const OPENALEX_ID_PATTERN = /^[A-Za-z]?\d+$/;
 
+// External ID prefixes that indicate a singleton lookup (e.g., doi:10.1038/..., pmid:29456894)
+const EXTERNAL_ID_PREFIXES = [
+    'doi:', 'pmid:', 'pmcid:', 'mag:', 'openalex:',
+    'orcid:', 'ror:', 'wikidata:', 'issn:', 'issn_l:', 'scopus:'
+];
+
 // Search-type filters in the filter= param that trigger 10-credit search pricing
 const SEARCH_FILTERS = [
     'abstract.search',
@@ -42,7 +48,8 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
     // Entity endpoints
     if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
         // Singleton: /entity/ID or /entity/ID/subpath (e.g., /works/W123/ngrams)
-        if (segments.length >= 2 && OPENALEX_ID_PATTERN.test(segments[1])) {
+        // Matches OpenAlex IDs (W123, 123) and external ID prefixes (doi:..., pmid:..., etc.)
+        if (segments.length >= 2 && isSingletonIdentifier(segments[1])) {
             return { type: 'singleton', creditCost: 0 };
         }
 
@@ -131,4 +138,14 @@ function hasSearchParams(searchParams: URLSearchParams): boolean {
     }
 
     return false;
+}
+
+/**
+ * Check if a URL path segment is a singleton entity identifier.
+ * Matches OpenAlex IDs (W123, 123) and external ID prefixes (doi:..., pmid:..., etc.)
+ */
+function isSingletonIdentifier(segment: string): boolean {
+    if (OPENALEX_ID_PATTERN.test(segment)) return true;
+    const lower = segment.toLowerCase();
+    return EXTERNAL_ID_PREFIXES.some(prefix => lower.startsWith(prefix));
 }

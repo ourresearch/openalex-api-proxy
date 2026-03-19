@@ -32,6 +32,79 @@ describe('endpointClassifier', () => {
             expect(result.type).toBe('singleton');
             expect(result.creditCost).toBe(0);
         });
+
+        // External ID formats
+        it('classifies /works/doi:10.1038/s41586-024-07386-0 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/works/doi:10.1038/s41586-024-07386-0');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /works/pmid:29456894 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/works/pmid:29456894');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /works/pmcid:PMC6789 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/works/pmcid:PMC6789');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /works/mag:123456789 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/works/mag:123456789');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /works/openalex:W2741809807 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/works/openalex:W2741809807');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /authors/orcid:0000-0003-1613-5981 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/authors/orcid:0000-0003-1613-5981');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /institutions/ror:03vek6s52 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/institutions/ror:03vek6s52');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /institutions/wikidata:Q49108 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/institutions/wikidata:Q49108');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /sources/issn:0028-0836 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/sources/issn:0028-0836');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /sources/issn_l:0028-0836 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/sources/issn_l:0028-0836');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /authors/scopus:12345678 as singleton (0 credits)', () => {
+            const result = classifyEndpoint('/authors/scopus:12345678');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies external IDs case-insensitively (DOI: prefix)', () => {
+            const result = classifyEndpoint('/works/DOI:10.1038/s41586-024-07386-0');
+            expect(result.type).toBe('singleton');
+            expect(result.creditCost).toBe(0);
+        });
     });
 
     describe('list endpoints', () => {
