@@ -55,6 +55,19 @@ export default {
 
         const url = new URL(req.url);
 
+        // Route /cv-parse/* to CV parser worker (before API key validation —
+        // CV parse uses user JWT auth, not OpenAlex API keys)
+        if (env.CV_PARSER && /^\/cv-parse(\/|$)/i.test(url.pathname)) {
+            const cvPath = url.pathname.replace(/^\/cv-parse/, '') || '/';
+            const cvUrl = new URL(req.url);
+            cvUrl.pathname = cvPath;
+            const cvResponse = await env.CV_PARSER.fetch(new Request(cvUrl, req));
+            return addCorsHeaders(new Response(cvResponse.body, {
+                status: cvResponse.status,
+                headers: cvResponse.headers,
+            }));
+        }
+
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
 
@@ -315,18 +328,6 @@ export default {
                 error: "API key required",
                 message: "Changefile downloads require an API key. Get one at https://openalex.org/pricing"
             });
-        }
-
-        // Route /cv-parse/* to CV parser worker
-        if (env.CV_PARSER && /^\/cv-parse(\/|$)/i.test(url.pathname)) {
-            const cvPath = url.pathname.replace(/^\/cv-parse/, '') || '/';
-            const cvUrl = new URL(req.url);
-            cvUrl.pathname = cvPath;
-            const cvResponse = await env.CV_PARSER.fetch(new Request(cvUrl, req));
-            return addCorsHeaders(new Response(cvResponse.body, {
-                status: cvResponse.status,
-                headers: cvResponse.headers,
-            }));
         }
 
         // Route content.openalex.org/* OR /content/* to content worker
