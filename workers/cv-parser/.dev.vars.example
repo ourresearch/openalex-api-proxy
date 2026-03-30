@@ -1,0 +1,2 @@
+# Copy this to .dev.vars (gitignored) for local development
+ANTHROPIC_API_KEY=sk-ant-your-key-here

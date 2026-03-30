@@ -1,0 +1,9 @@
+{
+  "name": "openalex-cv-parser",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "placement": {
+    "mode": "smart"
+  }
+}
