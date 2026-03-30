@@ -55,6 +55,10 @@
 		{
 			"binding": "CONTENT_WORKER",
 			"service": "openalex-content-worker"
+		},
+		{
+			"binding": "CV_PARSER",
+			"service": "openalex-cv-parser"
 		}
 	]
 }

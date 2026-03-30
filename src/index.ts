@@ -12,6 +12,7 @@ export interface Env {
     TEXT_API_URL: string;
     SEARCH_API_URL?: string;  // Optional - falls back to OPENALEX_API_URL if not set
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
+    CV_PARSER?: Fetcher;      // Service binding to openalex-cv-parser
 }
 
 // In-memory cache for API key validation
@@ -314,6 +315,18 @@ export default {
                 error: "API key required",
                 message: "Changefile downloads require an API key. Get one at https://openalex.org/pricing"
             });
+        }
+
+        // Route /cv-parse/* to CV parser worker
+        if (env.CV_PARSER && /^\/cv-parse(\/|$)/i.test(url.pathname)) {
+            const cvPath = url.pathname.replace(/^\/cv-parse/, '') || '/';
+            const cvUrl = new URL(req.url);
+            cvUrl.pathname = cvPath;
+            const cvResponse = await env.CV_PARSER.fetch(new Request(cvUrl, req));
+            return addCorsHeaders(new Response(cvResponse.body, {
+                status: cvResponse.status,
+                headers: cvResponse.headers,
+            }));
         }
 
         // Route content.openalex.org/* OR /content/* to content worker
