@@ -6,5 +6,11 @@
   "compatibility_flags": ["nodejs_compat"],
   "placement": {
     "mode": "smart"
+  },
+  // Use api.openalex.org by default. If sub-requests loop through the
+  // proxy and get blocked, set this to the direct upstream URL in the
+  // Cloudflare dashboard (Settings > Variables > Environment Variables).
+  "vars": {
+    "OPENALEX_API_BASE": "https://api.openalex.org"
   }
 }

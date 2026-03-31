@@ -7,6 +7,10 @@
  *   3. Full-text search (default.search) + fuzzy similarity
  *   4. Keyword search with year filter (if year available)
  *   5. Short title / last-resort keyword search
+ *
+ * The apiBase parameter controls which URL to call. When running
+ * inside the proxy's service binding, set OPENALEX_API_BASE to the
+ * upstream backend so sub-requests don't loop back through the proxy.
  */
 
 // ─── Types ───────────────────────────────────────────────────
@@ -37,14 +41,15 @@ export interface MatchedWork {
  * Returns the matched work or null.
  */
 export async function searchOpenAlex(
-  publication: CvPublication
+  publication: CvPublication,
+  apiBase: string = 'https://api.openalex.org'
 ): Promise<any | null> {
   // Strategy 1: DOI lookup (most reliable — exact match, no similarity needed)
   if (publication.doi) {
     const cleanDoi = cleanDOI(publication.doi);
     if (cleanDoi) {
       const parsed = await fetchJson(
-        `https://api.openalex.org/works/doi:${cleanDoi}`
+        `${apiBase}/works/doi:${cleanDoi}`
       );
       if (parsed?.id) {
         console.log(`  DOI match: ${cleanDoi} → "${parsed.display_name?.substring(0, 60)}"`);
@@ -61,11 +66,12 @@ export async function searchOpenAlex(
     .replace(/[:"'()[\]{}|\\]/g, ' ')  // strip chars that break filter syntax
     .replace(/\s+/g, ' ')
     .trim();
+  const titleEncoded = encodeURIComponent(safeTitle);
 
   // Strategy 2: title.search filter — best for exact/near-exact titles
   console.log(`  Searching for: "${safeTitle.substring(0, 80)}"`);
   const result1 = await fetchJson(
-    `https://api.openalex.org/works?filter=title.search:${encodeURIComponent(safeTitle)}&per_page=10`
+    `${apiBase}/works?filter=title.search:${titleEncoded}&per_page=10`
   );
   const match1 = bestMatch(result1?.results, publication, 0.35);
   if (match1) return match1;
@@ -73,7 +79,7 @@ export async function searchOpenAlex(
   // Strategy 3: Full-text search — catches partial title matches and subtitles
   await delay(200);
   const result2 = await fetchJson(
-    `https://api.openalex.org/works?search=${encodeURIComponent(safeTitle)}&per_page=10`
+    `${apiBase}/works?search=${titleEncoded}&per_page=10`
   );
   const match2 = bestMatch(result2?.results, publication, 0.35);
   if (match2) return match2;
@@ -86,7 +92,7 @@ export async function searchOpenAlex(
       ? `&filter=publication_year:${publication.year}`
       : '';
     const result3 = await fetchJson(
-      `https://api.openalex.org/works?search=${encodeURIComponent(keyWords)}${yearFilter}&per_page=10`
+      `${apiBase}/works?search=${encodeURIComponent(keyWords)}${yearFilter}&per_page=10`
     );
     const match3 = bestMatch(result3?.results, publication, 0.3);
     if (match3) return match3;
@@ -95,7 +101,7 @@ export async function searchOpenAlex(
     if (yearFilter) {
       await delay(200);
       const result3b = await fetchJson(
-        `https://api.openalex.org/works?search=${encodeURIComponent(keyWords)}&per_page=10`
+        `${apiBase}/works?search=${encodeURIComponent(keyWords)}&per_page=10`
       );
       const match3b = bestMatch(result3b?.results, publication, 0.35);
       if (match3b) return match3b;
@@ -110,7 +116,7 @@ export async function searchOpenAlex(
       ? `&filter=publication_year:${publication.year}`
       : '';
     const result5 = await fetchJson(
-      `https://api.openalex.org/works?search=${encodeURIComponent(firstWords)}${yearFilter}&per_page=10`
+      `${apiBase}/works?search=${encodeURIComponent(firstWords)}${yearFilter}&per_page=10`
     );
     const match5 = bestMatch(result5?.results, publication, 0.4);
     if (match5) return match5;
@@ -165,7 +171,7 @@ function tokenize(title: string): Set<string> {
 
 /**
  * Fuzzy title similarity using word overlap (F1 score).
- * Also considers character-level trigram overlap for partial word matches.
+ * Also considers stem/prefix matching for partial word matches.
  */
 function titleSimilarity(title1: string, title2: string): number {
   const words1 = tokenize(title1);
@@ -279,7 +285,7 @@ async function fetchJson(url: string): Promise<any | null> {
       headers: { 'User-Agent': 'OpenAlex-CV-Parser/1.0 (mailto:team@ourresearch.org)' },
     });
     if (!resp.ok) {
-      console.log(`  API error ${resp.status} for: ${fullUrl.substring(0, 120)}`);
+      console.log(`  API error ${resp.status} for: ${fullUrl.substring(0, 150)}`);
       return null;
     }
     return await resp.json();

@@ -18,6 +18,7 @@ import {
 
 export interface Env {
   ANTHROPIC_API_KEY: string;
+  OPENALEX_API_BASE?: string; // Direct upstream URL to avoid proxy loop
 }
 
 interface ParseCvResponse {
@@ -94,7 +95,8 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
 
   for (const pub of publications) {
     try {
-      const oaWork = await searchOpenAlex(pub);
+      const apiBase = env.OPENALEX_API_BASE || 'https://api.openalex.org';
+      const oaWork = await searchOpenAlex(pub, apiBase);
       if (oaWork) {
         // Check if this work is already linked to the author
         const authorShortId = authorId
