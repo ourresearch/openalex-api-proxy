@@ -55,23 +55,30 @@ export async function searchOpenAlex(
 
   if (!publication.title || publication.title.length < 10) return null;
 
+  // Sanitize title for use in API filters — remove characters that break filter syntax
+  const safeTitle = publication.title
+    .substring(0, 200)
+    .replace(/[:"'()[\]{}|\\]/g, ' ')  // strip chars that break filter syntax
+    .replace(/\s+/g, ' ')
+    .trim();
+
   // Strategy 2: title.search filter — best for exact/near-exact titles
-  const titleEncoded = encodeURIComponent(publication.title.substring(0, 200));
+  console.log(`  Searching for: "${safeTitle.substring(0, 80)}"`);
   const result1 = await fetchJson(
-    `https://api.openalex.org/works?filter=title.search:${titleEncoded}&per_page=10`
+    `https://api.openalex.org/works?filter=title.search:${encodeURIComponent(safeTitle)}&per_page=10`
   );
   const match1 = bestMatch(result1?.results, publication, 0.35);
   if (match1) return match1;
 
-  // Strategy 3: Full-text search — catches partial title matches
+  // Strategy 3: Full-text search — catches partial title matches and subtitles
   await delay(200);
   const result2 = await fetchJson(
-    `https://api.openalex.org/works?search=${titleEncoded}&per_page=10`
+    `https://api.openalex.org/works?search=${encodeURIComponent(safeTitle)}&per_page=10`
   );
   const match2 = bestMatch(result2?.results, publication, 0.35);
   if (match2) return match2;
 
-  // Strategy 4: Keywords + year filter (tighter constraint, but different results)
+  // Strategy 4: Keywords + year filter (tighter constraint, different result set)
   const keyWords = extractKeyWords(publication.title);
   if (keyWords.split(' ').length >= 3) {
     await delay(200);
@@ -83,17 +90,30 @@ export async function searchOpenAlex(
     );
     const match3 = bestMatch(result3?.results, publication, 0.3);
     if (match3) return match3;
+
+    // Strategy 4b: Keywords without year (in case year is wrong or missing)
+    if (yearFilter) {
+      await delay(200);
+      const result3b = await fetchJson(
+        `https://api.openalex.org/works?search=${encodeURIComponent(keyWords)}&per_page=10`
+      );
+      const match3b = bestMatch(result3b?.results, publication, 0.35);
+      if (match3b) return match3b;
+    }
   }
 
-  // Strategy 5: Cleaned/simplified title — strip parentheticals, special chars
-  const cleaned = cleanTitle(publication.title);
-  if (cleaned !== publication.title && cleaned.length > 15) {
+  // Strategy 5: First few significant words only — helps when Claude truncated or mangled the title
+  const firstWords = keyWords.split(' ').slice(0, 4).join(' ');
+  if (firstWords.length > 10 && firstWords !== keyWords) {
     await delay(200);
-    const result4 = await fetchJson(
-      `https://api.openalex.org/works?search=${encodeURIComponent(cleaned)}&per_page=10`
+    const yearFilter = publication.year
+      ? `&filter=publication_year:${publication.year}`
+      : '';
+    const result5 = await fetchJson(
+      `https://api.openalex.org/works?search=${encodeURIComponent(firstWords)}${yearFilter}&per_page=10`
     );
-    const match4 = bestMatch(result4?.results, publication, 0.3);
-    if (match4) return match4;
+    const match5 = bestMatch(result5?.results, publication, 0.4);
+    if (match5) return match5;
   }
 
   console.log(`  No match found for: "${publication.title.substring(0, 80)}"`);
@@ -252,12 +272,19 @@ function extractKeyWords(title: string): string {
 
 async function fetchJson(url: string): Promise<any | null> {
   try {
-    const resp = await fetch(url, {
+    // Add include_xpac and mailto to every request
+    const separator = url.includes('?') ? '&' : '?';
+    const fullUrl = `${url}${separator}include_xpac=true&mailto=team@ourresearch.org`;
+    const resp = await fetch(fullUrl, {
       headers: { 'User-Agent': 'OpenAlex-CV-Parser/1.0 (mailto:team@ourresearch.org)' },
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.log(`  API error ${resp.status} for: ${fullUrl.substring(0, 120)}`);
+      return null;
+    }
     return await resp.json();
-  } catch {
+  } catch (err: any) {
+    console.error(`  Fetch error: ${err.message}`);
     return null;
   }
 }
