@@ -2,10 +2,11 @@
  * OpenAlex work matching with multi-strategy fallback.
  *
  * Strategies (in order):
- *   1. DOI lookup (most reliable)
- *   2. Title search with similarity validation (threshold 0.4)
- *   3. Cleaned title search (strip HTML/parentheticals)
- *   4. Keyword search with higher threshold (0.5)
+ *   1. DOI lookup (most reliable — exact match)
+ *   2. Title search via title.search filter + fuzzy similarity
+ *   3. Full-text search (default.search) + fuzzy similarity
+ *   4. Keyword search with year filter (if year available)
+ *   5. Short title / last-resort keyword search
  */
 
 // ─── Types ───────────────────────────────────────────────────
@@ -38,46 +39,78 @@ export interface MatchedWork {
 export async function searchOpenAlex(
   publication: CvPublication
 ): Promise<any | null> {
-  // Strategy 1: DOI lookup (most reliable — no similarity check needed)
+  // Strategy 1: DOI lookup (most reliable — exact match, no similarity needed)
   if (publication.doi) {
-    const parsed = await fetchJson(
-      `https://api.openalex.org/works/doi:${publication.doi}`
-    );
-    if (parsed?.id) return parsed;
+    const cleanDoi = cleanDOI(publication.doi);
+    if (cleanDoi) {
+      const parsed = await fetchJson(
+        `https://api.openalex.org/works/doi:${cleanDoi}`
+      );
+      if (parsed?.id) {
+        console.log(`  DOI match: ${cleanDoi} → "${parsed.display_name?.substring(0, 60)}"`);
+        return parsed;
+      }
+    }
   }
 
-  if (!publication.title) return null;
+  if (!publication.title || publication.title.length < 10) return null;
 
-  // Strategy 2: Exact title.search filter — validate with similarity
-  const titleEncoded = encodeURIComponent(publication.title);
+  // Strategy 2: title.search filter — best for exact/near-exact titles
+  const titleEncoded = encodeURIComponent(publication.title.substring(0, 200));
   const result1 = await fetchJson(
-    `https://api.openalex.org/works?filter=title.search:${titleEncoded}&per_page=5`
+    `https://api.openalex.org/works?filter=title.search:${titleEncoded}&per_page=10`
   );
-  const match1 = bestMatch(result1?.results, publication.title, 0.4);
+  const match1 = bestMatch(result1?.results, publication, 0.35);
   if (match1) return match1;
 
-  // Strategy 3: Cleaned title search
-  const cleaned = cleanTitle(publication.title);
-  if (cleaned !== publication.title && cleaned.length > 10) {
-    await delay(200);
-    const result2 = await fetchJson(
-      `https://api.openalex.org/works?filter=title.search:${encodeURIComponent(cleaned)}&per_page=5`
-    );
-    const match2 = bestMatch(result2?.results, publication.title, 0.4);
-    if (match2) return match2;
-  }
+  // Strategy 3: Full-text search — catches partial title matches
+  await delay(200);
+  const result2 = await fetchJson(
+    `https://api.openalex.org/works?search=${titleEncoded}&per_page=10`
+  );
+  const match2 = bestMatch(result2?.results, publication, 0.35);
+  if (match2) return match2;
 
-  // Strategy 4: Key words search — use higher threshold since this is looser
+  // Strategy 4: Keywords + year filter (tighter constraint, but different results)
   const keyWords = extractKeyWords(publication.title);
   if (keyWords.split(' ').length >= 3) {
     await delay(200);
+    const yearFilter = publication.year
+      ? `&filter=publication_year:${publication.year}`
+      : '';
     const result3 = await fetchJson(
-      `https://api.openalex.org/works?search=${encodeURIComponent(keyWords)}&per_page=5`
+      `https://api.openalex.org/works?search=${encodeURIComponent(keyWords)}${yearFilter}&per_page=10`
     );
-    const match3 = bestMatch(result3?.results, publication.title, 0.5);
+    const match3 = bestMatch(result3?.results, publication, 0.3);
     if (match3) return match3;
   }
 
+  // Strategy 5: Cleaned/simplified title — strip parentheticals, special chars
+  const cleaned = cleanTitle(publication.title);
+  if (cleaned !== publication.title && cleaned.length > 15) {
+    await delay(200);
+    const result4 = await fetchJson(
+      `https://api.openalex.org/works?search=${encodeURIComponent(cleaned)}&per_page=10`
+    );
+    const match4 = bestMatch(result4?.results, publication, 0.3);
+    if (match4) return match4;
+  }
+
+  console.log(`  No match found for: "${publication.title.substring(0, 80)}"`);
+  return null;
+}
+
+// ─── DOI Cleaning ───────────────────────────────────────────
+
+function cleanDOI(doi: string): string | null {
+  if (!doi) return null;
+  let d = doi.trim();
+  // Strip URL prefixes
+  d = d.replace(/^https?:\/\/doi\.org\//i, '');
+  d = d.replace(/^https?:\/\/dx\.doi\.org\//i, '');
+  d = d.replace(/^doi:\s*/i, '');
+  // Basic validation
+  if (d.startsWith('10.') && d.includes('/')) return d;
   return null;
 }
 
@@ -86,55 +119,75 @@ export async function searchOpenAlex(
 const STOP_WORDS = new Set([
   'the', 'a', 'an', 'of', 'in', 'on', 'for', 'and', 'or', 'to',
   'is', 'are', 'was', 'were', 'by', 'from', 'with', 'at', 'its',
-  'vs', 'between', 'that', 'this', 'not',
+  'vs', 'between', 'that', 'this', 'not', 'do', 'does', 'did',
+  'has', 'have', 'had', 'be', 'been', 'being', 'as', 'but',
+  'if', 'about', 'into', 'through', 'during', 'before', 'after',
+  'above', 'below', 'up', 'down', 'out', 'off', 'over', 'under',
+  'again', 'further', 'then', 'once', 'here', 'there', 'when',
+  'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few',
+  'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'can',
+  'will', 'just', 'should', 'now', 'also', 'than', 'too', 'very',
 ]);
 
-function normalizeForComparison(title: string): string {
-  if (!title) return '';
-  return title
-    .toLowerCase()
-    .replace(/<[^>]*>/g, '')
-    .replace(/[^\w\s]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+function tokenize(title: string): Set<string> {
+  if (!title) return new Set();
+  return new Set(
+    title
+      .toLowerCase()
+      .replace(/<[^>]*>/g, '')        // strip HTML
+      .replace(/[^\w\s]/g, ' ')       // remove punctuation
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
+  );
 }
 
 /**
- * Calculate word-overlap similarity between two titles (F1-like score).
+ * Fuzzy title similarity using word overlap (F1 score).
+ * Also considers character-level trigram overlap for partial word matches.
  */
 function titleSimilarity(title1: string, title2: string): number {
-  const words1 = new Set(
-    normalizeForComparison(title1)
-      .split(' ')
-      .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
-  );
-  const words2 = new Set(
-    normalizeForComparison(title2)
-      .split(' ')
-      .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
-  );
+  const words1 = tokenize(title1);
+  const words2 = tokenize(title2);
 
   if (words1.size === 0 || words2.size === 0) return 0;
 
-  let overlap = 0;
+  // Exact word overlap
+  let exactOverlap = 0;
   for (const w of words1) {
-    if (words2.has(w)) overlap++;
+    if (words2.has(w)) exactOverlap++;
   }
 
-  const recall = overlap / words1.size;
-  const precision = overlap / words2.size;
+  // Fuzzy word matching: check if any word in set2 starts with or contains a word from set1
+  let fuzzyOverlap = 0;
+  for (const w1 of words1) {
+    if (words2.has(w1)) continue; // already counted
+    for (const w2 of words2) {
+      if (w1.length >= 4 && w2.length >= 4) {
+        if (w2.startsWith(w1) || w1.startsWith(w2)) {
+          fuzzyOverlap += 0.8;
+          break;
+        }
+      }
+    }
+  }
+
+  const totalOverlap = exactOverlap + fuzzyOverlap;
+  const recall = totalOverlap / words1.size;
+  const precision = totalOverlap / words2.size;
 
   if (recall + precision === 0) return 0;
   return (2 * recall * precision) / (recall + precision);
 }
 
 /**
- * Pick the best matching result from a list, above a similarity threshold.
+ * Pick the best matching result, considering title similarity + year bonus.
  */
 function bestMatch(
   results: any[] | undefined,
-  cvTitle: string,
-  threshold: number = 0.4
+  publication: CvPublication,
+  threshold: number = 0.35
 ): any | null {
   if (!results || results.length === 0) return null;
 
@@ -142,7 +195,17 @@ function bestMatch(
   let bestScore = 0;
 
   for (const r of results) {
-    const score = titleSimilarity(cvTitle, r.display_name);
+    let score = titleSimilarity(publication.title, r.display_name);
+
+    // Year match bonus: boost score if years align
+    if (publication.year && r.publication_year) {
+      if (publication.year === r.publication_year) {
+        score += 0.05;
+      } else if (Math.abs(publication.year - r.publication_year) <= 1) {
+        score += 0.02; // off by one year (common for preprint → published)
+      }
+    }
+
     if (score > bestScore) {
       bestScore = score;
       best = r;
@@ -151,14 +214,14 @@ function bestMatch(
 
   if (bestScore >= threshold) {
     console.log(
-      `  Title match (${(bestScore * 100).toFixed(0)}%): "${cvTitle.substring(0, 60)}..." → "${best.display_name?.substring(0, 60)}..."`
+      `  Title match (${(bestScore * 100).toFixed(0)}%): "${publication.title.substring(0, 60)}" → "${best.display_name?.substring(0, 60)}"`
     );
     return best;
   }
 
   if (best) {
     console.log(
-      `  Rejected (${(bestScore * 100).toFixed(0)}%): "${cvTitle.substring(0, 50)}..." ≠ "${best.display_name?.substring(0, 50)}..."`
+      `  Rejected (${(bestScore * 100).toFixed(0)}%): "${publication.title.substring(0, 50)}" ≠ "${best.display_name?.substring(0, 50)}"`
     );
   }
   return null;
@@ -170,7 +233,7 @@ function cleanTitle(title: string): string {
   if (!title) return '';
   return title
     .replace(/<[^>]*>/g, '')             // Remove HTML tags
-    .replace(/\s*\([^)]*\)\s*/g, ' ')    // Remove parenthetical names
+    .replace(/\s*\([^)]*\)\s*/g, ' ')    // Remove parenthetical text
     .replace(/[^\w\s]/g, ' ')            // Remove special chars
     .replace(/\s+/g, ' ')               // Collapse whitespace
     .trim();

@@ -158,14 +158,15 @@ async function parsePublicationsWithClaude(
         content: `You are analyzing a CV or publication list. Extract all scholarly publications (journal articles, conference papers, book chapters, preprints, etc.) from the following text.
 
 For each publication, return a JSON array where each element has:
-- "title": the full title of the publication as plain text (no HTML tags, no superscripts, no formatting)
-- "doi": the DOI if present (just the DOI like "10.1234/example", not a URL), or null
-- "year": the publication year if present, or null
+- "title": the FULL title of the publication as plain text (no HTML tags, no superscripts, no formatting). Include subtitles after a colon if present.
+- "doi": the DOI if present anywhere in the reference (just the DOI like "10.1234/example", not a URL). Look for patterns like "doi:", "DOI:", "https://doi.org/", or "dx.doi.org/". Return null if no DOI found.
+- "year": the publication year (4-digit number), or null
 - "authors": a string with the author names as they appear, or null
 
 Important:
 - Strip any HTML tags, superscript markers, or formatting from titles
-- Use the exact scholarly title as it would appear in a citation
+- Use the exact scholarly title as it would appear in a citation — do NOT truncate or abbreviate
+- Look carefully for DOIs — they are the most reliable way to match publications. Check the end of each reference, footnotes, and any URLs.
 - Return ONLY valid JSON — an array of objects. No other text, no markdown code fences.
 - If no publications are found, return an empty array [].
 

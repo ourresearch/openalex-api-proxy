@@ -67,17 +67,67 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
 // ─── DOC extraction (legacy .doc format) ─────────────────────
 
 async function extractDocText(buffer: Buffer): Promise<string> {
-  // word-extractor works with Buffers in nodejs_compat mode.
-  // If it fails at runtime, we provide a helpful error.
+  // Strategy 1: Try mammoth — it handles some .doc files despite being a .docx library
+  try {
+    const result = await mammoth.extractRawText({ buffer });
+    if (result.value && result.value.trim().length > 50) {
+      console.log('DOC extracted via mammoth fallback');
+      return result.value;
+    }
+  } catch {
+    // mammoth couldn't handle this .doc — try next strategy
+  }
+
+  // Strategy 2: Try word-extractor (may not work in CF Workers runtime)
   try {
     const WordExtractor = (await import('word-extractor')).default;
     const extractor = new WordExtractor();
     const doc = await extractor.extract(buffer);
-    return doc.getBody();
+    const body = doc.getBody();
+    if (body && body.trim().length > 0) return body;
   } catch (err: any) {
-    console.error('DOC extraction failed:', err.message);
-    throw new Error(
-      'Could not extract text from .doc file. Please convert to .docx or .pdf and try again.'
-    );
+    console.error('word-extractor failed:', err.message);
   }
+
+  // Strategy 3: Brute-force text extraction — pull readable ASCII/UTF strings from binary
+  try {
+    const text = extractRawStrings(buffer);
+    if (text.length > 100) {
+      console.log('DOC extracted via raw string extraction');
+      return text;
+    }
+  } catch {
+    // Last resort failed
+  }
+
+  throw new Error(
+    'Could not extract text from .doc file. Please convert to .docx or .pdf and try again.'
+  );
+}
+
+/**
+ * Last-resort: pull readable text runs from a binary .doc buffer.
+ * Looks for runs of printable ASCII/Latin chars (minimum 20 chars)
+ * and joins them. Won't get formatting but captures body text.
+ */
+function extractRawStrings(buffer: Buffer): string {
+  const bytes = new Uint8Array(buffer);
+  const runs: string[] = [];
+  let current = '';
+
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    // Printable ASCII + common Latin-1 chars + newlines/tabs
+    if ((b >= 0x20 && b <= 0x7e) || b === 0x0a || b === 0x0d || b === 0x09 || (b >= 0xc0 && b <= 0xff)) {
+      current += String.fromCharCode(b);
+    } else {
+      if (current.length >= 20) {
+        runs.push(current.trim());
+      }
+      current = '';
+    }
+  }
+  if (current.length >= 20) runs.push(current.trim());
+
+  return runs.join('\n').replace(/\n{3,}/g, '\n\n');
 }
