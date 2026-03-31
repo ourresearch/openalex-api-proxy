@@ -12,6 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { extractText } from './extractText';
 import {
   searchOpenAlex,
+  setApiKey,
   type CvPublication,
   type MatchedWork,
 } from './openalexMatcher';
@@ -19,6 +20,7 @@ import {
 export interface Env {
   ANTHROPIC_API_KEY: string;
   OPENALEX_API_BASE?: string; // Direct upstream URL to avoid proxy loop
+  OPENALEX_API_KEY?: string;  // API key to avoid 429 rate limits
 }
 
 interface ParseCvResponse {
@@ -89,6 +91,8 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
   console.log(`Claude found ${publications.length} publications`);
 
   // Step 3: Match against OpenAlex (with rate limiting)
+  // Set API key for authenticated requests (avoids 429 rate limits)
+  setApiKey(env.OPENALEX_API_KEY);
   console.log('Matching against OpenAlex...');
   const matched: MatchedWork[] = [];
   const unmatched: CvPublication[] = [];
@@ -96,7 +100,7 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
   for (const pub of publications) {
     try {
       const apiBase = env.OPENALEX_API_BASE || 'https://api.openalex.org';
-      const oaWork = await searchOpenAlex(pub, apiBase);
+      const oaWork = await searchOpenAlex(pub, apiBase, env.OPENALEX_API_KEY);
       if (oaWork) {
         // Check if this work is already linked to the author
         const authorShortId = authorId

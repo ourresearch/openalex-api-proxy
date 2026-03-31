@@ -42,7 +42,8 @@ export interface MatchedWork {
  */
 export async function searchOpenAlex(
   publication: CvPublication,
-  apiBase: string = 'https://api.openalex.org'
+  apiBase: string = 'https://api.openalex.org',
+  apiKey?: string
 ): Promise<any | null> {
   // Strategy 1: DOI lookup (most reliable — exact match, no similarity needed)
   if (publication.doi) {
@@ -276,14 +277,22 @@ function extractKeyWords(title: string): string {
 
 // ─── Helpers ─────────────────────────────────────────────────
 
+// Module-level API key — set once per request via setApiKey()
+let _apiKey: string | undefined;
+export function setApiKey(key?: string) { _apiKey = key; }
+
 async function fetchJson(url: string): Promise<any | null> {
   try {
     // Add include_xpac and mailto to every request
     const separator = url.includes('?') ? '&' : '?';
     const fullUrl = `${url}${separator}include_xpac=true&mailto=team@ourresearch.org`;
-    const resp = await fetch(fullUrl, {
-      headers: { 'User-Agent': 'OpenAlex-CV-Parser/1.0 (mailto:team@ourresearch.org)' },
-    });
+    const headers: Record<string, string> = {
+      'User-Agent': 'OpenAlex-CV-Parser/1.0 (mailto:team@ourresearch.org)',
+    };
+    if (_apiKey) {
+      headers['Authorization'] = `Bearer ${_apiKey}`;
+    }
+    const resp = await fetch(fullUrl, { headers });
     if (!resp.ok) {
       console.log(`  API error ${resp.status} for: ${fullUrl.substring(0, 150)}`);
       return null;
