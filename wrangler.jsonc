@@ -23,14 +23,6 @@
 			"id": "0631da2956b94f12812215860e67cc2b"
 		}
 	],
-	// D1 kept for rollback - remove after Hyperdrive is verified
-	"d1_databases": [
-		{
-			"binding": "openalex_db",
-			"database_name": "openalex-db",
-			"database_id": "769bdd92-0544-4135-b2e4-c67f1df17994"
-		}
-	],
 	"routes": [
 		{ "pattern": "api.openalex.org/*", "zone_name": "openalex.org" },
 		{ "pattern": "content.openalex.org/*", "zone_name": "openalex.org" }

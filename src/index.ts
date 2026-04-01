@@ -5,7 +5,6 @@ import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
-    openalex_db: D1Database;  // Keep for rollback - remove after Hyperdrive verified
     RATE_LIMITER: DurableObjectNamespace;
     ANALYTICS: AnalyticsEngineDataset;
     OPENALEX_API_URL: string;
