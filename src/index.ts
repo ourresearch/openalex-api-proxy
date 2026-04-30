@@ -159,6 +159,23 @@ export default {
             return errorResponse;
         }
 
+        // Changefiles downloads require a valid API key on a Premium, Institutional, or Partner plan.
+        // Gated here (before the rate limiter) so rejected requests don't consume credits.
+        if (/^\/changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/i.test(url.pathname)) {
+            if (!hasValidApiKey) {
+                return json(401, {
+                    error: "API key required",
+                    message: "Changefile downloads require an API key. Get one at https://openalex.org/pricing"
+                });
+            }
+            if (!userPlan || !ENTERPRISE_PLANS.has(userPlan)) {
+                return json(403, {
+                    error: "Plan upgrade required",
+                    message: "Changefile downloads require a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details."
+                });
+            }
+        }
+
         // Handle /rate-limit endpoint
         const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
         if (normalizedPath === 'rate-limit') {
@@ -319,14 +336,6 @@ export default {
             });
 
             return errorResponse;
-        }
-
-        // Changefiles downloads require a valid API key
-        if (/^\/changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/i.test(url.pathname) && !hasValidApiKey) {
-            return json(401, {
-                error: "API key required",
-                message: "Changefile downloads require an API key. Get one at https://openalex.org/pricing"
-            });
         }
 
         // Route content.openalex.org/* OR /content/* to content worker
@@ -728,15 +737,15 @@ function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
     return pathname;
 }
 
-// Plans that are allowed to use from_created_date, from_updated_date, and related filters/sorts
-const PLANS_WITH_DATE_FILTERS = new Set([
+// Enterprise-tier plans: gated access to date filters, changefile downloads, etc.
+const ENTERPRISE_PLANS = new Set([
     'premium-1M', 'premium-2M', 'premium-5M', 'premium-10M',
     'institutional', 'institutional-1M', 'institutional-2M',
     'partner',
 ]);
 
 function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | null): { valid: boolean; error?: string } {
-    const hasPlanAccess = plan !== null && PLANS_WITH_DATE_FILTERS.has(plan);
+    const hasPlanAccess = plan !== null && ENTERPRISE_PLANS.has(plan);
 
     // Use getAll() to check ALL values — duplicate params (e.g., ?filter=safe&filter=date_filter)
     // could bypass the check if we only inspect the first value.
