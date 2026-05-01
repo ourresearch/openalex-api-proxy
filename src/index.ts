@@ -176,6 +176,23 @@ export default {
             }
         }
 
+        // Snapshot credentials vending requires a valid API key on a Premium, Institutional, or Partner plan.
+        // Gated here (before the rate limiter) so rejected requests don't consume credits.
+        if (/^\/snapshots\/credentials\/?$/i.test(url.pathname)) {
+            if (!hasValidApiKey) {
+                return json(401, {
+                    error: "API key required",
+                    message: "Snapshot credentials require an API key. Get one at https://openalex.org/pricing"
+                });
+            }
+            if (!userPlan || !ENTERPRISE_PLANS.has(userPlan)) {
+                return json(403, {
+                    error: "Plan upgrade required",
+                    message: "Snapshot access requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details."
+                });
+            }
+        }
+
         // Handle /rate-limit endpoint
         const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
         if (normalizedPath === 'rate-limit') {
