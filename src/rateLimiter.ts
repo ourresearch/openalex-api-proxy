@@ -23,6 +23,7 @@ export class RateLimiter implements DurableObject {
     private dailyCounter: DailyCounter | null = null;
     private onetimeCounter: OnetimeCounter | null = null;
     private lastSemanticTime: number = 0; // Temporary: 1 req/s limit for semantic search
+    private lastThrottleTime: number = 0; // oxjob #166: admin rate-throttle
 
     constructor(private readonly state: DurableObjectState) {
         this.state.blockConcurrencyWhile(async () => {
@@ -138,6 +139,19 @@ export class RateLimiter implements DurableObject {
                 return Response.json({ success: false, retryAfter });
             }
             this.lastSemanticTime = now;
+            return Response.json({ success: true });
+        }
+
+        // Mirrors /check-semantic: in-memory 1 req/s gate, no daily side-effects.
+        // DO is keyed by 'throttle:user|org:{id}' (oxjob #166).
+        if (url.pathname === '/check-throttle') {
+            const THROTTLE_INTERVAL_MS = 1000;
+            const elapsed = now - this.lastThrottleTime;
+            if (this.lastThrottleTime > 0 && elapsed < THROTTLE_INTERVAL_MS) {
+                const retryAfter = (THROTTLE_INTERVAL_MS - elapsed) / 1000;
+                return Response.json({ success: false, retryAfter });
+            }
+            this.lastThrottleTime = now;
             return Response.json({ success: true });
         }
 

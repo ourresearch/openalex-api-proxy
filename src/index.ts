@@ -14,19 +14,30 @@ export interface Env {
     CV_PARSER?: Fetcher;      // Service binding to openalex-cv-parser
 }
 
-// In-memory cache for API key validation
-const API_KEY_CACHE = new Map<string, {
+type ThrottleScope = 'user' | 'org';
+
+interface ApiKeyAuth {
     valid: boolean;
+    error?: string;
     maxPerDay?: number;
     maxCreditsPerDay?: number;
     isGrandfathered?: boolean;
     onetimeCreditsBalance?: number;
     onetimeCreditsExpiresAt?: string;
     plan?: string | null;
-    error?: string;
-    cachedAt: number;
-}>();
+    rateThrottled?: boolean;
+    throttleScope?: ThrottleScope | null;
+    userId?: string | null;
+    orgId?: string | null;
+    cacheRefreshed?: boolean;
+}
+
+// In-memory cache for API key validation
+const API_KEY_CACHE = new Map<string, ApiKeyAuth & { cachedAt: number }>();
 const CACHE_TTL = 60000; // 60 seconds
+
+// oxjob #166. Distinct from the 'throttled' plan value (max_per_day=0).
+const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investigate unsustainable usage patterns. Please contact support@openalex.org for details.";
 
 // Conversion: 1 credit = $0.0001 (10,000 credits = $1)
 const CREDIT_TO_USD = 0.0001;
@@ -125,6 +136,53 @@ export default {
             onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
             onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
             userPlan = authResult.plan ?? null;
+
+            // Throttled accounts get a 1 req/sec gate via a separate DO namespace
+            // ('throttle:user|org:{id}'), so org throttles share one bucket across
+            // all org keys.
+            if (authResult.rateThrottled) {
+                const throttleId = authResult.throttleScope === 'org'
+                    ? `throttle:org:${authResult.orgId}`
+                    : `throttle:user:${authResult.userId}`;
+                try {
+                    const throttleLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(throttleId));
+                    const throttleCheck = await throttleLimiter.fetch("http://internal/check-throttle", {
+                        method: "POST",
+                        body: JSON.stringify({})
+                    }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
+
+                    if (!throttleCheck.success) {
+                        const retryAfter = Math.ceil(throttleCheck.retryAfter || 1);
+                        const errorResponse = new Response(JSON.stringify({
+                            error: "Rate limit exceeded",
+                            message: THROTTLE_MESSAGE,
+                            retryAfter
+                        }), {
+                            status: 429,
+                            headers: {
+                                "Content-Type": "application/json",
+                                "Retry-After": retryAfter.toString(),
+                                ...Object.fromEntries(getCorsHeaders())
+                            }
+                        });
+
+                        logAnalytics({
+                            ctx, env, apiKey, req, url,
+                            scope: 'throttle',
+                            responseTime: Date.now() - startTime,
+                            statusCode: 429,
+                            rateLimit: 1,
+                            rateLimitRemaining: 0
+                        });
+
+                        return errorResponse;
+                    }
+                } catch (error) {
+                    // Fail-open: if the throttle DO call errors, let the request through
+                    // and rely on the credits bucket. Avoids breaking traffic on infra hiccups.
+                    console.error("Rate-throttle DO error:", error);
+                }
+            }
 
             // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
             if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
@@ -532,7 +590,7 @@ function getApiKeyFromRequest(req: Request): string | null {
     );
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, error?: string, maxPerDay?: number, maxCreditsPerDay?: number, isGrandfathered?: boolean, onetimeCreditsBalance?: number, onetimeCreditsExpiresAt?: string, plan?: string | null, cacheRefreshed?: boolean}> {
+async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
     const apiKey = getApiKeyFromRequest(req);
     if (!apiKey) return { valid: false };
 
@@ -550,6 +608,10 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             onetimeCreditsBalance: cached.onetimeCreditsBalance,
             onetimeCreditsExpiresAt: cached.onetimeCreditsExpiresAt,
             plan: cached.plan,
+            rateThrottled: cached.rateThrottled,
+            throttleScope: cached.throttleScope,
+            userId: cached.userId,
+            orgId: cached.orgId,
             cacheRefreshed: false
         };
     }
@@ -562,7 +624,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         await client.connect();
 
         const queryResult = await client.query(
-            "SELECT max_per_day, max_credits_per_day, is_grandfathered, onetime_credits_balance, onetime_credits_expires_at, plan FROM api_keys_view WHERE api_key = $1",
+            "SELECT max_per_day, max_credits_per_day, is_grandfathered, onetime_credits_balance, onetime_credits_expires_at, plan, rate_throttled, throttle_scope, user_id, org_id FROM api_keys_view WHERE api_key = $1",
             [apiKey]
         );
 
@@ -576,7 +638,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         const row = queryResult.rows[0];
 
         // API key exists - consider it valid
-        const result = {
+        const result: ApiKeyAuth = {
             valid: true,
             maxPerDay: row.max_per_day as number,
             maxCreditsPerDay: row.max_credits_per_day as number,
@@ -584,6 +646,10 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
             onetimeCreditsBalance: (row.onetime_credits_balance as number) ?? 0,
             onetimeCreditsExpiresAt: row.onetime_credits_expires_at ? String(row.onetime_credits_expires_at) : undefined,
             plan: (row.plan as string) ?? null,
+            rateThrottled: Boolean(row.rate_throttled),
+            throttleScope: (row.throttle_scope as ThrottleScope | null) ?? null,
+            userId: (row.user_id as string) ?? null,
+            orgId: (row.org_id as string) ?? null,
             cacheRefreshed: true
         };
 
@@ -597,7 +663,7 @@ async function checkApiKey(req: Request, env: Env): Promise<{valid: boolean, err
         if (client) {
             try { await client.end(); } catch { /* ignore */ }
         }
-        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false, onetimeCreditsBalance: 0, plan: null };
+        return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false, onetimeCreditsBalance: 0, plan: null, rateThrottled: false, throttleScope: null, userId: null, orgId: null };
     }
 }
 
