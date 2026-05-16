@@ -509,6 +509,33 @@ export default {
             openalexUrl.searchParams.set(key, value);
         });
 
+        // Guard the HTTP request-line length. The origin runs gunicorn with the
+        // default `limit_request_line` of 4094 bytes; a longer request line is
+        // rejected with a raw HTML "400 Bad Request: Request Line is too large"
+        // (and, in a transition band, surfaces here as a confusing 500). Long
+        // Boolean `search=` queries hit this. The query body cannot move to a
+        // POST body for `/works?search=` today, so return one clear, actionable
+        // JSON error instead of the raw HTML / 500. (oxjob #191.3)
+        // POST requests carry the query in the body, not the request line — skip.
+        if (req.method !== "POST") {
+            const MAX_REQUEST_LINE_BYTES = 4094; // gunicorn limit_request_line default
+            const requestLine = `${req.method} ${openalexUrl.pathname}${openalexUrl.search} HTTP/1.1`;
+            const requestLineBytes = new TextEncoder().encode(requestLine).length;
+            if (requestLineBytes > MAX_REQUEST_LINE_BYTES) {
+                const errorResponse = new Response(JSON.stringify({
+                    error: "Request URL too long",
+                    message: `Your request URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit (roughly 4 KB, mostly the 'search' value). Split a large Boolean query into smaller chunks, request each separately, and combine the returned IDs client-side. See https://docs.openalex.org/guides/searching#large-boolean-queries`
+                }), {
+                    status: 400,
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...Object.fromEntries(getCorsHeaders())
+                    }
+                });
+                return errorResponse;
+            }
+        }
+
         // For POST requests, we need to clone the request to preserve the body
         const proxyHeaders = new Headers({
             "User-Agent": "OpenAlex-Proxy/1.0",
