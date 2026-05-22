@@ -1,6 +1,6 @@
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { logAnalytics } from "./analytics";
+import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
 
 export interface Env {
@@ -557,6 +557,12 @@ export default {
 
         const response = await fetch(proxyReq);
 
+        // Sampled clone for analytics body-read (oxjob #194). Must be taken
+        // BEFORE response.body is consumed by the streamed `new Response(...)`
+        // below — once a body stream is used, it can't be cloned. The clone
+        // tees the body into two independent streams; user stream is unaffected.
+        const sampledResponseForAnalytics = shouldSampleEsTook() ? response.clone() : null;
+
         // Return response with rate limit headers
         const newHeaders = new Headers(response.headers);
         // New USD headers
@@ -590,7 +596,8 @@ export default {
             rateLimit: limit,
             rateLimitRemaining: rateLimitResult.remaining ?? 0,
             endpointType: classification.type,
-            creditCost
+            creditCost,
+            responseForEsTook: sampledResponseForAnalytics
         });
 
         return finalResponse;
