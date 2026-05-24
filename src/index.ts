@@ -549,6 +549,14 @@ export default {
             proxyHeaders.set("Content-Type", req.headers.get("Content-Type") || "application/json");
         }
 
+        // Forward Authorization so elastic-api can relay it to users-api for
+        // private-label resolution (oxjob #228 QA-040). Proxy has already
+        // validated the api_key above; users-api re-validates by lookup.
+        const incomingAuth = req.headers.get("Authorization");
+        if (incomingAuth) {
+            proxyHeaders.set("Authorization", incomingAuth);
+        }
+
         const proxyReq = new Request(openalexUrl.toString(), {
             method: req.method,
             headers: proxyHeaders,
