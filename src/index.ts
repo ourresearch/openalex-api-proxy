@@ -2,6 +2,7 @@ import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
+import { f1Reason, f1Message } from "./f1Validation";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
@@ -508,6 +509,33 @@ export default {
         url.searchParams.forEach((value, key) => {
             openalexUrl.searchParams.set(key, value);
         });
+
+        // F1 edge fast-fail (oxjob #194). Reject two high-volume client-bug
+        // shapes that are guaranteed `APIQueryParamsError` 400s at the
+        // elastic-api origin — `limit=` typo and raw-comma filter values — so
+        // they return the same 400 ~175ms sooner without burning a gunicorn
+        // worker. See src/f1Validation.ts for the rules + the SUBSET INVARIANT
+        // (edge may only reject what origin would also reject). The 400 is
+        // self-identifying (error_source + x-openalex-edge-reject header) so a
+        // debugger sees it never reached Heroku. POST skipped (filter may be in
+        // body, not the query string), matching the request-line guard below.
+        if (req.method !== "POST") {
+            const reason = f1Reason(openalexUrl);
+            if (reason) {
+                return new Response(JSON.stringify({
+                    error: "Invalid request rejected at the API edge",
+                    error_source: "openalex-api-proxy",
+                    message: f1Message(reason)
+                }), {
+                    status: 400,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "x-openalex-edge-reject": `f1:${reason}`,
+                        ...Object.fromEntries(getCorsHeaders())
+                    }
+                });
+            }
+        }
 
         // Guard the HTTP request-line length. The origin runs gunicorn with the
         // default `limit_request_line` of 4094 bytes; a longer request line is
