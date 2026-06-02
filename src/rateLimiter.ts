@@ -108,19 +108,11 @@ export class RateLimiter implements DurableObject {
         const body = await request.json<{
             dailyLimit: number;
             perSecondLimit?: number;
-            perSecondBurst?: number;
             credits?: number;
             onetimeBalance?: number;
             consumedWriteback?: number;
         }>();
         const { dailyLimit, perSecondLimit, credits = 1, onetimeBalance = 0 } = body;
-        // Burst capacity (bucket size) is decoupled from the sustained refill
-        // rate (perSecondLimit). Defaults to perSecondLimit when omitted, so
-        // callers that don't set it keep the old burst==rate behavior. anon
-        // traffic uses a larger burst than refill (e.g. 30 burst / 10 sustained)
-        // so a UI page-load fan-out isn't clipped while sustained scraping is.
-        // (oxjob #194 L8 — anon per-IP burst cap.)
-        const perSecondBurst = body.perSecondBurst ?? perSecondLimit;
 
         const now = Date.now();
         const today = new Date().toISOString().split('T')[0];
@@ -265,15 +257,14 @@ export class RateLimiter implements DurableObject {
         }
 
         // --- 1. Per-Second Limit (Memory Only) ---
-        // Token bucket: capacity = perSecondBurst, refill = perSecondLimit/sec.
         if (!this.perSecondBucket) {
-            this.perSecondBucket = { tokens: perSecondBurst!, lastRefill: now };
+            this.perSecondBucket = { tokens: perSecondLimit!, lastRefill: now };
         }
 
         const elapsedSeconds = (now - this.perSecondBucket.lastRefill) / 1000;
         if (elapsedSeconds > 0) {
             this.perSecondBucket.tokens = Math.min(
-                perSecondBurst!,
+                perSecondLimit!,
                 this.perSecondBucket.tokens + (elapsedSeconds * perSecondLimit!)
             );
             this.perSecondBucket.lastRefill = now;

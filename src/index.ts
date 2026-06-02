@@ -336,22 +336,10 @@ export default {
             fromOnetime?: boolean;
         };
 
-        // Per-second burst limits (oxjob #194 L8). Anonymous traffic (no api_key,
-        // keyed per CF-Connecting-IP) gets a low sustained rate with a larger
-        // burst bucket so a logged-out UI page-load fan-out isn't clipped while
-        // sustained anon scraping is. Authenticated traffic is unchanged
-        // (100/100), so keyed customers see no behavior change. Negotiated
-        // higher limits for specific paid keys are handled via their plan, not
-        // here. ES-cost note: this is origin/gunicorn relief — anon bursters do
-        // cheap singleton/DOI gets; it does NOT materially cut ES load.
-        const isAnon = !apiKey;
-        const perSecondLimit = isAnon ? 10 : 100;
-        const perSecondBurst = isAnon ? 30 : 100;
-
         try {
             rateLimitResult = await limiter.fetch("http://internal/check", {
                 method: "POST",
-                body: JSON.stringify({ dailyLimit: limit, perSecondLimit, perSecondBurst, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
+                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
             }).then(res => res.json());
         } catch (error) {
             // If DO fails, allow the request through but log the error
@@ -368,9 +356,7 @@ export default {
 
             let message: string;
             if (isPerSecond) {
-                message = isAnon
-                    ? `Rate limit exceeded: anonymous requests are limited to ${perSecondLimit} per second per IP. Register a free API key for higher limits: https://openalex.org/pricing`
-                    : `Rate limit exceeded: ${perSecondLimit} requests per second. Please slow down.`;
+                message = `Rate limit exceeded: 100 requests per second. Please slow down.`;
             } else if (onetimeCreditsBalance > 0) {
                 message = `Insufficient budget. This request costs $${costUsd} but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else {
