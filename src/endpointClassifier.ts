@@ -45,6 +45,15 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
         return { type: 'content', creditCost: 100 };
     }
 
+    // Changefiles listing/browse: /changefiles and /changefiles/{date} are free,
+    // keyless discovery endpoints (just JSON listing what's available) — 0 credits
+    // so they can never hit a rate limit. The actual file downloads at
+    // /changefiles/{date}/{filename} are NOT matched here; they stay metered and
+    // plan-gated in index.ts.
+    if (/^changefiles(\/\d{4}-\d{2}-\d{2})?$/.test(normalized)) {
+        return { type: 'list', creditCost: 0 };
+    }
+
     // Entity endpoints
     if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
         // Singleton: /entity/ID or /entity/ID/subpath (e.g., /works/W123/ngrams)

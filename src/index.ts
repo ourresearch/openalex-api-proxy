@@ -603,7 +603,32 @@ export default {
             body: req.method === "POST" ? await req.clone().arrayBuffer() : undefined
         });
 
-        const response = await fetch(proxyReq);
+        // Edge-cache the changefiles listing (1h TTL). /changefiles and
+        // /changefiles/{date} are keyless, 0-credit discovery endpoints whose
+        // contents change ~daily; caching at the edge absorbs any hammering before
+        // it reaches the origin — this, not rate limiting, is what protects them
+        // now that they're unlimited (zd#8865). The cache key strips the api_key so
+        // every caller shares one entry. Downloads (/changefiles/{date}/{file}) are
+        // not browse paths and are never cached here.
+        const cache = caches.default;
+        const isChangefilesListing = req.method === "GET" && isChangefilesBrowse;
+        let cacheKey: Request | undefined;
+        let response: Response | undefined;
+        if (isChangefilesListing) {
+            const cacheUrl = new URL(openalexUrl.toString());
+            cacheUrl.searchParams.delete("api_key");
+            cacheUrl.searchParams.delete("api-key");
+            cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
+            response = await cache.match(cacheKey);
+        }
+        if (!response) {
+            response = await fetch(proxyReq);
+            if (isChangefilesListing && cacheKey && response.ok) {
+                const toCache = new Response(response.clone().body, response);
+                toCache.headers.set("Cache-Control", "public, max-age=3600");
+                ctx.waitUntil(cache.put(cacheKey, toCache));
+            }
+        }
 
         // Sampled clone for analytics body-read (oxjob #194). Must be taken
         // BEFORE response.body is consumed by the streamed `new Response(...)`

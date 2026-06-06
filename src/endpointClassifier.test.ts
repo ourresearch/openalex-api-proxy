@@ -335,6 +335,30 @@ describe('endpointClassifier', () => {
         });
     });
 
+    describe('changefiles listing (free, unlimited discovery)', () => {
+        it('classifies /changefiles index as 0 credits', () => {
+            const result = classifyEndpoint('/changefiles');
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('classifies /changefiles/{date} as 0 credits', () => {
+            const result = classifyEndpoint('/changefiles/2026-06-05');
+            expect(result.type).toBe('list');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('handles trailing slash on the listing', () => {
+            const result = classifyEndpoint('/changefiles/');
+            expect(result.creditCost).toBe(0);
+        });
+
+        it('does NOT free-pass an actual changefile download', () => {
+            const result = classifyEndpoint('/changefiles/2026-06-05/works_2026-06-05.jsonl.gz');
+            expect(result.creditCost).not.toBe(0);
+        });
+    });
+
     describe('edge cases', () => {
         it('handles leading/trailing slashes', () => {
             const result = classifyEndpoint('///works/W123///');
