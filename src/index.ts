@@ -97,100 +97,112 @@ export default {
         let onetimeCreditsExpiresAt: string | undefined;
         let userPlan: string | null = null;
 
-        if (apiKey && !isChangefilesBrowse) {
+        if (apiKey) {
             const authResult = await checkApiKey(req, env);
             if (!authResult.valid) {
-                // Log invalid API key attempts for security monitoring
-                console.warn("Invalid API key attempt", {
-                    invalidKey: apiKey,
-                    ip: req.headers.get("CF-Connecting-IP"),
-                    path: url.pathname,
-                    error: authResult.error,
-                    userAgent: req.headers.get("User-Agent")
-                });
+                // Changefiles browse paths (/changefiles, /changefiles/{date})
+                // tolerate placeholder/invalid keys (e.g. "YOUR_API_KEY") so anyone
+                // can list available files — fall through and treat the request as
+                // anonymous. For every other path, an invalid key is a hard 401.
+                if (!isChangefilesBrowse) {
+                    // Log invalid API key attempts for security monitoring
+                    console.warn("Invalid API key attempt", {
+                        invalidKey: apiKey,
+                        ip: req.headers.get("CF-Connecting-IP"),
+                        path: url.pathname,
+                        error: authResult.error,
+                        userAgent: req.headers.get("User-Agent")
+                    });
 
-                const errorResponse = json(401, {
-                    error: "Invalid or missing API key",
-                    message: authResult.error || "Provide a valid API key"
-                });
+                    const errorResponse = json(401, {
+                        error: "Invalid or missing API key",
+                        message: authResult.error || "Provide a valid API key"
+                    });
 
-                // Log 401 error
-                logAnalytics({
-                    ctx,
-                    env,
-                    apiKey,
-                    req,
-                    url,
-                    scope: 'credits',
-                    responseTime: Date.now() - startTime,
-                    statusCode: 401,
-                    rateLimit: 0,
-                    rateLimitRemaining: 0
-                });
+                    // Log 401 error
+                    logAnalytics({
+                        ctx,
+                        env,
+                        apiKey,
+                        req,
+                        url,
+                        scope: 'credits',
+                        responseTime: Date.now() - startTime,
+                        statusCode: 401,
+                        rateLimit: 0,
+                        rateLimitRemaining: 0
+                    });
 
-                return errorResponse;
-            }
-            hasValidApiKey = true;
-            maxPerDay = authResult.maxPerDay ?? 100000;
-            maxCreditsPerDay = authResult.maxCreditsPerDay ?? maxPerDay;
-            isGrandfathered = authResult.isGrandfathered || false;
-            onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
-            onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
-            userPlan = authResult.plan ?? null;
-
-            // Throttled accounts get a 1 req/sec gate via a separate DO namespace
-            // ('throttle:user|org:{id}'), so org throttles share one bucket across
-            // all org keys.
-            if (authResult.rateThrottled) {
-                const throttleId = authResult.throttleScope === 'org'
-                    ? `throttle:org:${authResult.orgId}`
-                    : `throttle:user:${authResult.userId}`;
-                try {
-                    const throttleLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(throttleId));
-                    const throttleCheck = await throttleLimiter.fetch("http://internal/check-throttle", {
-                        method: "POST",
-                        body: JSON.stringify({})
-                    }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
-
-                    if (!throttleCheck.success) {
-                        const retryAfter = Math.ceil(throttleCheck.retryAfter || 1);
-                        const errorResponse = new Response(JSON.stringify({
-                            error: "Rate limit exceeded",
-                            message: THROTTLE_MESSAGE,
-                            retryAfter
-                        }), {
-                            status: 429,
-                            headers: {
-                                "Content-Type": "application/json",
-                                "Retry-After": retryAfter.toString(),
-                                ...Object.fromEntries(getCorsHeaders())
-                            }
-                        });
-
-                        logAnalytics({
-                            ctx, env, apiKey, req, url,
-                            scope: 'throttle',
-                            responseTime: Date.now() - startTime,
-                            statusCode: 429,
-                            rateLimit: 1,
-                            rateLimitRemaining: 0
-                        });
-
-                        return errorResponse;
-                    }
-                } catch (error) {
-                    // Fail-open: if the throttle DO call errors, let the request through
-                    // and rely on the credits bucket. Avoids breaking traffic on infra hiccups.
-                    console.error("Rate-throttle DO error:", error);
+                    return errorResponse;
                 }
-            }
+            } else {
+                // Valid key — honor the account's limits, plan, and balance on
+                // EVERY path, including changefiles browse. Previously browse paths
+                // skipped this block entirely (`apiKey && !isChangefilesBrowse`),
+                // silently dropping authenticated users to the anonymous limit on
+                // /changefiles and /changefiles/{date} (zd#8865).
+                hasValidApiKey = true;
+                maxPerDay = authResult.maxPerDay ?? 100000;
+                maxCreditsPerDay = authResult.maxCreditsPerDay ?? maxPerDay;
+                isGrandfathered = authResult.isGrandfathered || false;
+                onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
+                onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
+                userPlan = authResult.plan ?? null;
 
-            // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
-            if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
-                const wbRateLimitKey = `credits:${apiKey}`;
-                ctx.waitUntil(
-                    writebackOnetimeCredits(env, apiKey, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
-                );
+                // Throttled accounts get a 1 req/sec gate via a separate DO namespace
+                // ('throttle:user|org:{id}'), so org throttles share one bucket across
+                // all org keys.
+                if (authResult.rateThrottled) {
+                    const throttleId = authResult.throttleScope === 'org'
+                        ? `throttle:org:${authResult.orgId}`
+                        : `throttle:user:${authResult.userId}`;
+                    try {
+                        const throttleLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(throttleId));
+                        const throttleCheck = await throttleLimiter.fetch("http://internal/check-throttle", {
+                            method: "POST",
+                            body: JSON.stringify({})
+                        }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
+
+                        if (!throttleCheck.success) {
+                            const retryAfter = Math.ceil(throttleCheck.retryAfter || 1);
+                            const errorResponse = new Response(JSON.stringify({
+                                error: "Rate limit exceeded",
+                                message: THROTTLE_MESSAGE,
+                                retryAfter
+                            }), {
+                                status: 429,
+                                headers: {
+                                    "Content-Type": "application/json",
+                                    "Retry-After": retryAfter.toString(),
+                                    ...Object.fromEntries(getCorsHeaders())
+                                }
+                            });
+
+                            logAnalytics({
+                                ctx, env, apiKey, req, url,
+                                scope: 'throttle',
+                                responseTime: Date.now() - startTime,
+                                statusCode: 429,
+                                rateLimit: 1,
+                                rateLimitRemaining: 0
+                            });
+
+                            return errorResponse;
+                        }
+                    } catch (error) {
+                        // Fail-open: if the throttle DO call errors, let the request through
+                        // and rely on the credits bucket. Avoids breaking traffic on infra hiccups.
+                        console.error("Rate-throttle DO error:", error);
+                    }
+                }
+
+                // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
+                if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
+                    const wbRateLimitKey = `credits:${apiKey}`;
+                    ctx.waitUntil(
+                        writebackOnetimeCredits(env, apiKey, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
+                    );
+                }
             }
         }
 
