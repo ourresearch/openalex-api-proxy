@@ -1,3 +1,5 @@
+import { isChangefilesBrowsePath } from "./changefilesPaths";
+
 export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text';
 
 export interface EndpointClassification {
@@ -50,7 +52,7 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
     // so they can never hit a rate limit. The actual file downloads at
     // /changefiles/{date}/{filename} are NOT matched here; they stay metered and
     // plan-gated in index.ts.
-    if (/^changefiles(\/\d{4}-\d{2}-\d{2})?$/.test(normalized)) {
+    if (isChangefilesBrowsePath(normalized)) {
         return { type: 'list', creditCost: 0 };
     }
 

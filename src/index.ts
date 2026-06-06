@@ -3,6 +3,7 @@ import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
+import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
@@ -82,10 +83,11 @@ export default {
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
 
-        // Changefiles browsing: skip API key validation so placeholder keys
-        // (e.g., "YOUR_API_KEY") don't trigger 401.  Users should be able to
-        // browse available files without a real key.
-        const isChangefilesBrowse = /^\/changefiles(\/\d{4}-\d{2}-\d{2})?\/?$/i.test(url.pathname);
+        // Changefiles browsing: tolerate placeholder keys (e.g., "YOUR_API_KEY")
+        // without a 401 so users can browse available files without a real key.
+        // Path matching lives in changefilesPaths.ts (shared with the classifier
+        // and download gate so they can't drift — zd#8865).
+        const isChangefilesBrowse = isChangefilesBrowsePath(url.pathname);
         // TODO Feb 13, 2026: Change these to 100 to require API key for normal usage.
         // 2026-01-26: Reduced from 100K to 10K during API slowdown incident to shift capacity to API key holders.
         // With list=1 credit, users can make 10K list requests/day without an API key.
@@ -232,7 +234,7 @@ export default {
 
         // Changefiles downloads require a valid API key on a Premium, Institutional, or Partner plan.
         // Gated here (before the rate limiter) so rejected requests don't consume credits.
-        if (/^\/changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/i.test(url.pathname)) {
+        if (isChangefileDownloadPath(url.pathname)) {
             if (!hasValidApiKey) {
                 return json(401, {
                     error: "API key required",
@@ -549,22 +551,31 @@ export default {
             }
         }
 
-        // Guard the HTTP request-line length. The origin runs gunicorn with the
-        // default `limit_request_line` of 4094 bytes; a longer request line is
-        // rejected with a raw HTML "400 Bad Request: Request Line is too large"
-        // (and, in a transition band, surfaces here as a confusing 500). Long
-        // Boolean `search=` queries hit this. The query body cannot move to a
-        // POST body for `/works?search=` today, so return one clear, actionable
-        // JSON error instead of the raw HTML / 500. (oxjob #191.3)
-        // POST requests carry the query in the body, not the request line — skip.
+        // Guard the HTTP request-line length. The origin runs gunicorn with
+        // `--limit-request-line 8190` (its max finite value — raised from the
+        // 4094 default in oxjob #373 to give OQL/long `search=` queries more
+        // headroom). A longer request line is rejected with a raw HTML "400 Bad
+        // Request: Request Line is too large" (and, in a transition band,
+        // surfaces here as a confusing 500). Long Boolean `search=` queries and
+        // long OQL `?oql=` queries hit this. Return one clear, actionable JSON
+        // error instead of the raw HTML / 500. (oxjob #191.3, #373)
+        // POST requests carry the query in the body, not the request line — skip
+        // (OQL callers over the cap should re-submit via `POST /` with {oql}).
         if (req.method !== "POST") {
-            const MAX_REQUEST_LINE_BYTES = 4094; // gunicorn limit_request_line default
+            const MAX_REQUEST_LINE_BYTES = 8190; // gunicorn --limit-request-line (max finite)
             const requestLine = `${req.method} ${openalexUrl.pathname}${openalexUrl.search} HTTP/1.1`;
             const requestLineBytes = new TextEncoder().encode(requestLine).length;
             if (requestLineBytes > MAX_REQUEST_LINE_BYTES) {
+                // OQL-specific diagnostic when the over-limit query is `?oql=`:
+                // the OQL execute route accepts the same query via a POST body,
+                // which has no request-line cap.
+                const isOql = openalexUrl.searchParams.has("oql");
+                const message = isOql
+                    ? `Your OQL query URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit for URLs (roughly 8 KB). This query is too long to share as a URL — submit it via POST to / with a JSON body {"oql": "..."}, which has no length limit.`
+                    : `Your request URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit (roughly 8 KB, mostly the 'search' value). Split a large Boolean query into smaller chunks, request each separately, and combine the returned IDs client-side. See https://docs.openalex.org/guides/searching#large-boolean-queries`;
                 const errorResponse = new Response(JSON.stringify({
-                    error: "Request URL too long",
-                    message: `Your request URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit (roughly 4 KB, mostly the 'search' value). Split a large Boolean query into smaller chunks, request each separately, and combine the returned IDs client-side. See https://docs.openalex.org/guides/searching#large-boolean-queries`
+                    error: isOql ? "OQL query too long for URL" : "Request URL too long",
+                    message
                 }), {
                     status: 400,
                     headers: {
