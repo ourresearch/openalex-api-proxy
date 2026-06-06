@@ -603,32 +603,22 @@ export default {
             body: req.method === "POST" ? await req.clone().arrayBuffer() : undefined
         });
 
-        // Edge-cache the changefiles listing (1h TTL). /changefiles and
-        // /changefiles/{date} are keyless, 0-credit discovery endpoints whose
-        // contents change ~daily; caching at the edge absorbs any hammering before
-        // it reaches the origin — this, not rate limiting, is what protects them
-        // now that they're unlimited (zd#8865). The cache key strips the api_key so
-        // every caller shares one entry. Downloads (/changefiles/{date}/{file}) are
-        // not browse paths and are never cached here.
-        const cache = caches.default;
+        // Edge-cache the changefiles listing for 1h. /changefiles and
+        // /changefiles/{date} are 0-credit discovery endpoints whose contents
+        // change ~daily; caching at the edge absorbs any hammering before it
+        // reaches the origin — this, not rate limiting, is what protects them now
+        // that they're unlimited (zd#8865). cf.cacheTtl pins a 1h edge TTL
+        // regardless of the origin's own Cache-Control (which is 4h); cacheEverything
+        // caches the JSON body. The cache is keyed on the full request URL, so each
+        // api_key gets its own entry — important because the listing body embeds the
+        // caller's api_key in the returned download URLs, so entries must NOT be
+        // shared across keys. Downloads (/changefiles/{date}/{file}) are not browse
+        // paths and are never cached here.
         const isChangefilesListing = req.method === "GET" && isChangefilesBrowse;
-        let cacheKey: Request | undefined;
-        let response: Response | undefined;
-        if (isChangefilesListing) {
-            const cacheUrl = new URL(openalexUrl.toString());
-            cacheUrl.searchParams.delete("api_key");
-            cacheUrl.searchParams.delete("api-key");
-            cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
-            response = await cache.match(cacheKey);
-        }
-        if (!response) {
-            response = await fetch(proxyReq);
-            if (isChangefilesListing && cacheKey && response.ok) {
-                const toCache = new Response(response.clone().body, response);
-                toCache.headers.set("Cache-Control", "public, max-age=3600");
-                ctx.waitUntil(cache.put(cacheKey, toCache));
-            }
-        }
+        const response = await fetch(
+            proxyReq,
+            isChangefilesListing ? { cf: { cacheTtl: 3600, cacheEverything: true } } : {}
+        );
 
         // Sampled clone for analytics body-read (oxjob #194). Must be taken
         // BEFORE response.body is consumed by the streamed `new Response(...)`
@@ -649,6 +639,12 @@ export default {
         newHeaders.set("X-RateLimit-Onetime-Remaining", (rateLimitResult.onetimeRemaining ?? 0).toString());
         newHeaders.set("X-RateLimit-Credits-Used", creditCost.toString());
         newHeaders.set("X-RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
+
+        // Surface the 1h listing TTL to clients/downstream too, overriding the
+        // origin's 4h Cache-Control (zd#8865).
+        if (isChangefilesListing) {
+            newHeaders.set("Cache-Control", "public, max-age=3600");
+        }
 
         const finalResponse = addCorsHeaders(new Response(response.body, {
             status: response.status,
