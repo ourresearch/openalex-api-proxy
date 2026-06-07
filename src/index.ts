@@ -4,6 +4,7 @@ import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
+import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
@@ -14,7 +15,19 @@ export interface Env {
     SEARCH_API_URL?: string;  // Optional - falls back to OPENALEX_API_URL if not set
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
     CV_PARSER?: Fetcher;      // Service binding to openalex-cv-parser
+    // oxjob #338 Phase 5a — UI-provenance token (Turnstile-minted). Both optional:
+    // if either is unset the feature is inert (no mint; every request just tags
+    // trustedUi=false). It can NEVER block traffic. Set as Worker secrets.
+    TURNSTILE_SECRET?: string;       // Cloudflare Turnstile secret (siteverify)
+    UI_TOKEN_HMAC_SECRET?: string;   // HMAC signing secret for the minted token
 }
+
+// oxjob #338: minted UI-provenance tokens live 30 min; the GUI re-mints on expiry.
+const UI_TOKEN_TTL_SECONDS = 1800;
+// Header the GUI attaches the minted token on (mirrors getApiKeyFromRequest's
+// header style). Chosen over a query param so it stays out of URL logs/cache
+// keys and isn't copy-pasteable from a shared URL the way `mailto` was.
+const UI_TOKEN_HEADER = "X-OpenAlex-UI";
 
 type ThrottleScope = 'user' | 'org';
 
@@ -79,6 +92,51 @@ export default {
                 headers: cvResponse.headers,
             }));
         }
+
+        // UI-provenance token mint (oxjob #338 Phase 5a). The GUI POSTs a
+        // Cloudflare Turnstile solve; we verify it server-side and mint a
+        // short-TTL HMAC token the GUI then sends back on the X-OpenAlex-UI
+        // header. No API key needed (anonymous SPA), so it sits before API-key
+        // validation, like /cv-parse. This endpoint ONLY issues a provenance
+        // marker — it grants no quota or access, so a failed/absent mint just
+        // means the GUI's later requests are tagged untrusted, never blocked.
+        const uiTokenPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+        if (uiTokenPath === 'ui-token') {
+            if (req.method !== 'POST') {
+                return json(405, { error: "Method Not Allowed", message: "POST a Turnstile token to /ui-token" });
+            }
+            if (!env.TURNSTILE_SECRET || !env.UI_TOKEN_HMAC_SECRET) {
+                // Feature not provisioned yet — say so plainly; the GUI treats a
+                // non-200 here as "no UI token this session" and carries on.
+                return json(503, { error: "UI token minting not configured" });
+            }
+            let turnstileResponse: string | null = null;
+            try {
+                const body = await req.json() as { turnstileResponse?: string; "cf-turnstile-response"?: string };
+                turnstileResponse = body.turnstileResponse || body["cf-turnstile-response"] || null;
+            } catch { /* fall through to the missing-token branch */ }
+
+            const ts = await verifyTurnstile(
+                turnstileResponse,
+                env.TURNSTILE_SECRET,
+                req.headers.get("CF-Connecting-IP"),
+            );
+            if (!ts.success) {
+                return json(403, { error: "Turnstile verification failed", errorCodes: ts.errorCodes });
+            }
+            const token = await mintUiToken(env.UI_TOKEN_HMAC_SECRET, Date.now(), UI_TOKEN_TTL_SECONDS);
+            return json(200, { token, expiresIn: UI_TOKEN_TTL_SECONDS });
+        }
+
+        // Is this request carrying a valid UI-provenance token? Provenance only:
+        // NEVER gates the request — just tags analytics so the UI/non-UI split
+        // (relied on by #338 + #340) stops being spoofable via `mailto`.
+        const uiTokenVerify = await verifyUiToken(
+            req.headers.get(UI_TOKEN_HEADER),
+            env.UI_TOKEN_HMAC_SECRET,
+            Date.now(),
+        );
+        const trustedUi = uiTokenVerify.valid;
 
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
@@ -508,7 +566,8 @@ export default {
                 rateLimit: limit,
                 rateLimitRemaining: adjustedRemaining,
                 endpointType: classification.type,
-                creditCost: actualCost
+                creditCost: actualCost,
+                trustedUi
             });
 
             return finalResponse;
@@ -677,6 +736,7 @@ export default {
             rateLimitRemaining: rateLimitResult.remaining ?? 0,
             endpointType: classification.type,
             creditCost,
+            trustedUi,
             responseForEsTook: sampledResponseForAnalytics
         });
 
@@ -849,7 +909,7 @@ function getCorsHeaders(): Headers {
     const headers = new Headers();
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
-    headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type");
+    headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type, X-OpenAlex-UI");
     headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, X-RateLimit-Limit-USD, X-RateLimit-Remaining-USD, X-RateLimit-Prepaid-Remaining-USD, X-RateLimit-Cost-USD, X-RateLimit-Cost-Required-USD, Retry-After");
     return headers;
 }

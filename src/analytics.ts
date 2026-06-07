@@ -62,6 +62,10 @@ export function logAnalytics(params: {
     rateLimitRemaining: number;
     endpointType?: string;
     creditCost?: number;
+    // oxjob #338 Phase 5a: did this request carry a valid UI-provenance token?
+    // Trustworthy replacement for the spoofable `mailto=ui@openalex.org` marker
+    // when splitting UI vs API traffic. Defaults to false.
+    trustedUi?: boolean;
     // A cloned upstream response, passed in only on the sampled fraction. We
     // parse `meta.db_response_time_ms` out of it inside ctx.waitUntil so the
     // body-read never blocks the user response.
@@ -113,7 +117,8 @@ export function logAnalytics(params: {
                         params.rateLimit,           // double3: rate limit (credits)
                         params.rateLimitRemaining,  // double4: credits remaining
                         params.creditCost ?? 1,     // double5: credits consumed for this request
-                        esTookMs                    // double6: ES `meta.db_response_time_ms` (-1 = not sampled / N/A)
+                        esTookMs,                   // double6: ES `meta.db_response_time_ms` (-1 = not sampled / N/A)
+                        params.trustedUi ? 1 : 0    // double7: valid UI-provenance token present (oxjob #338)
                     ]
                 });
             } catch (error) {
