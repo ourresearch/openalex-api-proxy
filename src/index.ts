@@ -3,6 +3,7 @@ import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
+import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
 
@@ -288,6 +289,43 @@ export default {
             });
 
             return errorResponse;
+        }
+
+        // Search-text VOLUME gate (oxjob #340). Reject free-tier requests whose
+        // `search=` value is pathologically long (pasted abstracts / LLM-agent
+        // prompts / the 2026-05-05 "ray" essay-OR shape) — intrinsic ES `took`
+        // is driven by scored-text volume, not Boolean count. Exempts paid plans
+        // + the unforgeable #338 trustedUi token; keys ONLY on the search value
+        // length (filter-pipe OR-of-IDs is cheap and untouched). Gated here,
+        // before the rate limiter, so a rejected request burns no credits and
+        // never reaches ES. See src/searchVolumeGate.ts.
+        if (req.method !== "POST") {
+            const volume = checkSearchVolume(url, {
+                hasValidApiKey,
+                plan: userPlan,
+                trustedUi,
+                paidPlans: ENTERPRISE_PLANS,
+            });
+            if (volume.gated) {
+                const errorResponse = new Response(JSON.stringify({
+                    error: "Search query too long",
+                    error_source: "openalex-api-proxy",
+                    message: searchVolumeMessage(volume.length),
+                }), {
+                    status: 400,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "x-openalex-edge-reject": "search_volume",
+                        ...Object.fromEntries(getCorsHeaders()),
+                    },
+                });
+                logAnalytics({
+                    ctx, env, apiKey, req, url, scope: 'main',
+                    responseTime: Date.now() - startTime,
+                    statusCode: 400, rateLimit: 0, rateLimitRemaining: 0,
+                });
+                return errorResponse;
+            }
         }
 
         // Changefiles downloads require a valid API key on a Premium, Institutional, or Partner plan.
