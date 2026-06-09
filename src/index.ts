@@ -52,6 +52,15 @@ interface ApiKeyAuth {
 const API_KEY_CACHE = new Map<string, ApiKeyAuth & { cachedAt: number }>();
 const CACHE_TTL = 60000; // 60 seconds
 
+// Pay→usable race recovery (oxjob #409). When a request would be 429'd because both
+// the daily and prepaid pools look empty, we re-read the balance fresh from the DB
+// once and retry — this catches the case where the user just bought prepaid credit
+// but this isolate's cache still holds the pre-purchase balance. To stop a genuinely
+// out-of-credits client from hammering the DB on every blocked request, we re-check
+// at most once per key per TOPUP_RECHECK_TTL.
+const TOPUP_RECHECK_TTL = 10000; // 10 seconds
+const LAST_TOPUP_RECHECK = new Map<string, number>();
+
 // oxjob #166. Distinct from the 'throttled' plan value (max_per_day=0).
 const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investigate unsustainable usage patterns. Please contact support@openalex.org for details.";
 
@@ -157,6 +166,10 @@ export default {
         let onetimeCreditsBalance = 0;
         let onetimeCreditsExpiresAt: string | undefined;
         let userPlan: string | null = null;
+        // True when the auth (and thus the prepaid balance below) came from the
+        // per-isolate API_KEY_CACHE rather than a fresh DB read. Used by the
+        // pay→usable race recovery on the 429 path (oxjob #409).
+        let usedCachedAuth = false;
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -209,6 +222,9 @@ export default {
                 onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
                 onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
                 userPlan = authResult.plan ?? null;
+                // cacheRefreshed === true means we just read the DB; false/undefined
+                // means this balance came from the (≤60s, per-isolate) cache.
+                usedCachedAuth = authResult.cacheRefreshed !== true;
 
                 // Throttled accounts get a 1 req/sec gate via a separate DO namespace
                 // ('throttle:user|org:{id}'), so org throttles share one bucket across
@@ -455,6 +471,40 @@ export default {
             // If DO fails, allow the request through but log the error
             console.error("Rate limiter DO error:", error);
             rateLimitResult = { success: true, remaining: limit, creditsUsed: creditCost, onetimeRemaining: onetimeCreditsBalance };
+        }
+
+        // Pay→usable race recovery (oxjob #409). A daily-pool-exhausted 429 with a
+        // cached balance might be wrong: the user may have just bought prepaid credit
+        // that this isolate's API_KEY_CACHE hasn't picked up yet (TTL ≤60s, per-isolate).
+        // Re-read the balance fresh from the DB once and retry the check. Safe because
+        // the failed /check above hit the "both pools exhausted" branch, which returns
+        // before consuming anything — so the retry can't double-charge. Throttled per
+        // key so a genuinely-empty client can't hammer the DB on every blocked request.
+        if (!rateLimitResult.success
+            && rateLimitResult.limitType === 'daily'
+            && apiKey
+            && usedCachedAuth) {
+            const lastRecheck = LAST_TOPUP_RECHECK.get(apiKey) ?? 0;
+            if (Date.now() - lastRecheck >= TOPUP_RECHECK_TTL) {
+                LAST_TOPUP_RECHECK.set(apiKey, Date.now());
+                // Opportunistic cap so the throttle map can't grow unbounded per isolate.
+                if (LAST_TOPUP_RECHECK.size > 10000) LAST_TOPUP_RECHECK.clear();
+                API_KEY_CACHE.delete(apiKey);
+                const freshAuth = await checkApiKey(req, env);
+                const freshOnetime = freshAuth.valid ? (freshAuth.onetimeCreditsBalance ?? 0) : onetimeCreditsBalance;
+                if (freshAuth.valid && freshOnetime > onetimeCreditsBalance) {
+                    onetimeCreditsBalance = freshOnetime;
+                    onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
+                    try {
+                        rateLimitResult = await limiter.fetch("http://internal/check", {
+                            method: "POST",
+                            body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
+                        }).then(res => res.json());
+                    } catch (error) {
+                        console.error("Rate limiter DO error (post-topup recheck):", error);
+                    }
+                }
+            }
         }
 
         // Handle rate limit exceeded
