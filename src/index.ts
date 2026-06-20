@@ -158,9 +158,12 @@ export default {
         const isChangefilesBrowse = isChangefilesBrowsePath(url.pathname);
         // TODO Feb 13, 2026: Change these to 100 to require API key for normal usage.
         // 2026-01-26: Reduced from 100K to 10K during API slowdown incident to shift capacity to API key holders.
-        // With list=1 credit, users can make 10K list requests/day without an API key.
-        let maxPerDay = 10000;  // Default daily rate limit for unauthenticated users
-        let maxCreditsPerDay = 10000;  // Default credits for unauthenticated users (1:1)
+        // 2026-06-20: Reduced 10K→1K (keyless $1.00→$0.10/day) — restores Alice's never-shipped
+        // intended keyless budget; makes a key a real 10× edge. Shaves ~52% of keyless ES load
+        // with ~2-user real-GUI collateral (oxjob #479 blast-radius read). With list=1 credit,
+        // keyless users can make 1K list requests/day without an API key.
+        let maxPerDay = 1000;  // Default daily rate limit for unauthenticated users
+        let maxCreditsPerDay = 1000;  // Default credits for unauthenticated users (1:1)
         let isGrandfathered = false;  // Unauthenticated users are not grandfathered
 
         let onetimeCreditsBalance = 0;
