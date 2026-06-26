@@ -1,5 +1,35 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators } from './endpointClassifier';
+
+const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
+
+describe('countBooleanOperators', () => {
+    it('returns 0 with no search params', () => {
+        expect(countBooleanOperators(undefined)).toBe(0);
+        expect(ops('filter=publication_year:2020')).toBe(0);
+    });
+
+    it('counts OR/AND/NOT in the search param (whole-word, uppercase only)', () => {
+        expect(ops('search=cancer')).toBe(0);
+        expect(ops('search=cancer AND immunotherapy')).toBe(1);
+        expect(ops('search=a OR b OR c AND d NOT e')).toBe(4);
+    });
+
+    it('does not count lowercase or substrings (e.g. "for", "brand")', () => {
+        expect(ops('search=oranges and brandy for sale')).toBe(0);
+    });
+
+    it('counts operators in search.<field> and filter <field>.search clauses', () => {
+        expect(ops('search.title=a OR b')).toBe(1);
+        expect(ops('filter=title.search:a OR b OR c')).toBe(2);
+    });
+
+    it('flags a broad boolean query as >10', () => {
+        const q = 'search=' + Array.from({ length: 12 }, (_, i) => `t${i}`).join(' OR ');
+        expect(ops(q)).toBe(11);
+        expect(ops(q) > 10).toBe(true);
+    });
+});
 
 describe('endpointClassifier', () => {
     describe('singleton endpoints', () => {

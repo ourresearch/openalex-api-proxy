@@ -24,6 +24,7 @@ export class RateLimiter implements DurableObject {
     private onetimeCounter: OnetimeCounter | null = null;
     private lastSemanticTime: number = 0; // Temporary: 1 req/s limit for semantic search
     private lastThrottleTime: number = 0; // oxjob #166: admin rate-throttle
+    private lastBooleanTime: number = 0; // oxjob #521: 1 req/s limit for >10-operator boolean searches
 
     constructor(private readonly state: DurableObjectState) {
         this.state.blockConcurrencyWhile(async () => {
@@ -152,6 +153,19 @@ export class RateLimiter implements DurableObject {
                 return Response.json({ success: false, retryAfter });
             }
             this.lastThrottleTime = now;
+            return Response.json({ success: true });
+        }
+
+        // oxjob #521: per-client 1 req/s limit for very broad boolean searches
+        // (>10 OR/AND/NOT operators). In-memory only, same shape as /check-semantic.
+        if (url.pathname === '/check-boolean') {
+            const BOOLEAN_INTERVAL_MS = 1000;
+            const elapsed = now - this.lastBooleanTime;
+            if (this.lastBooleanTime > 0 && elapsed < BOOLEAN_INTERVAL_MS) {
+                const retryAfter = (BOOLEAN_INTERVAL_MS - elapsed) / 1000;
+                return Response.json({ success: false, retryAfter });
+            }
+            this.lastBooleanTime = now;
             return Response.json({ success: true });
         }
 

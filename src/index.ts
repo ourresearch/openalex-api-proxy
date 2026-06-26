@@ -1,7 +1,7 @@
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, EndpointClassification } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, EndpointClassification } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
@@ -454,6 +454,57 @@ export default {
             }
         }
 
+        // oxjob #521: throttle very broad boolean searches (>10 OR/AND/NOT operators)
+        // to 1 req/s per client. These are the bursty, ES-thread-saturating queries;
+        // the limit binds on the handful of high-rate senders, not interactive users.
+        const booleanOperators = classification.type === 'search'
+            ? countBooleanOperators(url.searchParams) : 0;
+        if (booleanOperators > 10) {
+            try {
+                const booleanCheck = await limiter.fetch("http://internal/check-boolean", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit: limit })
+                }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
+
+                if (!booleanCheck.success) {
+                    const retryAfter = Math.ceil(booleanCheck.retryAfter || 1);
+                    const errorResponse = new Response(JSON.stringify({
+                        error: "Rate limit exceeded",
+                        message: `Your query uses ${booleanOperators} boolean operators (OR/AND/NOT). ` +
+                            `Broad boolean searches are heavy for our search cluster, so queries with more ` +
+                            `than 10 operators are limited to 1 request per second per client. ` +
+                            `Please wait ${retryAfter}s and retry, space out these requests, or narrow the query ` +
+                            `(fewer OR/AND/NOT terms). See https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication`,
+                        reason: "broad_boolean_query",
+                        booleanOperators,
+                        retryAfter
+                    }), {
+                        status: 429,
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Retry-After": retryAfter.toString(),
+                            ...Object.fromEntries(getCorsHeaders())
+                        }
+                    });
+
+                    logAnalytics({
+                        ctx, env, apiKey, req, url, scope,
+                        responseTime: Date.now() - startTime,
+                        statusCode: 429,
+                        rateLimit: limit,
+                        rateLimitRemaining: 0,
+                        endpointType: classification.type,
+                        creditCost
+                    });
+
+                    return errorResponse;
+                }
+            } catch (error) {
+                // Fail-open: if DO call fails, allow the request through
+                console.error("Boolean rate limit check error:", error);
+            }
+        }
+
         let rateLimitResult: {
             success: boolean;
             retryAfter?: number;
@@ -775,11 +826,54 @@ export default {
         // caller's api_key in the returned download URLs, so entries must NOT be
         // shared across keys. Downloads (/changefiles/{date}/{file}) are not browse
         // paths and are never cached here.
+        //
+        // oxjob #521: on the normal API path, backstop the origin (which runs the 5s ES
+        // query) with a 9s AbortController — set above the ES 5s soft timeout (+ API
+        // overhead) so ES returns its partial first; the abort only fires on a true hang,
+        // and closing the connection also cancels the upstream search on disconnect. The
+        // edge-cached changefiles listing skips the signal (it must not hit the 504 path).
         const isChangefilesListing = req.method === "GET" && isChangefilesBrowse;
-        const response = await fetch(
-            proxyReq,
-            isChangefilesListing ? { cf: { cacheTtl: 3600, cacheEverything: true } } : {}
-        );
+        let response: Response;
+        try {
+            response = await fetch(
+                proxyReq,
+                isChangefilesListing
+                    ? { cf: { cacheTtl: 3600, cacheEverything: true } }
+                    : { signal: AbortSignal.timeout(9000) }
+            );
+        } catch (error) {
+            if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+                // Refund the credits charged at /check — the caller got no result.
+                try {
+                    await limiter.fetch("http://internal/refund", {
+                        method: "POST",
+                        body: JSON.stringify({ dailyLimit: limit, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
+                    });
+                } catch (refundError) {
+                    console.error("Failed to refund credits after gateway timeout:", refundError);
+                }
+                logAnalytics({
+                    ctx, env, apiKey, req, url, scope,
+                    responseTime: Date.now() - startTime,
+                    statusCode: 504,
+                    rateLimit: limit,
+                    rateLimitRemaining: rateLimitResult.remaining ?? 0,
+                    endpointType: classification.type,
+                    creditCost
+                });
+                return addCorsHeaders(new Response(JSON.stringify({
+                    error: "Gateway timeout",
+                    message: "Your query took too long and was stopped before completing. " +
+                        "This usually means a very broad search (e.g. many OR/AND/NOT terms). " +
+                        "Please narrow the query and try again. You were not charged for this request.",
+                    reason: "query_timeout"
+                }), {
+                    status: 504,
+                    headers: { "Content-Type": "application/json", ...Object.fromEntries(getCorsHeaders()) }
+                }));
+            }
+            throw error;
+        }
 
         // Sampled clone for analytics body-read (oxjob #194). Must be taken
         // BEFORE response.body is consumed by the streamed `new Response(...)`

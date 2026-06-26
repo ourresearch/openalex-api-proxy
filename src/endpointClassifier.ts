@@ -32,6 +32,28 @@ const SEARCH_FILTERS = [
     'title_and_abstract.search'
 ];
 
+/**
+ * Count Lucene boolean operators (OR / AND / NOT — uppercase, whole-word) across all
+ * search inputs: the `search` param, any `search.<field>` param, and `<field>.search:`
+ * clauses inside `filter`. Used to throttle very broad boolean searches (oxjob #521),
+ * which hold an ES search thread for seconds and drive queue saturation.
+ */
+export function countBooleanOperators(searchParams?: URLSearchParams): number {
+    if (!searchParams) return 0;
+    let text = '';
+    for (const [key, value] of searchParams.entries()) {
+        if (key === 'search' || key.startsWith('search.')) {
+            text += ' ' + value;
+        } else if (key === 'filter') {
+            for (const m of value.matchAll(/[a-z_]+\.search:([^,]*)/gi)) {
+                text += ' ' + m[1];
+            }
+        }
+    }
+    const matches = text.match(/(?<!\w)(?:OR|AND|NOT)(?!\w)/g);
+    return matches ? matches.length : 0;
+}
+
 export function classifyEndpoint(pathname: string, searchParams?: URLSearchParams): EndpointClassification {
     const normalized = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
     const segments = normalized.split('/');
