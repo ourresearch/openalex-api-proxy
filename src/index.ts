@@ -409,6 +409,14 @@ export default {
         const rateLimitKey = `${scope}:${identifier}`;
         const limit = maxCreditsPerDay;
 
+        // oxjob #521 follow-up: tiered per-second cap. Free/anonymous clients burst
+        // far above sustainable rates during saved-search batches (peaks of 100-700/s
+        // observed in the 2026-06-27 incidents); paid plans get more headroom. 50/s
+        // still exceeds every paid plan's daily budget, so it only smooths burst
+        // spikes, never caps daily throughput. Threshold mirrors the free-tier daily
+        // ceiling (10k credits); throttled plans (max=0) and anon (default 1k) stay free.
+        const perSecondLimit = maxCreditsPerDay > 10000 ? 50 : 30;
+
         // Check rate limit using Durable Object
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
@@ -519,7 +527,7 @@ export default {
         try {
             rateLimitResult = await limiter.fetch("http://internal/check", {
                 method: "POST",
-                body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
+                body: JSON.stringify({ dailyLimit: limit, perSecondLimit, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
             }).then(res => res.json());
         } catch (error) {
             // If DO fails, allow the request through but log the error
@@ -552,7 +560,7 @@ export default {
                     try {
                         rateLimitResult = await limiter.fetch("http://internal/check", {
                             method: "POST",
-                            body: JSON.stringify({ dailyLimit: limit, perSecondLimit: 100, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
+                            body: JSON.stringify({ dailyLimit: limit, perSecondLimit, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
                         }).then(res => res.json());
                     } catch (error) {
                         console.error("Rate limiter DO error (post-topup recheck):", error);
@@ -570,7 +578,7 @@ export default {
 
             let message: string;
             if (isPerSecond) {
-                message = `Rate limit exceeded: 100 requests per second. Please slow down.`;
+                message = `Rate limit exceeded: ${perSecondLimit} requests per second. Please slow down.`;
             } else if (onetimeCreditsBalance > 0) {
                 message = `Insufficient budget. This request costs $${costUsd} but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else {
