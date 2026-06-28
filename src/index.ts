@@ -462,12 +462,15 @@ export default {
             }
         }
 
-        // oxjob #521: throttle very broad boolean searches (>10 OR/AND/NOT operators)
+        // oxjob #521: throttle broad boolean searches (>5 OR/AND/NOT operators)
         // to 1 req/s per client. These are the bursty, ES-thread-saturating queries;
         // the limit binds on the handful of high-rate senders, not interactive users.
+        // Lowered from >10 to >5 (2026-06-27): the 6-10-operator cohort (cardiovascular/
+        // systematic-review monitors) was slipping under the old threshold and saturating
+        // the search thread pool. Interactive queries rarely exceed 5 operators.
         const booleanOperators = classification.type === 'search'
             ? countBooleanOperators(url.searchParams) : 0;
-        if (booleanOperators > 10) {
+        if (booleanOperators > 5) {
             try {
                 const booleanCheck = await limiter.fetch("http://internal/check-boolean", {
                     method: "POST",
@@ -480,7 +483,7 @@ export default {
                         error: "Rate limit exceeded",
                         message: `Your query uses ${booleanOperators} boolean operators (OR/AND/NOT). ` +
                             `Broad boolean searches are heavy for our search cluster, so queries with more ` +
-                            `than 10 operators are limited to 1 request per second per client. ` +
+                            `than 5 operators are limited to 1 request per second per client. ` +
                             `Please wait ${retryAfter}s and retry, space out these requests, or narrow the query ` +
                             `(fewer OR/AND/NOT terms). See https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication`,
                         reason: "broad_boolean_query",
