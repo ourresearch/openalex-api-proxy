@@ -71,9 +71,10 @@ const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investig
 // only classification.type==='search' (both ?search= relevance AND .search filter
 // lookups). Untouched: keyed clients, the openalex.org GUI (see guiOrigin below),
 // autocomplete (cheap 'list'), singleton/list, and semantic (already 1/s capped).
-// OFF now that the cluster recovered; kept as a ready one-flip lever for the next
-// midnight-batch saturation. Flip to true + push to re-arm.
-const SHED_ANON_SEARCH = false;
+// Re-armed 2026-07-01 with the guiOrigin carve-out (Origin/Referer=openalex.org)
+// so the frontend keeps working while keyless *non-GUI* search is shed. Flip to
+// false + push to disarm once the cluster recovers.
+const SHED_ANON_SEARCH = true;
 
 // Conversion: 1 credit = $0.0001 (10,000 credits = $1)
 const CREDIT_TO_USD = 0.0001;
