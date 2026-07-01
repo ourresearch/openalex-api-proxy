@@ -64,6 +64,16 @@ const LAST_TOPUP_RECHECK = new Map<string, number>();
 // oxjob #166. Distinct from the 'throttled' plan value (max_per_day=0).
 const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investigate unsustainable usage patterns. Please contact support@openalex.org for details.";
 
+// EMERGENCY LOAD SHED — 2026-07-01 works/authors search-saturation incident.
+// When true, keyless *non-GUI* search requests are rejected at the edge to drain
+// the saturated ES search thread-pool queue (anon = ~67% of search cost, spread
+// across ~1,700 sub-1/s IPs that per-IP rate limits can't reach). Scope is narrow:
+// only classification.type==='search' (both ?search= relevance AND .search filter
+// lookups). Untouched: keyed clients, the openalex.org GUI (valid UI-provenance
+// token → trustedUi), autocomplete (cheap 'list'), singleton/list, and semantic
+// (already 1/s capped). Flip to false + push to lift once the cluster recovers.
+const SHED_ANON_SEARCH = true;
+
 // Conversion: 1 credit = $0.0001 (10,000 credits = $1)
 const CREDIT_TO_USD = 0.0001;
 
@@ -402,6 +412,21 @@ export default {
         const creditCost = (isGrandfathered && classification.type === 'search')
             ? 1
             : classification.creditCost;
+
+        // EMERGENCY LOAD SHED (see SHED_ANON_SEARCH). Reject keyless, non-GUI search
+        // at the edge during the incident. trustedUi (HMAC UI-provenance token) is
+        // the unspoofable "this is our frontend" signal, so the openalex.org GUI's
+        // anonymous search still passes; only scripted/bot keyless search is shed.
+        if (SHED_ANON_SEARCH && !apiKey && !trustedUi && classification.type === 'search') {
+            const shed = json(503, {
+                error: "Search temporarily unavailable",
+                message: "Anonymous search is temporarily rate-limited due to heavy load. " +
+                    "Please retry shortly, or use a free API key for uninterrupted access: https://openalex.org/rest-api.",
+            });
+            const headers = new Headers(shed.headers);
+            headers.set("Retry-After", "60");
+            return new Response(shed.body, { status: 503, headers });
+        }
 
         // Use unified credits-based rate limiting
         const scope = "credits";
