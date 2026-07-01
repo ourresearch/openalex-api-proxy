@@ -69,10 +69,11 @@ const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investig
 // the saturated ES search thread-pool queue (anon = ~67% of search cost, spread
 // across ~1,700 sub-1/s IPs that per-IP rate limits can't reach). Scope is narrow:
 // only classification.type==='search' (both ?search= relevance AND .search filter
-// lookups). Untouched: keyed clients, the openalex.org GUI (valid UI-provenance
-// token → trustedUi), autocomplete (cheap 'list'), singleton/list, and semantic
-// (already 1/s capped). Flip to false + push to lift once the cluster recovers.
-const SHED_ANON_SEARCH = true;
+// lookups). Untouched: keyed clients, the openalex.org GUI (see guiOrigin below),
+// autocomplete (cheap 'list'), singleton/list, and semantic (already 1/s capped).
+// OFF now that the cluster recovered; kept as a ready one-flip lever for the next
+// midnight-batch saturation. Flip to true + push to re-arm.
+const SHED_ANON_SEARCH = false;
 
 // Conversion: 1 credit = $0.0001 (10,000 credits = $1)
 const CREDIT_TO_USD = 0.0001;
@@ -414,10 +415,23 @@ export default {
             : classification.creditCost;
 
         // EMERGENCY LOAD SHED (see SHED_ANON_SEARCH). Reject keyless, non-GUI search
-        // at the edge during the incident. trustedUi (HMAC UI-provenance token) is
-        // the unspoofable "this is our frontend" signal, so the openalex.org GUI's
-        // anonymous search still passes; only scripted/bot keyless search is shed.
-        if (SHED_ANON_SEARCH && !apiKey && !trustedUi && classification.type === 'search') {
+        // at the edge during the incident; scripted/bot keyless search only.
+        // GUI carve-out: trustedUi (HMAC UI-provenance token) is the unspoofable
+        // signal, but when the UI-token mint hasn't landed the GUI's keyless search
+        // is untrusted too — that broke the frontend on 2026-07-01. So ALSO honor the
+        // browser Origin/Referer: openalex.org fetches always carry it on the request
+        // itself (the CORS preflight is an OPTIONS, already short-circuited above).
+        const guiOrigin = ((): boolean => {
+            for (const h of [req.headers.get("Origin"), req.headers.get("Referer")]) {
+                if (!h) continue;
+                try {
+                    const host = new URL(h).hostname;
+                    if (host === "openalex.org" || host.endsWith(".openalex.org")) return true;
+                } catch { /* malformed header — ignore */ }
+            }
+            return false;
+        })();
+        if (SHED_ANON_SEARCH && !apiKey && !trustedUi && !guiOrigin && classification.type === 'search') {
             const shed = json(503, {
                 error: "Search temporarily unavailable",
                 message: "Anonymous search is temporarily rate-limited due to heavy load. " +
