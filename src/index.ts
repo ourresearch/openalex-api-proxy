@@ -68,8 +68,9 @@ const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investig
 // When true, keyless *non-GUI* search requests are rejected at the edge to drain
 // the saturated ES search thread-pool queue (anon = ~67% of search cost, spread
 // across ~1,700 sub-1/s IPs that per-IP rate limits can't reach). Scope is narrow:
-// only classification.type==='search' (both ?search= relevance AND .search filter
-// lookups). Untouched: keyed clients, the openalex.org GUI (see guiOrigin below),
+// only /works search (isWorksSearch + classification.type==='search'; both ?search=
+// relevance AND .search filter lookups). Untouched: search on other entities
+// (/authors, /sources, …), keyed clients, the openalex.org GUI (see guiOrigin below),
 // autocomplete (cheap 'list'), singleton/list, and semantic (already 1/s capped).
 // Re-armed 2026-07-01 with the guiOrigin carve-out (Origin/Referer=openalex.org)
 // so the frontend keeps working while keyless *non-GUI* search is shed. Flip to
@@ -432,7 +433,10 @@ export default {
             }
             return false;
         })();
-        if (SHED_ANON_SEARCH && !apiKey && !trustedUi && !guiOrigin && classification.type === 'search') {
+        // Scope: /works search only — the recurring saturation driver. Search on other
+        // entities (/authors, /sources, …) is left alone even when the shed is armed.
+        const isWorksSearch = url.pathname.replace(/^\/+/, "").split("/")[0].toLowerCase() === "works";
+        if (SHED_ANON_SEARCH && isWorksSearch && !apiKey && !trustedUi && !guiOrigin && classification.type === 'search') {
             const shed = json(503, {
                 error: "Search temporarily unavailable",
                 message: "Anonymous search is temporarily rate-limited due to heavy load. " +
