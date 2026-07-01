@@ -413,9 +413,12 @@ export default {
         // far above sustainable rates during saved-search batches (peaks of 100-700/s
         // observed in the 2026-06-27 incidents); paid plans get more headroom. 50/s
         // still exceeds every paid plan's daily budget, so it only smooths burst
-        // spikes, never caps daily throughput. Threshold mirrors the free-tier daily
-        // ceiling (10k credits); throttled plans (max=0) and anon (default 1k) stay free.
-        const perSecondLimit = maxCreditsPerDay > 10000 ? 50 : 30;
+        // spikes, never caps daily throughput. Thresholds mirror the daily credit
+        // ceilings: paid (>10k) 50/s, free-registered (10k) 30/s, anon (default 1k)
+        // and throttled plans (max=0) 10/s. 2026-07-01: anon dropped 30→10/s — anon
+        // is the dominant diffuse load during search-saturation incidents; the 10/s
+        // per-IP cap reins in the heavy-hitter anon IPs without touching keyed clients.
+        const perSecondLimit = maxCreditsPerDay > 10000 ? 50 : (maxCreditsPerDay > 1000 ? 30 : 10);
 
         // Check rate limit using Durable Object
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
