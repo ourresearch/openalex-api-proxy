@@ -3,7 +3,9 @@ import {
     bucketSeverity,
     nextLevel,
     newBucket,
+    checkBudget,
     MIN_BUCKET_SAMPLES,
+    type AnonBucket,
     type BucketStats,
     type HealthLevel,
 } from './searchHealth';
@@ -108,5 +110,70 @@ describe('nextLevel', () => {
         level = nextLevel(level, clean);
         level = nextLevel(level, clean);
         expect(level).toBe(G);
+    });
+});
+
+describe('checkBudget (anon-class token bucket)', () => {
+    const G = 0 as HealthLevel, Y = 1 as HealthLevel, O = 2 as HealthLevel, R = 3 as HealthLevel;
+    const fresh = (): AnonBucket => ({ tokens: 0, lastRefill: 0 });
+
+    it('GREEN never limits and never consumes', () => {
+        const b = fresh();
+        for (let i = 0; i < 1000; i++) {
+            expect(checkBudget(G, b, 1_000_000).ok).toBe(true);
+        }
+        expect(b.tokens).toBe(0); // untouched — GREEN short-circuits
+    });
+
+    it('RED always denies with Retry-After 60', () => {
+        expect(checkBudget(R, fresh(), 1_000_000)).toEqual({ ok: false, retryAfter: 60 });
+    });
+
+    it('YELLOW fills to 60 tokens and denies the 61st in the same second', () => {
+        const b = fresh();
+        const now = 1_000_000;
+        let allowed = 0;
+        for (let i = 0; i < 70; i++) {
+            if (checkBudget(Y, b, now).ok) allowed++;
+        }
+        expect(allowed).toBe(60);
+        const denied = checkBudget(Y, b, now);
+        expect(denied.ok).toBe(false);
+        expect(denied.retryAfter).toBeGreaterThanOrEqual(1);
+    });
+
+    it('ORANGE refills at 20/s after exhaustion', () => {
+        const b = fresh();
+        const t0 = 1_000_000;
+        while (checkBudget(O, b, t0).ok) { /* drain */ }
+        // Half a second later: ~10 tokens back
+        let allowed = 0;
+        for (let i = 0; i < 20; i++) {
+            if (checkBudget(O, b, t0 + 500).ok) allowed++;
+        }
+        expect(allowed).toBe(10);
+    });
+
+    it('caps accumulation at one second of rate (no burst hoarding)', () => {
+        const b = fresh();
+        checkBudget(Y, b, 0);              // initializes/fills
+        const later = 60 * 60 * 1000;      // an hour of silence
+        let allowed = 0;
+        for (let i = 0; i < 200; i++) {
+            if (checkBudget(Y, b, later).ok) allowed++;
+        }
+        expect(allowed).toBeLessThanOrEqual(60);
+    });
+
+    it('a state change re-caps naturally: ORANGE tokens carry into YELLOW refill', () => {
+        const b = fresh();
+        const t0 = 1_000_000;
+        while (checkBudget(O, b, t0).ok) { /* drain at ORANGE */ }
+        // One second later at YELLOW the bucket refills to the full 60
+        let allowed = 0;
+        for (let i = 0; i < 100; i++) {
+            if (checkBudget(Y, b, t0 + 1000).ok) allowed++;
+        }
+        expect(allowed).toBe(60);
     });
 });

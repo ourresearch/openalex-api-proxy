@@ -1,22 +1,29 @@
-// oxjob #521 WS-3 "SearchHealthController" — PHASE 0: OBSERVE-ONLY.
+// oxjob #521 WS-3 "SearchHealthController" — PHASE 1: HEALTH-GATED ANON BUCKET.
 //
 // One global Durable Object (idFromName(GLOBAL_HEALTH_DO_NAME)) that watches
-// search health from in-band observations and simulates the GREEN/YELLOW/
-// ORANGE/RED ladder from the design doc (oxjobs working/works-search-saturation/
-// evidence/health-gated-anon-limiter-design.md). In Phase 0 it ENFORCES NOTHING:
-//   - the Worker samples origin responses (search 1-in-5; singleton/list 1-in-50
-//     as the collateral-damage signal) into 30s buckets via fire-and-forget
-//     /observe calls that ride ctx.waitUntil — never on the user's latency path;
-//   - the DO aggregates buckets, runs the state machine + hysteresis, and logs
-//     every transition (console + an AE row, blob8='health_transition') so the
-//     simulated ladder can be replayed against real incidents;
-//   - GET /search-health (public, read-only) shows the live state + window.
-// Enforcement (class-level anon bucket / edge degrade / auto-shed) is Phase 1+,
-// gated on ≥2 clean nightly-batch calibrations (exit criteria in the design doc).
+// search health from in-band observations, runs the GREEN/YELLOW/ORANGE/RED
+// ladder from the design doc (oxjobs working/works-search-saturation/
+// evidence/health-gated-anon-limiter-design.md), and rates a SINGLE shared
+// token bucket for the whole anonymous works-search class:
+//   - GREEN  → no limit; the Worker's healthy fast path skips the DO entirely
+//   - YELLOW → 60/s  (≈ measured typical anon demand — sheds only the surge)
+//   - ORANGE → 20/s  (real rationing; 429 + free-key pitch)
+//   - RED    → off   (503 + Retry-After — the old manual shed, automated)
+// Sensing: the Worker samples origin responses (search 1-in-5; singleton/list
+// 1-in-50 as the collateral-damage signal) into 30s buckets via fire-and-forget
+// /observe calls that ride ctx.waitUntil — never on the user's latency path.
+// Escalation: 1 bad bucket = +1 level (~30s); 2 consecutive jump to their
+// common floor; de-escalation 1 level per 4 clean buckets (~2 min).
+// Transitions: console + AE (blob8='health_transition') + last 50 at
+// GET /search-health (key-gated).
+// Manual override: env FORCE_HEALTH_STATE=GREEN|YELLOW|ORANGE|RED (replaces
+// the retired SHED_ANON_SEARCH flag). Failure semantics: DO unreachable →
+// allow if last-known healthy, 503 if last-known ORANGE/RED (fail-closed
+// exactly when it matters).
 //
 // Health is measured over ALL search traffic — keyed and anonymous, every
 // entity — because the signal is cluster health, not anon behavior. Only the
-// future enforcement is scoped to keyless non-GUI traffic.
+// ENFORCEMENT is scoped to keyless, non-GUI /works search.
 
 export type HealthLevel = 0 | 1 | 2 | 3;
 export const LEVEL_NAMES = ['GREEN', 'YELLOW', 'ORANGE', 'RED'] as const;
@@ -122,6 +129,43 @@ export interface HealthObservation {
     anon?: boolean;
 }
 
+// ---- Phase 1: the anon-class token bucket ------------------------------
+// One bucket for ALL keyless non-GUI works search combined (10,000 IPs draw
+// from the same pool as 1 — per-IP limits provably can't reach the diffuse
+// swarm). Refill rate follows the health state (v3.2, calibrated from
+// measured demand: anon works search ran 47-88/s daily avg pre-shed).
+export const BUCKET_REFILL: Record<HealthLevel, number> = {
+    0: Infinity, // GREEN: no class limit at all
+    1: 60,       // YELLOW: ≈ typical demand — sheds only the surge above normal
+    2: 20,       // ORANGE: ~1/3 of typical
+    3: 0,        // RED: off
+};
+
+export interface AnonBucket {
+    tokens: number;
+    lastRefill: number;
+}
+
+// Mutates b (refill + consume). Capacity = 1 second's worth of the current
+// rate, so a state change re-caps naturally on the next call.
+// NOTE (review 2026-07-02): this duplicates the perSecondBucket math inline in
+// rateLimiter.ts. Deliberately NOT unified in this change — touching the
+// per-key limiter in the same deploy as new enforcement couples two risks.
+// Follow-up: extract this tested pure helper and have RateLimiter use it.
+export function checkBudget(level: HealthLevel, b: AnonBucket, now: number): { ok: boolean; retryAfter?: number } {
+    const rate = BUCKET_REFILL[level];
+    if (rate === Infinity) return { ok: true };
+    if (rate === 0) return { ok: false, retryAfter: 60 };
+    const elapsedSec = Math.max(0, (now - b.lastRefill) / 1000);
+    b.tokens = Math.min(rate, b.tokens + elapsedSec * rate);
+    b.lastRefill = now;
+    if (b.tokens >= 1) {
+        b.tokens -= 1;
+        return { ok: true };
+    }
+    return { ok: false, retryAfter: Math.max(1, Math.ceil((1 - b.tokens) / rate)) };
+}
+
 function summarize(b: BucketStats) {
     return {
         start: new Date(b.start).toISOString(),
@@ -168,6 +212,9 @@ export class SearchHealthController implements DurableObject {
     private ring: BucketStats[] = [];
     private current: BucketStats | null = null;
     private transitions: TransitionRecord[] = [];
+    // In-memory only: the bucket matters only while unhealthy, and a DO restart
+    // refilling it costs at most 1 second of allowance.
+    private anonBucket: AnonBucket = { tokens: 0, lastRefill: 0 };
 
     constructor(
         private readonly state: DurableObjectState,
@@ -220,13 +267,46 @@ export class SearchHealthController implements DurableObject {
             return Response.json({ ok: true, state: LEVEL_NAMES[this.level] });
         }
 
+        // Phase 1: the enforcement check. Called by the Worker for keyless
+        // non-GUI works search (the healthy fast path skips this entirely).
+        // Optional {force} applies a manually-pinned level (FORCE_HEALTH_STATE)
+        // while still using the shared bucket for token accounting.
+        if (url.pathname === '/check-anon-budget' && request.method === 'POST') {
+            let force: HealthLevel | null = null;
+            try {
+                const body = await request.json<{ force?: string }>();
+                const idx = LEVEL_NAMES.indexOf((body.force || '') as (typeof LEVEL_NAMES)[number]);
+                if (idx > 0) force = idx as HealthLevel; // GREEN-force short-circuits Worker-side
+            } catch { /* no body → no force */ }
+            await this.rollBuckets(now);
+            const level = force ?? this.level;
+            const verdict = checkBudget(level, this.anonBucket, now);
+            // Shape Retry-After for denials (review finding: the raw bucket math
+            // yields 1s for any rate ≥ 1, which synchronizes the whole denied
+            // class into 1-second retry waves against this single DO). Jittered,
+            // level-scaled backoff sheds the same traffic with far less re-hit load.
+            let retryAfter = verdict.retryAfter;
+            if (!verdict.ok) {
+                retryAfter = level === 3 ? 60
+                    : level === 2 ? 30 + Math.floor(Math.random() * 11)
+                    : 10 + Math.floor(Math.random() * 6);
+            }
+            return Response.json({
+                ok: verdict.ok,
+                retryAfter,
+                state: LEVEL_NAMES[level],
+                forced: force !== null,
+            });
+        }
+
         if (url.pathname === '/state' && request.method === 'GET') {
             await this.rollBuckets(now);
             return Response.json({
-                phase: 'observe-only',
+                phase: 'phase-1',
                 state: LEVEL_NAMES[this.level],
                 since: new Date(this.since).toISOString(),
-                enforcing: false,
+                enforcing: true,
+                ladder: { GREEN: 'no limit', YELLOW: '60/s', ORANGE: '20/s', RED: 'off (503)' },
                 window: this.ring.map(summarize),
                 currentBucket: this.current ? summarize(this.current) : null,
                 recentTransitions: [...this.transitions].reverse(), // newest first
@@ -293,7 +373,8 @@ export class SearchHealthController implements DurableObject {
         } catch { /* observe-only: a lost persist just means amnesia on restart */ }
         console.log(JSON.stringify({
             event: 'search_health_transition',
-            phase: 'observe-only',
+            phase: 'phase-1',
+            enforcing: true,
             from: LEVEL_NAMES[from],
             to: LEVEL_NAMES[next],
             lastBucket: { searchN: last?.n ?? 0, avgMs: avg, errPct, collateralN: last?.otherN ?? 0 },
@@ -315,9 +396,21 @@ export class SearchHealthController implements DurableObject {
     }
 }
 
+// ---- Worker-side: isolate state cache ----------------------------------
+// Every /observe and /check-anon-budget response piggybacks the current state;
+// isolates cache it so the healthy fast path never calls the DO at all.
+const STATE_CACHE_TTL_MS = 5000;
+let lastKnownState: { level: HealthLevel; at: number } = { level: 0, at: 0 };
+
+function noteState(name: string | undefined): void {
+    if (!name) return;
+    const idx = LEVEL_NAMES.indexOf(name as (typeof LEVEL_NAMES)[number]);
+    if (idx >= 0) lastKnownState = { level: idx as HealthLevel, at: Date.now() };
+}
+
 // Worker-side hook. Fire-and-forget on ctx.waitUntil: the observation happens
 // after the response is already streaming and a DO failure can never affect a
-// request (Phase 0 hard invariant: this file changes no request outcomes).
+// request (hard invariant: observations change no request outcomes).
 export function observeSearchHealth(
     env: { SEARCH_HEALTH: DurableObjectNamespace },
     ctx: ExecutionContext,
@@ -333,10 +426,122 @@ export function observeSearchHealth(
     ctx.waitUntil((async () => {
         try {
             const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
-            await stub.fetch('http://internal/observe', {
+            const resp = await stub.fetch('http://internal/observe', {
                 method: 'POST',
                 body: JSON.stringify({ ms: obs.ms, status: obs.status, kind, anon: obs.anon } satisfies HealthObservation),
             });
-        } catch { /* observe-only: swallow everything */ }
+            const j = await resp.json<{ state?: string }>();
+            noteState(j.state);
+        } catch { /* observation only: swallow everything */ }
     })());
+}
+
+export interface BudgetVerdict {
+    ok: boolean;
+    state: string;
+    statusCode?: 429 | 503;
+    retryAfter?: number;
+}
+
+// How long a cached unhealthy state may drive fail-closed decisions when the
+// DO is unreachable. Bounded so a stale ORANGE/RED can't 503 an isolate's
+// anon search forever after the cluster has recovered (review finding).
+const FAIL_CLOSED_MAX_STALENESS_MS = 5 * 60 * 1000;
+// Budget calls must fail fast into the last-known-state fallback rather than
+// hang the request behind a slow DO (review finding).
+const BUDGET_FETCH_TIMEOUT_MS = 1500;
+
+// FORCE_HEALTH_STATE parsing (review finding: the old SHED_ANON_SEARCH was a
+// compile-checked boolean; an env var is free text, and a silently-ignored
+// typo during an incident means an operator believes the shed is armed when
+// it isn't). Protective default: any unrecognized non-empty value arms RED
+// and logs — mis-arming must fail toward shedding, never toward nothing.
+function parseForceState(raw: string | undefined): HealthLevel | null {
+    const v = (raw || '').trim().toUpperCase();
+    if (v === '' || v === 'FALSE' || v === 'OFF' || v === '0' || v === 'NONE' || v === 'AUTO') return null;
+    const idx = LEVEL_NAMES.indexOf(v as (typeof LEVEL_NAMES)[number]);
+    if (idx >= 0) return idx as HealthLevel;
+    if (v === 'TRUE' || v === 'ON' || v === '1' || v === 'SHED') return 3; // old-flag muscle memory
+    console.error(`FORCE_HEALTH_STATE="${raw}" not recognized — treating as RED (protective default). ` +
+        `Valid: GREEN|YELLOW|ORANGE|RED (or FALSE/OFF/AUTO for automatic).`);
+    return 3;
+}
+
+// The Phase-1 enforcement check for keyless non-GUI works search.
+// - FORCE_HEALTH_STATE pins the level manually (GREEN/RED short-circuit here;
+//   YELLOW/ORANGE still hit the DO so token accounting stays global).
+// - Cached-GREEN allows immediately at ANY age — a stale note just triggers a
+//   background refresh on ctx.waitUntil. Steady state therefore adds ZERO
+//   blocking DO calls (v3: no limit — and no cost — when there is no problem);
+//   the escalation price is ≤1 request per isolate of lag, on top of the
+//   sampled /observe piggybacks that keep active isolates current anyway.
+// - Cached-RED within TTL denies locally (negative cache): a flood at RED
+//   must not funnel every request into the single DO it is drowning.
+// - DO error/timeout → fail by last-known state, staleness-bounded:
+//   pinned YELLOW/ORANGE → deny (honor the operator's protective intent);
+//   fresh ORANGE/RED → 503 (fail closed exactly when it matters);
+//   unknown/stale/healthy → allow + console.error (availability, visibly).
+export async function checkAnonSearchBudget(
+    env: { SEARCH_HEALTH: DurableObjectNamespace; FORCE_HEALTH_STATE?: string },
+    ctx: ExecutionContext,
+): Promise<BudgetVerdict> {
+    const forced = parseForceState(env.FORCE_HEALTH_STATE);
+    if (forced === 0) return { ok: true, state: 'GREEN (forced)' };
+    if (forced === 3) return { ok: false, state: 'RED (forced)', statusCode: 503, retryAfter: 60 };
+    const forceParam = forced !== null ? LEVEL_NAMES[forced] : undefined;
+
+    const now = Date.now();
+    const age = now - lastKnownState.at;
+    if (!forceParam && lastKnownState.level === 0) {
+        if (age >= STATE_CACHE_TTL_MS) {
+            // Stale GREEN: allow now, refresh off the latency path. At GREEN the
+            // DO consumes no token for this, so the refresh is free.
+            ctx.waitUntil(refreshStateInBackground(env));
+        }
+        return { ok: true, state: 'GREEN' };
+    }
+    if (!forceParam && lastKnownState.level === 3 && age < STATE_CACHE_TTL_MS) {
+        return { ok: false, state: 'RED (cached)', statusCode: 503, retryAfter: 60 };
+    }
+    try {
+        const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+        const resp = await stub.fetch('http://internal/check-anon-budget', {
+            method: 'POST',
+            body: JSON.stringify(forceParam ? { force: forceParam } : {}),
+            signal: AbortSignal.timeout(BUDGET_FETCH_TIMEOUT_MS),
+        });
+        const j = await resp.json<{ ok: boolean; retryAfter?: number; state: string }>();
+        if (!forceParam) noteState(j.state);
+        if (j.ok) return { ok: true, state: j.state };
+        return {
+            ok: false,
+            state: j.state,
+            retryAfter: j.retryAfter ?? 30,
+            statusCode: j.state === 'RED' ? 503 : 429,
+        };
+    } catch {
+        if (forceParam) {
+            // The operator pinned a rationing level; without the DO we can't
+            // count tokens, and silently unlimited would betray the pin.
+            return { ok: false, state: `${forceParam} (forced, DO error)`, statusCode: 429, retryAfter: 15 };
+        }
+        if (lastKnownState.level >= 2 && age < FAIL_CLOSED_MAX_STALENESS_MS) {
+            return { ok: false, state: 'unknown (DO error, last-known unhealthy)', statusCode: 503, retryAfter: 30 };
+        }
+        console.error('search-health budget check failed with no fresh unhealthy state — allowing (availability-first)');
+        return { ok: true, state: 'unknown (DO error)' };
+    }
+}
+
+async function refreshStateInBackground(env: { SEARCH_HEALTH: DurableObjectNamespace }): Promise<void> {
+    try {
+        const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+        const resp = await stub.fetch('http://internal/check-anon-budget', {
+            method: 'POST',
+            body: '{}',
+            signal: AbortSignal.timeout(BUDGET_FETCH_TIMEOUT_MS),
+        });
+        const j = await resp.json<{ state?: string }>();
+        noteState(j.state);
+    } catch { /* background refresh only — next request or observe will retry */ }
 }

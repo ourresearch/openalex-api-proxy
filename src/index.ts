@@ -6,7 +6,7 @@ import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
-import { SearchHealthController, observeSearchHealth, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
+import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
@@ -28,6 +28,11 @@ export interface Env {
     // anyone probing the API — so the endpoint 404s unless the caller presents
     // this key (?key= or X-Health-Key). Unset = endpoint disabled entirely.
     SEARCH_HEALTH_KEY?: string;      // Worker secret
+    // oxjob #521 WS-3 Phase 1: manual override for the anon-search ladder.
+    // GREEN|YELLOW|ORANGE|RED pins the enforcement level; unset = automatic
+    // (health-driven). Replaces the retired SHED_ANON_SEARCH code flag —
+    // FORCE_HEALTH_STATE=RED is the old armed shed, without a deploy.
+    FORCE_HEALTH_STATE?: string;     // plain env var (keep_vars)
 }
 
 // oxjob #338: minted UI-provenance tokens live 30 min; the GUI re-mints on expiry.
@@ -71,23 +76,14 @@ const LAST_TOPUP_RECHECK = new Map<string, number>();
 // oxjob #166. Distinct from the 'throttled' plan value (max_per_day=0).
 const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investigate unsustainable usage patterns. Please contact support@openalex.org for details.";
 
-// EMERGENCY LOAD SHED — 2026-07-01 works/authors search-saturation incident.
-// When true, keyless *non-GUI* search requests are rejected at the edge to drain
-// the saturated ES search thread-pool queue (anon = ~67% of search cost, spread
-// across ~1,700 sub-1/s IPs that per-IP rate limits can't reach). Scope is narrow:
-// only /works search (isWorksSearch + classification.type==='search'; both ?search=
-// relevance AND .search filter lookups). Untouched: search on other entities
-// (/authors, /sources, …), keyed clients, the openalex.org GUI (see guiOrigin below),
-// autocomplete (cheap 'list'), singleton/list, and semantic (already 1/s capped).
-// Re-armed 2026-07-01 with the guiOrigin carve-out (Origin/Referer=openalex.org)
-// so the frontend keeps working while keyless *non-GUI* search is shed. Flip to
-// false + push to disarm once the cluster recovers.
-// DISARMED 2026-07-02 (oxjob #521 WS-3): anon works search restored so the
-// Phase-0 SearchHealthController observes the true traffic mix. The monitor
-// (searchHealth.ts, GET /search-health) is the safety net — it detects
-// saturation within ~30-60s; if a batch melts search again, re-arm here or
-// ship Phase 1 (the health-gated anon class bucket that replaces this flag).
-const SHED_ANON_SEARCH = false;
+// ANON-SEARCH LADDER (oxjob #521 WS-3 Phase 1) — the health-gated anon class
+// bucket that replaced the emergency SHED_ANON_SEARCH flag (retired 2026-07-02;
+// it 503'd ALL keyless non-GUI works search while armed, 07-01→07-02). Keyless,
+// non-GUI /works search now draws from ONE shared token bucket whose rate
+// follows live search health (searchHealth.ts): GREEN = no limit (and no DO
+// call on the healthy fast path), YELLOW = 60/s, ORANGE = 20/s, RED = off.
+// Manual override: set the FORCE_HEALTH_STATE env var (RED = the old armed
+// shed, no deploy needed). Enforcement lives below at the old shed site.
 
 // Conversion: 1 credit = $0.0001 (10,000 credits = $1)
 const CREDIT_TO_USD = 0.0001;
@@ -449,8 +445,8 @@ export default {
             ? 1
             : classification.creditCost;
 
-        // EMERGENCY LOAD SHED (see SHED_ANON_SEARCH). Reject keyless, non-GUI search
-        // at the edge during the incident; scripted/bot keyless search only.
+        // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
+        // comment at the top of the file and searchHealth.ts).
         // GUI carve-out: trustedUi (HMAC UI-provenance token) is the unspoofable
         // signal, but when the UI-token mint hasn't landed the GUI's keyless search
         // is untrusted too — that broke the frontend on 2026-07-01. So ALSO honor the
@@ -466,18 +462,43 @@ export default {
             }
             return false;
         })();
-        // Scope: /works search only — the recurring saturation driver. Search on other
-        // entities (/authors, /sources, …) is left alone even when the shed is armed.
+        // Scope: /works search only — the recurring saturation driver. Search on
+        // other entities (/authors, /sources, …) is not gated by the ladder.
+        // Runs BEFORE the credits DO, so rejected requests are edge-cheap and
+        // never charged. Untouched: keyed clients, the GUI, autocomplete (cheap
+        // 'list'), singleton/list, semantic (already 1/s capped).
         const isWorksSearch = url.pathname.replace(/^\/+/, "").split("/")[0].toLowerCase() === "works";
-        if (SHED_ANON_SEARCH && isWorksSearch && !apiKey && !trustedUi && !guiOrigin && classification.type === 'search') {
-            const shed = json(503, {
-                error: "Search temporarily unavailable",
-                message: "Anonymous search is temporarily rate-limited due to heavy load. " +
-                    "Please retry shortly, or use a free API key for uninterrupted access: https://openalex.org/rest-api.",
-            });
-            const headers = new Headers(shed.headers);
-            headers.set("Retry-After", "60");
-            return new Response(shed.body, { status: 503, headers });
+        if (isWorksSearch && !apiKey && !trustedUi && !guiOrigin && classification.type === 'search') {
+            const verdict = await checkAnonSearchBudget(env, ctx);
+            if (!verdict.ok) {
+                const statusCode = verdict.statusCode ?? 503;
+                const retryAfter = verdict.retryAfter ?? 60;
+                logAnalytics({
+                    ctx, env, apiKey, req, url,
+                    scope: 'anon-search-ladder',
+                    responseTime: Date.now() - startTime,
+                    statusCode,
+                    rateLimit: maxCreditsPerDay,
+                    rateLimitRemaining: 0,
+                    endpointType: classification.type,
+                    creditCost: 0,
+                    trustedUi
+                });
+                const body = statusCode === 503 ? {
+                    error: "Search temporarily unavailable",
+                    message: "Anonymous search is paused while the search cluster recovers from heavy load. " +
+                        "Please retry shortly, or use a free API key for uninterrupted access: https://openalex.org/rest-api.",
+                } : {
+                    error: "Rate limit exceeded",
+                    message: "Anonymous search is temporarily rate-limited while the search cluster is under elevated load. " +
+                        `Please retry in ${retryAfter}s, or use a free API key for uninterrupted access: https://openalex.org/rest-api.`,
+                    retryAfter,
+                };
+                const resp = json(statusCode, body);
+                const headers = new Headers(resp.headers);
+                headers.set("Retry-After", String(retryAfter));
+                return new Response(resp.body, { status: statusCode, headers });
+            }
         }
 
         // Use unified credits-based rate limiting
