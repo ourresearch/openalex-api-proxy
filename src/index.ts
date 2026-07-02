@@ -6,10 +6,12 @@ import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
+import { SearchHealthController, observeSearchHealth, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
     RATE_LIMITER: DurableObjectNamespace;
+    SEARCH_HEALTH: DurableObjectNamespace;
     ANALYTICS: AnalyticsEngineDataset;
     OPENALEX_API_URL: string;
     TEXT_API_URL: string;
@@ -85,6 +87,7 @@ function creditsToUsd(credits: number): number {
 }
 
 export { RateLimiter };
+export { SearchHealthController };
 
 export default {
     async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -149,6 +152,19 @@ export default {
             }
             const token = await mintUiToken(env.UI_TOKEN_HMAC_SECRET, Date.now(), UI_TOKEN_TTL_SECONDS);
             return json(200, { token, expiresIn: UI_TOKEN_TTL_SECONDS });
+        }
+
+        // oxjob #521 WS-3 Phase 0: read-only view of the search-health monitor
+        // (observe-only — it enforces nothing; see searchHealth.ts). Public on
+        // purpose: it exposes only aggregate latency/state, no client data.
+        if (uiTokenPath === 'search-health' && req.method === 'GET') {
+            try {
+                const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+                const stateResp = await stub.fetch('http://internal/state');
+                return json(stateResp.status, await stateResp.json());
+            } catch {
+                return json(503, { error: "search-health monitor unavailable" });
+            }
         }
 
         // Is this request carrying a valid UI-provenance token? Provenance only:
@@ -919,6 +935,14 @@ export default {
                     endpointType: classification.type,
                     creditCost
                 });
+                // oxjob #521 WS-3 Phase 0 (observe-only): a proxy-side 504 is an
+                // origin hang — exactly the health signal the monitor exists for.
+                observeSearchHealth(env, ctx, {
+                    endpointType: classification.type,
+                    ms: Date.now() - startTime,
+                    status: 504,
+                    anon: !apiKey
+                });
                 return addCorsHeaders(new Response(JSON.stringify({
                     error: "Gateway timeout",
                     message: "Your query took too long and was stopped before completing. " +
@@ -981,6 +1005,16 @@ export default {
             creditCost,
             trustedUi,
             responseForEsTook: sampledResponseForAnalytics
+        });
+
+        // oxjob #521 WS-3 Phase 0 (observe-only): sampled search latency/status
+        // feeds the SearchHealthController state machine; singleton/list feed
+        // the collateral-damage signal. Fire-and-forget — never blocks the user.
+        observeSearchHealth(env, ctx, {
+            endpointType: classification.type,
+            ms: Date.now() - startTime,
+            status: response.status,
+            anon: !apiKey
         });
 
         return finalResponse;

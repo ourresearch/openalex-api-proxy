@@ -32,6 +32,11 @@
 			{
 				"name": "RATE_LIMITER",
 				"class_name": "RateLimiter"
+			},
+			{
+				// oxjob #521 WS-3 Phase 0: global search-health monitor (observe-only)
+				"name": "SEARCH_HEALTH",
+				"class_name": "SearchHealthController"
 			}
 		]
 	},
@@ -40,6 +45,12 @@
 			"tag": "v1",
 			"new_classes": [
 				"RateLimiter"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"SearchHealthController"
 			]
 		}
 	],
