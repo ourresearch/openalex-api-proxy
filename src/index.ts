@@ -82,7 +82,12 @@ const THROTTLE_MESSAGE = "Your access is temporarily throttled while we investig
 // Re-armed 2026-07-01 with the guiOrigin carve-out (Origin/Referer=openalex.org)
 // so the frontend keeps working while keyless *non-GUI* search is shed. Flip to
 // false + push to disarm once the cluster recovers.
-const SHED_ANON_SEARCH = true;
+// DISARMED 2026-07-02 (oxjob #521 WS-3): anon works search restored so the
+// Phase-0 SearchHealthController observes the true traffic mix. The monitor
+// (searchHealth.ts, GET /search-health) is the safety net — it detects
+// saturation within ~30-60s; if a batch melts search again, re-arm here or
+// ship Phase 1 (the health-gated anon class bucket that replaces this flag).
+const SHED_ANON_SEARCH = false;
 
 // Conversion: 1 credit = $0.0001 (10,000 credits = $1)
 const CREDIT_TO_USD = 0.0001;
