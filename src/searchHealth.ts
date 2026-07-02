@@ -36,8 +36,11 @@ const LEVEL_BOUNDS: ReadonlyArray<{ avgMs: number; errRate: number }> = [
 // A bucket needs this many sampled search observations to carry signal; below
 // that it reads as GREEN (no evidence of trouble ≈ no traffic to protect).
 export const MIN_BUCKET_SAMPLES = 10;
-// Escalate FAST: 2 consecutive qualifying buckets (~60s of sustained trouble).
-export const ESCALATE_CONSECUTIVE = 2;
+// Escalate FAST, confirmation scaled to response severity: ONE bad bucket steps
+// the state up a single level (~30-45s to first response — cheap, since the
+// first rung is gentle); JUMP_CONSECUTIVE qualifying buckets jump straight to
+// their common floor (a severe incident reaches RED in ~60s, via YELLOW at 30s).
+export const JUMP_CONSECUTIVE = 2;
 // De-escalate SLOWLY: one step down per 4 consecutive clean buckets (~2 min),
 // so recovery doesn't oscillate (tighten → looks better → loosen → melt again).
 export const DEESCALATE_CONSECUTIVE = 4;
@@ -79,16 +82,27 @@ export function bucketSeverity(b: BucketStats): HealthLevel {
     return level;
 }
 
-// Ladder rules: if the last ESCALATE_CONSECUTIVE finalized buckets ALL qualify
-// above the current level, jump to the highest level they all qualify for
-// (worst common floor). If the last DEESCALATE_CONSECUTIVE buckets are ALL
-// strictly below the current level, step down by exactly one level.
+// Ladder rules:
+//  - JUMP: if the last JUMP_CONSECUTIVE finalized buckets ALL qualify above the
+//    current level, jump to the highest level they all qualify for (worst
+//    common floor) — sustained trouble moves the state fast.
+//  - STEP: a single qualifying bucket steps the state up by ONE level — fast
+//    first response (~30s), and the gentle first rung absorbs the cost of a
+//    one-blip false positive.
+//  - DOWN: if the last DEESCALATE_CONSECUTIVE buckets are ALL strictly below
+//    the current level, step down by exactly one level.
 export function nextLevel(current: HealthLevel, recentSeverities: HealthLevel[]): HealthLevel {
-    const esc = recentSeverities.slice(-ESCALATE_CONSECUTIVE);
-    if (esc.length === ESCALATE_CONSECUTIVE) {
-        const floor = Math.min(...esc) as HealthLevel;
-        if (floor > current) return floor;
+    const jump = recentSeverities.slice(-JUMP_CONSECUTIVE);
+    let next: HealthLevel = current;
+    if (jump.length === JUMP_CONSECUTIVE) {
+        const floor = Math.min(...jump) as HealthLevel;
+        if (floor > next) next = floor;
     }
+    const last = recentSeverities[recentSeverities.length - 1];
+    if (last !== undefined && last > next) {
+        next = (next + 1) as HealthLevel;
+    }
+    if (next > current) return next;
     const de = recentSeverities.slice(-DEESCALATE_CONSECUTIVE);
     if (current > 0 && de.length === DEESCALATE_CONSECUTIVE && de.every((s) => s < current)) {
         return (current - 1) as HealthLevel;

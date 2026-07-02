@@ -54,22 +54,32 @@ describe('bucketSeverity', () => {
 describe('nextLevel', () => {
     const G = 0 as HealthLevel, Y = 1 as HealthLevel, O = 2 as HealthLevel, R = 3 as HealthLevel;
 
-    it('holds on a single bad bucket (no one-blip escalation)', () => {
-        expect(nextLevel(G, [G, G, R])).toBe(G);
+    it('steps up ONE level on a single bad bucket (~30s first response)', () => {
+        expect(nextLevel(G, [G, G, Y])).toBe(Y);
+        expect(nextLevel(G, [G, G, R])).toBe(Y); // one blip: one gentle step, not straight to RED
+        expect(nextLevel(Y, [Y, Y, O])).toBe(O);
     });
 
-    it('escalates after 2 consecutive qualifying buckets', () => {
+    it('escalates to the level 2 consecutive qualifying buckets agree on', () => {
         expect(nextLevel(G, [G, Y, Y])).toBe(Y);
         expect(nextLevel(Y, [Y, O, O])).toBe(O);
     });
 
     it('jumps straight to the worst common floor (00:00-batch shape)', () => {
         expect(nextLevel(G, [G, R, R])).toBe(R);
-        expect(nextLevel(G, [Y, R])).toBe(Y); // both qualify ≥ YELLOW only
+        expect(nextLevel(G, [Y, R])).toBe(O); // sustained ≥YELLOW + worsening last → floor+1
     });
 
-    it('does not treat a mixed pair as escalation past the floor', () => {
-        expect(nextLevel(O, [R, Y])).toBe(O); // floor Y is below current O → hold
+    it('does not escalate on a mixed pair already below the current level', () => {
+        expect(nextLevel(O, [R, Y])).toBe(O); // floor Y and last Y are both below O → hold
+    });
+
+    it('reaches RED from GREEN in two buckets during a severe incident', () => {
+        let level: HealthLevel = G;
+        level = nextLevel(level, [G, G, R]);       // first bad bucket → YELLOW (~30s)
+        expect(level).toBe(Y);
+        level = nextLevel(level, [G, R, R]);       // second confirms → jump to RED (~60s)
+        expect(level).toBe(R);
     });
 
     it('de-escalates one step only after 4 consecutive clean buckets', () => {
