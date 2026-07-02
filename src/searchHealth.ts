@@ -36,6 +36,11 @@ const LEVEL_BOUNDS: ReadonlyArray<{ avgMs: number; errRate: number }> = [
 // A bucket needs this many sampled search observations to carry signal; below
 // that it reads as GREEN (no evidence of trouble ≈ no traffic to protect).
 export const MIN_BUCKET_SAMPLES = 10;
+// The error trigger needs at least this many error samples — with ~95-sample
+// buckets a 2% rate threshold alone flips on 2 sampled errors, which the
+// steady ~0.3% background trips by chance. First real Phase-0 calibration
+// finding (2026-07-02: GREEN→YELLOW at 388ms avg / 3 errors of 95).
+export const MIN_ERR_SAMPLES = 3;
 // Escalate FAST, confirmation scaled to response severity: ONE bad bucket steps
 // the state up a single level (~30-45s to first response — cheap, since the
 // first rung is gentle); JUMP_CONSECUTIVE qualifying buckets jump straight to
@@ -72,7 +77,7 @@ export function newBucket(start: number): BucketStats {
 export function bucketSeverity(b: BucketStats): HealthLevel {
     if (b.n < MIN_BUCKET_SAMPLES) return 0;
     const avg = b.sumMs / b.n;
-    const err = b.errN / b.n;
+    const err = b.errN >= MIN_ERR_SAMPLES ? b.errN / b.n : 0;
     let level: HealthLevel = 0;
     for (let i = 0; i < LEVEL_BOUNDS.length; i++) {
         if (avg > LEVEL_BOUNDS[i].avgMs || err > LEVEL_BOUNDS[i].errRate) {
@@ -194,16 +199,21 @@ export class SearchHealthController implements DurableObject {
             }
             await this.rollBuckets(now);
             const b = this.current!;
+            // Only 503/504 count as errors: those are the overload/timeout
+            // signature (07-01: 68% 504s). Plain 500s are app bugs — a bad-query
+            // retry loop must not move a load-shedding ladder (Phase-0 finding:
+            // background 5xx is ~0.3% and 500-dominated, 4:1 over 504).
+            const isOverloadErr = obs.status === 503 || obs.status === 504;
             if (obs.kind === 'search') {
                 b.n += 1;
                 b.sumMs += obs.ms;
-                if (obs.status >= 500) b.errN += 1;
+                if (isOverloadErr) b.errN += 1;
                 if (obs.ms > 3000) b.slowN += 1;
                 if (obs.anon) b.anonN += 1;
             } else {
                 b.otherN += 1;
                 b.otherSumMs += obs.ms;
-                if (obs.status >= 500) b.otherErrN += 1;
+                if (isOverloadErr) b.otherErrN += 1;
             }
             // Piggyback the state so future enforcement phases can cache it
             // isolate-side from the same call (design doc §state propagation).

@@ -23,6 +23,11 @@ export interface Env {
     // trustedUi=false). It can NEVER block traffic. Set as Worker secrets.
     TURNSTILE_SECRET?: string;       // Cloudflare Turnstile secret (siteverify)
     UI_TOKEN_HMAC_SECRET?: string;   // HMAC signing secret for the minted token
+    // oxjob #521 WS-3: access key for GET /search-health. The ladder RULES are
+    // public (this repo is), but the LIVE state is a free precision oracle for
+    // anyone probing the API — so the endpoint 404s unless the caller presents
+    // this key (?key= or X-Health-Key). Unset = endpoint disabled entirely.
+    SEARCH_HEALTH_KEY?: string;      // Worker secret
 }
 
 // oxjob #338: minted UI-provenance tokens live 30 min; the GUI re-mints on expiry.
@@ -155,9 +160,16 @@ export default {
         }
 
         // oxjob #521 WS-3 Phase 0: read-only view of the search-health monitor
-        // (observe-only — it enforces nothing; see searchHealth.ts). Public on
-        // purpose: it exposes only aggregate latency/state, no client data.
+        // (observe-only — it enforces nothing; see searchHealth.ts). Key-gated:
+        // the live state is a feedback oracle an abuser could watch while
+        // pushing load. The static rules are public (this repo is), but the
+        // real-time state needn't be free. 404 on miss/unset so the endpoint
+        // doesn't advertise itself.
         if (uiTokenPath === 'search-health' && req.method === 'GET') {
+            const presented = url.searchParams.get('key') || req.headers.get('X-Health-Key');
+            if (!env.SEARCH_HEALTH_KEY || presented !== env.SEARCH_HEALTH_KEY) {
+                return json(404, { error: "Not found" });
+            }
             try {
                 const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
                 const stateResp = await stub.fetch('http://internal/state');

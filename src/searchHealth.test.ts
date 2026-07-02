@@ -31,11 +31,18 @@ describe('bucketSeverity', () => {
         expect(bucketSeverity(bucket(100, 8000))).toBe(3);  // RED > 3s (07-01 shape)
     });
 
-    it('maps 5xx share to the ladder independently of latency', () => {
+    it('maps overload-error share to the ladder independently of latency', () => {
         expect(bucketSeverity(bucket(100, 200, 1))).toBe(0);   // 1% errors
         expect(bucketSeverity(bucket(100, 200, 5))).toBe(1);   // 5% → YELLOW
         expect(bucketSeverity(bucket(100, 200, 15))).toBe(2);  // 15% → ORANGE
         expect(bucketSeverity(bucket(100, 200, 68))).toBe(3);  // 68% 504s (07-01) → RED
+    });
+
+    it('ignores the error signal below MIN_ERR_SAMPLES (small-bucket noise guard)', () => {
+        // 2 errors of 20 samples = 10% rate, but 2 < MIN_ERR_SAMPLES → no trigger.
+        // Phase-0 calibration finding: 3-of-95 background noise flipped YELLOW.
+        expect(bucketSeverity(bucket(20, 200, 2))).toBe(0);
+        expect(bucketSeverity(bucket(20, 200, 3))).toBe(2);  // 3 errors = 15% → ORANGE
     });
 
     it('takes the worse of latency and error signals', () => {
