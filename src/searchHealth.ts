@@ -141,11 +141,28 @@ interface PersistedHealth {
     since: number;
 }
 
+// Ring of recent transitions kept for GET /search-health, so spot-checking
+// "when did it go YELLOW?" doesn't require an AE query. Persisted across
+// DO restarts; AE remains the durable full history.
+const TRANSITIONS_KEPT = 50;
+
+interface TransitionRecord {
+    at: string;                 // ISO timestamp
+    from: string;               // level name
+    to: string;
+    trigger: {                  // the bucket stats that tipped the evaluation
+        searchN: number;
+        avgMs: number;
+        errPct: number;
+    };
+}
+
 export class SearchHealthController implements DurableObject {
     private level: HealthLevel = 0;
     private since: number = Date.now();
     private ring: BucketStats[] = [];
     private current: BucketStats | null = null;
+    private transitions: TransitionRecord[] = [];
 
     constructor(
         private readonly state: DurableObjectState,
@@ -158,6 +175,8 @@ export class SearchHealthController implements DurableObject {
                     this.level = stored.level;
                     this.since = stored.since;
                 }
+                const storedTransitions = await this.state.storage.get<TransitionRecord[]>('transitions');
+                if (storedTransitions) this.transitions = storedTransitions;
             } catch { /* fresh start on storage error — observe-only, no harm */ }
         });
     }
@@ -200,6 +219,7 @@ export class SearchHealthController implements DurableObject {
                 enforcing: false,
                 window: this.ring.map(summarize),
                 currentBucket: this.current ? summarize(this.current) : null,
+                recentTransitions: [...this.transitions].reverse(), // newest first
             });
         }
 
@@ -243,13 +263,24 @@ export class SearchHealthController implements DurableObject {
         const from = this.level;
         this.level = next;
         this.since = Date.now();
-        try {
-            await this.state.storage.put('health', { level: this.level, since: this.since } satisfies PersistedHealth);
-        } catch { /* observe-only: a lost persist just means amnesia on restart */ }
 
         const last = this.ring[this.ring.length - 1];
         const avg = last && last.n ? Math.round(last.sumMs / last.n) : 0;
         const errPct = last && last.n ? Math.round((last.errN / last.n) * 10000) / 100 : 0;
+
+        this.transitions.push({
+            at: new Date(this.since).toISOString(),
+            from: LEVEL_NAMES[from],
+            to: LEVEL_NAMES[next],
+            trigger: { searchN: last?.n ?? 0, avgMs: avg, errPct },
+        });
+        if (this.transitions.length > TRANSITIONS_KEPT) {
+            this.transitions = this.transitions.slice(-TRANSITIONS_KEPT);
+        }
+        try {
+            await this.state.storage.put('health', { level: this.level, since: this.since } satisfies PersistedHealth);
+            await this.state.storage.put('transitions', this.transitions);
+        } catch { /* observe-only: a lost persist just means amnesia on restart */ }
         console.log(JSON.stringify({
             event: 'search_health_transition',
             phase: 'observe-only',
