@@ -27,8 +27,9 @@ describe('bucketSeverity', () => {
 
     it('maps average latency to the ladder entry bounds', () => {
         expect(bucketSeverity(bucket(100, 200))).toBe(0);   // healthy baseline
-        expect(bucketSeverity(bucket(100, 700))).toBe(0);   // bound is exclusive
-        expect(bucketSeverity(bucket(100, 800))).toBe(1);   // YELLOW > 700ms
+        expect(bucketSeverity(bucket(100, 850))).toBe(0);   // bound is exclusive
+        expect(bucketSeverity(bucket(100, 800))).toBe(0);   // v3.3: evening grazes read GREEN
+        expect(bucketSeverity(bucket(100, 900))).toBe(1);   // YELLOW > 850ms
         expect(bucketSeverity(bucket(100, 2000))).toBe(2);  // ORANGE > 1.5s
         expect(bucketSeverity(bucket(100, 8000))).toBe(3);  // RED > 3s (07-01 shape)
     });
@@ -48,7 +49,7 @@ describe('bucketSeverity', () => {
     });
 
     it('takes the worse of latency and error signals', () => {
-        expect(bucketSeverity(bucket(100, 800, 15))).toBe(2); // YELLOW avg, ORANGE errors
+        expect(bucketSeverity(bucket(100, 800, 15))).toBe(2); // sub-threshold avg, ORANGE errors
     });
 
     it('ignores collateral (singleton/list) counters for severity', () => {
@@ -110,6 +111,23 @@ describe('nextLevel', () => {
         level = nextLevel(level, clean);
         level = nextLevel(level, clean);
         expect(level).toBe(G);
+    });
+
+    it('v3.3 dwell: ORANGE/RED hold 5 min before stepping down, even on clean buckets', () => {
+        const clean = [G, G, G, G];
+        expect(nextLevel(O, clean, 60_000)).toBe(O);        // 1 min held → hold the clamp
+        expect(nextLevel(R, clean, 4 * 60_000)).toBe(R);    // 4 min held → still holding
+        expect(nextLevel(O, clean, 5 * 60_000)).toBe(Y);    // dwell served → release
+        expect(nextLevel(R, clean, 6 * 60_000)).toBe(O);
+    });
+
+    it('v3.3 dwell: YELLOW is exempt (fast release at the gentle rung)', () => {
+        expect(nextLevel(Y, [G, G, G, G], 0)).toBe(G);
+    });
+
+    it('v3.3 dwell: never gates escalation', () => {
+        expect(nextLevel(O, [R, R], 0)).toBe(R);            // fresh ORANGE can still worsen
+        expect(nextLevel(O, [O, O, R], 0)).toBe(R);         // single worse bucket steps up
     });
 });
 

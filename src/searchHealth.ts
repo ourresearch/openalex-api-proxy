@@ -13,7 +13,8 @@
 // 1-in-50 as the collateral-damage signal) into 30s buckets via fire-and-forget
 // /observe calls that ride ctx.waitUntil — never on the user's latency path.
 // Escalation: 1 bad bucket = +1 level (~30s); 2 consecutive jump to their
-// common floor; de-escalation 1 level per 4 clean buckets (~2 min).
+// common floor; de-escalation 1 level per 4 clean buckets (~2 min), with
+// ORANGE/RED holding a 5-min minimum dwell so a clamp outlasts its cause.
 // Transitions: console + AE (blob8='health_transition') + last 50 at
 // GET /search-health (key-gated).
 // Manual override: env FORCE_HEALTH_STATE=GREEN|YELLOW|ORANGE|RED (replaces
@@ -34,8 +35,12 @@ const RING_SIZE = 10; // keep the last 5 minutes of finalized buckets
 // Entry thresholds (design doc, calibrated from incident baselines: healthy
 // search averages 150-240ms; 06-30 burst peaked 2.0s; 07-01 ~8s + 68% 504s).
 // A bucket "qualifies for" the highest level whose bound it exceeds.
+// v3.3 (2026-07-03): YELLOW 700→850ms from day-1 live data — ~30 transitions/day
+// of 700-950ms grazes vs every genuine event opening ≥1.2s (pulses 1.9-2.2s,
+// midnight batch 5.4s, 09:00 burst 1.9s); healthy p99 494-631ms, so 850 still
+// clears noise while delaying real detection by zero buckets.
 const LEVEL_BOUNDS: ReadonlyArray<{ avgMs: number; errRate: number }> = [
-    { avgMs: 700, errRate: 0.02 },   // YELLOW
+    { avgMs: 850, errRate: 0.02 },   // YELLOW
     { avgMs: 1500, errRate: 0.10 },  // ORANGE
     { avgMs: 3000, errRate: 0.25 },  // RED
 ];
@@ -56,6 +61,11 @@ export const JUMP_CONSECUTIVE = 2;
 // De-escalate SLOWLY: one step down per 4 consecutive clean buckets (~2 min),
 // so recovery doesn't oscillate (tighten → looks better → loosen → melt again).
 export const DEESCALATE_CONSECUTIVE = 4;
+// v3.3: ORANGE/RED additionally hold a minimum dwell before stepping down, so
+// one clamp outlasts a sustained source instead of sawtoothing (07-03 midnight
+// batch: 3 clamp cycles in 8 min — the drain looks like recovery while the
+// batch is still running). YELLOW is exempt: fast release at the gentle rung.
+export const MIN_UNHEALTHY_DWELL_MS = 5 * 60 * 1000;
 
 // Worker-side sampling rates. Search drives the ladder; singleton/list is the
 // collateral-damage signal the incident writeups used (cheap lookups queueing
@@ -102,8 +112,10 @@ export function bucketSeverity(b: BucketStats): HealthLevel {
 //    first response (~30s), and the gentle first rung absorbs the cost of a
 //    one-blip false positive.
 //  - DOWN: if the last DEESCALATE_CONSECUTIVE buckets are ALL strictly below
-//    the current level, step down by exactly one level.
-export function nextLevel(current: HealthLevel, recentSeverities: HealthLevel[]): HealthLevel {
+//    the current level, step down by exactly one level — EXCEPT that ORANGE/RED
+//    must first have been held for MIN_UNHEALTHY_DWELL_MS (heldMs = how long
+//    the current level has been in effect; escalation is never dwell-gated).
+export function nextLevel(current: HealthLevel, recentSeverities: HealthLevel[], heldMs: number = Infinity): HealthLevel {
     const jump = recentSeverities.slice(-JUMP_CONSECUTIVE);
     let next: HealthLevel = current;
     if (jump.length === JUMP_CONSECUTIVE) {
@@ -115,6 +127,7 @@ export function nextLevel(current: HealthLevel, recentSeverities: HealthLevel[])
         next = (next + 1) as HealthLevel;
     }
     if (next > current) return next;
+    if (current >= 2 && heldMs < MIN_UNHEALTHY_DWELL_MS) return current;
     const de = recentSeverities.slice(-DEESCALATE_CONSECUTIVE);
     if (current > 0 && de.length === DEESCALATE_CONSECUTIVE && de.every((s) => s < current)) {
         return (current - 1) as HealthLevel;
@@ -347,7 +360,7 @@ export class SearchHealthController implements DurableObject {
 
     private async evaluate(): Promise<void> {
         const severities = this.ring.map(bucketSeverity);
-        const next = nextLevel(this.level, severities);
+        const next = nextLevel(this.level, severities, Date.now() - this.since);
         if (next === this.level) return;
 
         const from = this.level;
