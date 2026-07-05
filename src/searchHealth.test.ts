@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     bucketSeverity,
+    effectiveDwellMs,
     nextLevel,
     newBucket,
     checkBudget,
@@ -193,5 +194,33 @@ describe('checkBudget (anon-class token bucket)', () => {
             if (checkBudget(Y, b, t0 + 1000).ok) allowed++;
         }
         expect(allowed).toBe(60);
+    });
+});
+
+describe('v3.4 release-aware backoff', () => {
+    const G = 0 as HealthLevel, O = 2 as HealthLevel, R = 3 as HealthLevel;
+
+    it('effectiveDwellMs doubles per rapid re-clamp and caps at 30 min', () => {
+        expect(effectiveDwellMs(0)).toBe(5 * 60_000);
+        expect(effectiveDwellMs(1)).toBe(10 * 60_000);
+        expect(effectiveDwellMs(2)).toBe(20 * 60_000);
+        expect(effectiveDwellMs(3)).toBe(30 * 60_000);   // capped
+        expect(effectiveDwellMs(10)).toBe(30 * 60_000);  // stays capped
+    });
+
+    it('nextLevel honors a backed-off dwell', () => {
+        const clean = [G, G, G, G];
+        // 6 min held: released under the base 5-min dwell...
+        expect(nextLevel(O, clean, 6 * 60_000)).toBe(1);
+        // ...but HELD under a backed-off 10-min dwell (first rapid re-clamp)
+        expect(nextLevel(O, clean, 6 * 60_000, effectiveDwellMs(1))).toBe(O);
+        expect(nextLevel(O, clean, 11 * 60_000, effectiveDwellMs(1))).toBe(1);
+        // RED with a twice-backed-off 20-min hold
+        expect(nextLevel(R, clean, 19 * 60_000, effectiveDwellMs(2))).toBe(R);
+        expect(nextLevel(R, clean, 21 * 60_000, effectiveDwellMs(2))).toBe(O);
+    });
+
+    it('backed-off dwell never gates escalation', () => {
+        expect(nextLevel(O, [R, R], 0, effectiveDwellMs(3))).toBe(R);
     });
 });

@@ -66,6 +66,19 @@ export const DEESCALATE_CONSECUTIVE = 4;
 // batch: 3 clamp cycles in 8 min — the drain looks like recovery while the
 // batch is still running). YELLOW is exempt: fast release at the gentle rung.
 export const MIN_UNHEALTHY_DWELL_MS = 5 * 60 * 1000;
+// v3.4 (2026-07-05): release-aware backoff. Two live events (07-04 15:52-16:37:
+// 7 clamps/45 min incl. 3 RED entries; 07-05 08:20-08:57: 5 clamps) re-melted
+// 30-90 SECONDS after each dwell expiry — buckets looked clean only BECAUSE the
+// clamp was working. Re-entering ORANGE/RED within RECLAMP_WINDOW_MS of leaving
+// it doubles the hold (5→10→20→30 min cap). Genuine wave events are unaffected:
+// their troughs (e.g. the 07-04 10:00 grind's 17-min gaps) exceed the window,
+// so the streak resets and first clamps stay at 5 min.
+export const RECLAMP_WINDOW_MS = 10 * 60 * 1000;
+export const MAX_UNHEALTHY_DWELL_MS = 30 * 60 * 1000;
+
+export function effectiveDwellMs(reclampStreak: number): number {
+    return Math.min(MIN_UNHEALTHY_DWELL_MS * 2 ** reclampStreak, MAX_UNHEALTHY_DWELL_MS);
+}
 
 // Worker-side sampling rates. Search drives the ladder; singleton/list is the
 // collateral-damage signal the incident writeups used (cheap lookups queueing
@@ -113,9 +126,15 @@ export function bucketSeverity(b: BucketStats): HealthLevel {
 //    one-blip false positive.
 //  - DOWN: if the last DEESCALATE_CONSECUTIVE buckets are ALL strictly below
 //    the current level, step down by exactly one level — EXCEPT that ORANGE/RED
-//    must first have been held for MIN_UNHEALTHY_DWELL_MS (heldMs = how long
-//    the current level has been in effect; escalation is never dwell-gated).
-export function nextLevel(current: HealthLevel, recentSeverities: HealthLevel[], heldMs: number = Infinity): HealthLevel {
+//    must first have been held for dwellMs (heldMs = how long the current level
+//    has been in effect; dwellMs = the backoff-scaled hold, see
+//    effectiveDwellMs; escalation is never dwell-gated).
+export function nextLevel(
+    current: HealthLevel,
+    recentSeverities: HealthLevel[],
+    heldMs: number = Infinity,
+    dwellMs: number = MIN_UNHEALTHY_DWELL_MS,
+): HealthLevel {
     const jump = recentSeverities.slice(-JUMP_CONSECUTIVE);
     let next: HealthLevel = current;
     if (jump.length === JUMP_CONSECUTIVE) {
@@ -127,7 +146,7 @@ export function nextLevel(current: HealthLevel, recentSeverities: HealthLevel[],
         next = (next + 1) as HealthLevel;
     }
     if (next > current) return next;
-    if (current >= 2 && heldMs < MIN_UNHEALTHY_DWELL_MS) return current;
+    if (current >= 2 && heldMs < dwellMs) return current;
     const de = recentSeverities.slice(-DEESCALATE_CONSECUTIVE);
     if (current > 0 && de.length === DEESCALATE_CONSECUTIVE && de.every((s) => s < current)) {
         return (current - 1) as HealthLevel;
@@ -201,6 +220,9 @@ function summarize(b: BucketStats) {
 interface PersistedHealth {
     level: HealthLevel;
     since: number;
+    // v3.4 backoff state (older persisted records lack these; default 0)
+    lastUnhealthyExit?: number;
+    reclampStreak?: number;
 }
 
 // Ring of recent transitions kept for GET /search-health, so spot-checking
@@ -228,6 +250,10 @@ export class SearchHealthController implements DurableObject {
     // In-memory only: the bucket matters only while unhealthy, and a DO restart
     // refilling it costs at most 1 second of allowance.
     private anonBucket: AnonBucket = { tokens: 0, lastRefill: 0 };
+    // v3.4 backoff state: when we last left ORANGE/RED, and how many times in a
+    // row we've re-entered within RECLAMP_WINDOW_MS (drives effectiveDwellMs).
+    private lastUnhealthyExit = 0;
+    private reclampStreak = 0;
 
     constructor(
         private readonly state: DurableObjectState,
@@ -239,6 +265,8 @@ export class SearchHealthController implements DurableObject {
                 if (stored) {
                     this.level = stored.level;
                     this.since = stored.since;
+                    this.lastUnhealthyExit = stored.lastUnhealthyExit ?? 0;
+                    this.reclampStreak = stored.reclampStreak ?? 0;
                 }
                 const storedTransitions = await this.state.storage.get<TransitionRecord[]>('transitions');
                 if (storedTransitions) this.transitions = storedTransitions;
@@ -320,6 +348,10 @@ export class SearchHealthController implements DurableObject {
                 since: new Date(this.since).toISOString(),
                 enforcing: true,
                 ladder: { GREEN: 'no limit', YELLOW: '60/s', ORANGE: '20/s', RED: 'off (503)' },
+                backoff: {
+                    reclampStreak: this.reclampStreak,
+                    nextUnhealthyHoldMin: effectiveDwellMs(this.reclampStreak) / 60000,
+                },
                 window: this.ring.map(summarize),
                 currentBucket: this.current ? summarize(this.current) : null,
                 recentTransitions: [...this.transitions].reverse(), // newest first
@@ -360,12 +392,24 @@ export class SearchHealthController implements DurableObject {
 
     private async evaluate(): Promise<void> {
         const severities = this.ring.map(bucketSeverity);
-        const next = nextLevel(this.level, severities, Date.now() - this.since);
+        const now = Date.now();
+        const next = nextLevel(this.level, severities, now - this.since, effectiveDwellMs(this.reclampStreak));
         if (next === this.level) return;
 
         const from = this.level;
+        // v3.4 backoff bookkeeping: count rapid re-entries into ORANGE/RED (the
+        // release-into-sustained-pressure signature); note exits so the window
+        // has a reference point. Escalation WITHIN unhealthy (O→R) is neither.
+        if (next >= 2 && from < 2) {
+            this.reclampStreak =
+                this.lastUnhealthyExit > 0 && now - this.lastUnhealthyExit < RECLAMP_WINDOW_MS
+                    ? this.reclampStreak + 1
+                    : 0;
+        } else if (from >= 2 && next < 2) {
+            this.lastUnhealthyExit = now;
+        }
         this.level = next;
-        this.since = Date.now();
+        this.since = now;
 
         const last = this.ring[this.ring.length - 1];
         const avg = last && last.n ? Math.round(last.sumMs / last.n) : 0;
@@ -381,7 +425,12 @@ export class SearchHealthController implements DurableObject {
             this.transitions = this.transitions.slice(-TRANSITIONS_KEPT);
         }
         try {
-            await this.state.storage.put('health', { level: this.level, since: this.since } satisfies PersistedHealth);
+            await this.state.storage.put('health', {
+                level: this.level,
+                since: this.since,
+                lastUnhealthyExit: this.lastUnhealthyExit,
+                reclampStreak: this.reclampStreak,
+            } satisfies PersistedHealth);
             await this.state.storage.put('transitions', this.transitions);
         } catch { /* observe-only: a lost persist just means amnesia on restart */ }
         console.log(JSON.stringify({
@@ -390,6 +439,8 @@ export class SearchHealthController implements DurableObject {
             enforcing: true,
             from: LEVEL_NAMES[from],
             to: LEVEL_NAMES[next],
+            reclampStreak: this.reclampStreak,
+            dwellMin: next >= 2 ? effectiveDwellMs(this.reclampStreak) / 60000 : undefined,
             lastBucket: { searchN: last?.n ?? 0, avgMs: avg, errPct, collateralN: last?.otherN ?? 0 },
         }));
         try {
