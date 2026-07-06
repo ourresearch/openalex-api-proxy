@@ -236,6 +236,7 @@ interface PersistedHealth {
     episodeRedAlerted?: boolean;
     episodeStartedAt?: number;
     episodePeak?: HealthLevel;
+    redStartedAt?: number;
 }
 
 // Ring of recent transitions kept for GET /search-health, so spot-checking
@@ -277,6 +278,7 @@ export class SearchHealthController implements DurableObject {
     private episodeRedAlerted = false;
     private episodeStartedAt = 0;
     private episodePeak: HealthLevel = 0;
+    private redStartedAt = 0;
 
     constructor(
         private readonly state: DurableObjectState,
@@ -294,6 +296,7 @@ export class SearchHealthController implements DurableObject {
                     this.episodeRedAlerted = stored.episodeRedAlerted ?? false;
                     this.episodeStartedAt = stored.episodeStartedAt ?? 0;
                     this.episodePeak = stored.episodePeak ?? 0;
+                    this.redStartedAt = stored.redStartedAt ?? 0;
                 }
                 const storedTransitions = await this.state.storage.get<TransitionRecord[]>('transitions');
                 if (storedTransitions) this.transitions = storedTransitions;
@@ -485,6 +488,15 @@ export class SearchHealthController implements DurableObject {
         } else if (from >= 2 && next < 2) {
             this.lastUnhealthyExit = now;
         }
+        if (from === 3 && next < 3) {
+            const pausedMin = this.redStartedAt ? Math.max(1, Math.round((now - this.redStartedAt) / 60000)) : 0;
+            this.sendSlack(
+                `🟠 *OpenAlex search-health: RED lifted* — anonymous works search paused for ~${pausedMin} min, ` +
+                `now restored at 20/s rationing (ORANGE). Full speed returns automatically as health clears; ` +
+                `a final ✅ posts when fully GREEN.`,
+            );
+            this.episodeRedAlerted = false; // a re-RED in this episode is news again
+        }
         this.level = next;
         this.since = now;
 
@@ -505,6 +517,7 @@ export class SearchHealthController implements DurableObject {
         }
         if (next === 3 && this.episodeOpen) {
             this.episodePeak = 3;
+            if (from < 3) this.redStartedAt = now;
             if (!this.episodeRedAlerted) {
                 this.episodeRedAlerted = true;
                 const last2 = this.ring[this.ring.length - 1];
@@ -540,6 +553,7 @@ export class SearchHealthController implements DurableObject {
                 episodeRedAlerted: this.episodeRedAlerted,
                 episodeStartedAt: this.episodeStartedAt,
                 episodePeak: this.episodePeak,
+                redStartedAt: this.redStartedAt,
             } satisfies PersistedHealth);
             await this.state.storage.put('transitions', this.transitions);
         } catch { /* observe-only: a lost persist just means amnesia on restart */ }
