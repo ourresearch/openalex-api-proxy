@@ -33,6 +33,9 @@ export interface Env {
     // (health-driven). Replaces the retired SHED_ANON_SEARCH code flag —
     // FORCE_HEALTH_STATE=RED is the old armed shed, without a deploy.
     FORCE_HEALTH_STATE?: string;     // plain env var (keep_vars)
+    // oxjob #521 WS-3 v3.5: Slack incoming-webhook URL for episode alerts
+    // (ORANGE/RED engaged, RED escalation, recovered). Unset = alerts inert.
+    SLACK_WEBHOOK_URL?: string;      // Worker secret
 }
 
 // oxjob #338: minted UI-provenance tokens live 30 min; the GUI re-mints on expiry.

@@ -223,6 +223,11 @@ interface PersistedHealth {
     // v3.4 backoff state (older persisted records lack these; default 0)
     lastUnhealthyExit?: number;
     reclampStreak?: number;
+    // v3.5 Slack episode state
+    episodeOpen?: boolean;
+    episodeRedAlerted?: boolean;
+    episodeStartedAt?: number;
+    episodePeak?: HealthLevel;
 }
 
 // Ring of recent transitions kept for GET /search-health, so spot-checking
@@ -254,10 +259,20 @@ export class SearchHealthController implements DurableObject {
     // row we've re-entered within RECLAMP_WINDOW_MS (drives effectiveDwellMs).
     private lastUnhealthyExit = 0;
     private reclampStreak = 0;
+    // v3.5 Slack alerting (episode-consolidated; inert unless SLACK_WEBHOOK_URL
+    // is set). An "episode" opens on a fresh entry into ORANGE/RED and closes
+    // after GREEN holds for RECLAMP_WINDOW_MS — re-clamps inside the window are
+    // the same episode and do NOT re-alert (sim on 5 days of history: raw
+    // per-transition policy = 79 pings, consolidated = 51, of which normal
+    // days are 2-11 and only genuinely-bad days are loud).
+    private episodeOpen = false;
+    private episodeRedAlerted = false;
+    private episodeStartedAt = 0;
+    private episodePeak: HealthLevel = 0;
 
     constructor(
         private readonly state: DurableObjectState,
-        private readonly env: { ANALYTICS?: AnalyticsEngineDataset },
+        private readonly env: { ANALYTICS?: AnalyticsEngineDataset; SLACK_WEBHOOK_URL?: string },
     ) {
         this.state.blockConcurrencyWhile(async () => {
             try {
@@ -267,6 +282,10 @@ export class SearchHealthController implements DurableObject {
                     this.since = stored.since;
                     this.lastUnhealthyExit = stored.lastUnhealthyExit ?? 0;
                     this.reclampStreak = stored.reclampStreak ?? 0;
+                    this.episodeOpen = stored.episodeOpen ?? false;
+                    this.episodeRedAlerted = stored.episodeRedAlerted ?? false;
+                    this.episodeStartedAt = stored.episodeStartedAt ?? 0;
+                    this.episodePeak = stored.episodePeak ?? 0;
                 }
                 const storedTransitions = await this.state.storage.get<TransitionRecord[]>('transitions');
                 if (storedTransitions) this.transitions = storedTransitions;
@@ -367,6 +386,21 @@ export class SearchHealthController implements DurableObject {
         await this.rollBuckets(Date.now());
     }
 
+    // v3.5: fire-and-forget Slack ping. Inert when SLACK_WEBHOOK_URL is unset;
+    // a Slack outage can never affect the ladder (waitUntil + catch + timeout).
+    private sendSlack(text: string): void {
+        const url = this.env.SLACK_WEBHOOK_URL;
+        if (!url) return;
+        this.state.waitUntil(
+            fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text }),
+                signal: AbortSignal.timeout(5000),
+            }).catch((e) => console.error('search-health Slack ping failed:', e)),
+        );
+    }
+
     private async rollBuckets(now: number): Promise<void> {
         const bucketStart = Math.floor(now / BUCKET_MS) * BUCKET_MS;
         if (!this.current) {
@@ -375,6 +409,26 @@ export class SearchHealthController implements DurableObject {
             return;
         }
         if (this.current.start === bucketStart) return;
+
+        // v3.5: close an alert episode once GREEN has held a full re-clamp
+        // window — a quicker "recovered" ping would fire mid-sawtooth.
+        if (this.episodeOpen && this.level === 0 && now - this.since >= RECLAMP_WINDOW_MS) {
+            const mins = Math.round((now - this.episodeStartedAt) / 60000);
+            this.sendSlack(
+                `✅ *OpenAlex search-health: recovered* — GREEN and quiet for 10 min. ` +
+                `Episode lasted ~${mins} min, peaked ${LEVEL_NAMES[this.episodePeak]}. Anonymous search fully open.`,
+            );
+            this.episodeOpen = false;
+            this.episodeRedAlerted = false;
+            this.episodePeak = 0;
+            try {
+                await this.state.storage.put('health', {
+                    level: this.level, since: this.since,
+                    lastUnhealthyExit: this.lastUnhealthyExit, reclampStreak: this.reclampStreak,
+                    episodeOpen: false, episodeRedAlerted: false, episodeStartedAt: 0, episodePeak: 0,
+                } satisfies PersistedHealth);
+            } catch { /* non-fatal */ }
+        }
 
         // Finalize the open bucket plus synthetic empty buckets for any silent
         // gap — no traffic means nothing to protect, which counts as healthy
@@ -411,6 +465,36 @@ export class SearchHealthController implements DurableObject {
         this.level = next;
         this.since = now;
 
+        // v3.5 Slack alerting, episode-consolidated. A fresh entry into
+        // ORANGE/RED opens an episode and alerts once; re-clamps within the
+        // episode are silent; the first RED gets its own alert; recovery is
+        // sent from rollBuckets after GREEN has held for RECLAMP_WINDOW_MS.
+        if (next >= 2 && from < 2) {
+            if (!this.episodeOpen) {
+                this.episodeOpen = true;
+                this.episodeStartedAt = now;
+                this.episodeRedAlerted = false;
+                this.episodePeak = next;
+                const last2 = this.ring[this.ring.length - 1];
+                const avg2 = last2 && last2.n ? Math.round(last2.sumMs / last2.n) : 0;
+                this.sendSlack(
+                    `${next === 3 ? '🔴' : '🟠'} *OpenAlex search-health: ${LEVEL_NAMES[next]} engaged* — ` +
+                    `anonymous works search ${next === 3 ? 'paused (503)' : 'rationed to 20/s'}. ` +
+                    `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak) / 60000} min.`,
+                );
+                this.episodeRedAlerted = next === 3;
+            } else {
+                this.episodePeak = Math.max(this.episodePeak, next) as HealthLevel;
+            }
+        }
+        if (next === 3 && this.episodeOpen) {
+            this.episodePeak = 3;
+            if (!this.episodeRedAlerted) {
+                this.episodeRedAlerted = true;
+                this.sendSlack('🔴 *OpenAlex search-health: escalated to RED* — anonymous works search paused (503) while the cluster drains.');
+            }
+        }
+
         const last = this.ring[this.ring.length - 1];
         const avg = last && last.n ? Math.round(last.sumMs / last.n) : 0;
         const errPct = last && last.n ? Math.round((last.errN / last.n) * 10000) / 100 : 0;
@@ -430,6 +514,10 @@ export class SearchHealthController implements DurableObject {
                 since: this.since,
                 lastUnhealthyExit: this.lastUnhealthyExit,
                 reclampStreak: this.reclampStreak,
+                episodeOpen: this.episodeOpen,
+                episodeRedAlerted: this.episodeRedAlerted,
+                episodeStartedAt: this.episodeStartedAt,
+                episodePeak: this.episodePeak,
             } satisfies PersistedHealth);
             await this.state.storage.put('transitions', this.transitions);
         } catch { /* observe-only: a lost persist just means amnesia on restart */ }
