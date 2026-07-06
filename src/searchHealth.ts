@@ -411,13 +411,16 @@ export class SearchHealthController implements DurableObject {
         if (this.current.start === bucketStart) return;
 
         // v3.5: close an alert episode once GREEN has held a full re-clamp
-        // window — a quicker "recovered" ping would fire mid-sawtooth.
+        // window — a quicker "recovered" ping would fire mid-sawtooth. RED-only
+        // policy: episodes that never reached RED close silently.
         if (this.episodeOpen && this.level === 0 && now - this.since >= RECLAMP_WINDOW_MS) {
             const mins = Math.round((now - this.episodeStartedAt) / 60000);
-            this.sendSlack(
-                `✅ *OpenAlex search-health: recovered* — GREEN and quiet for 10 min. ` +
-                `Episode lasted ~${mins} min, peaked ${LEVEL_NAMES[this.episodePeak]}. Anonymous search fully open.`,
-            );
+            if (this.episodePeak === 3) {
+                this.sendSlack(
+                    `✅ *OpenAlex search-health: recovered* — GREEN and quiet for 10 min. ` +
+                    `Episode lasted ~${mins} min, peaked RED. Anonymous search fully open.`,
+                );
+            }
             this.episodeOpen = false;
             this.episodeRedAlerted = false;
             this.episodePeak = 0;
@@ -465,24 +468,17 @@ export class SearchHealthController implements DurableObject {
         this.level = next;
         this.since = now;
 
-        // v3.5 Slack alerting, episode-consolidated. A fresh entry into
-        // ORANGE/RED opens an episode and alerts once; re-clamps within the
-        // episode are silent; the first RED gets its own alert; recovery is
-        // sent from rollBuckets after GREEN has held for RECLAMP_WINDOW_MS.
+        // v3.5 Slack alerting — RED ONLY (Casey's call: ORANGE is routine
+        // rationing, RED means anonymous search is actually paused). Episodes
+        // still open on any ORANGE/RED entry so the 10-min-quiet recovery
+        // consolidation works, but only the first RED of an episode pings, and
+        // only RED-peaked episodes send a recovery.
         if (next >= 2 && from < 2) {
             if (!this.episodeOpen) {
                 this.episodeOpen = true;
                 this.episodeStartedAt = now;
                 this.episodeRedAlerted = false;
                 this.episodePeak = next;
-                const last2 = this.ring[this.ring.length - 1];
-                const avg2 = last2 && last2.n ? Math.round(last2.sumMs / last2.n) : 0;
-                this.sendSlack(
-                    `${next === 3 ? '🔴' : '🟠'} *OpenAlex search-health: ${LEVEL_NAMES[next]} engaged* — ` +
-                    `anonymous works search ${next === 3 ? 'paused (503)' : 'rationed to 20/s'}. ` +
-                    `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak) / 60000} min.`,
-                );
-                this.episodeRedAlerted = next === 3;
             } else {
                 this.episodePeak = Math.max(this.episodePeak, next) as HealthLevel;
             }
@@ -491,7 +487,13 @@ export class SearchHealthController implements DurableObject {
             this.episodePeak = 3;
             if (!this.episodeRedAlerted) {
                 this.episodeRedAlerted = true;
-                this.sendSlack('🔴 *OpenAlex search-health: escalated to RED* — anonymous works search paused (503) while the cluster drains.');
+                const last2 = this.ring[this.ring.length - 1];
+                const avg2 = last2 && last2.n ? Math.round(last2.sumMs / last2.n) : 0;
+                this.sendSlack(
+                    `🔴 *OpenAlex search-health: RED* — anonymous works search paused (503) while the cluster drains. ` +
+                    `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak) / 60000} min. ` +
+                    `Keyed clients and the GUI are unaffected.`,
+                );
             }
         }
 
