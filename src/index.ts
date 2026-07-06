@@ -176,6 +176,10 @@ export default {
             }
             try {
                 const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+                if (url.searchParams.has('test-slack')) {
+                    const testResp = await stub.fetch('http://internal/test-slack', { method: 'POST' });
+                    return json(testResp.status, await testResp.json());
+                }
                 const stateResp = await stub.fetch('http://internal/state');
                 return json(stateResp.status, await stateResp.json());
             } catch {

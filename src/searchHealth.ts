@@ -359,6 +359,18 @@ export class SearchHealthController implements DurableObject {
             });
         }
 
+        // v3.5: verify the Slack chain end-to-end (env var → DO → webhook →
+        // channel) without waiting for a real RED. Reached only through the
+        // key-gated /search-health route in the Worker.
+        if (url.pathname === '/test-slack' && request.method === 'POST') {
+            if (!this.env.SLACK_WEBHOOK_URL) {
+                return Response.json({ sent: false, reason: 'SLACK_WEBHOOK_URL not configured' });
+            }
+            this.sendSlack('🧪 *OpenAlex search-health: test ping* — Slack alerting is wired up. ' +
+                'You will hear from me on RED (anon search paused) and on recovery. That is all.');
+            return Response.json({ sent: true });
+        }
+
         if (url.pathname === '/state' && request.method === 'GET') {
             await this.rollBuckets(now);
             return Response.json({
