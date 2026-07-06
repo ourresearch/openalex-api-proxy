@@ -75,9 +75,17 @@ export const MIN_UNHEALTHY_DWELL_MS = 5 * 60 * 1000;
 // so the streak resets and first clamps stay at 5 min.
 export const RECLAMP_WINDOW_MS = 10 * 60 * 1000;
 export const MAX_UNHEALTHY_DWELL_MS = 30 * 60 * 1000;
+// v3.6 (2026-07-06, Casey's call after the first 30-min RED hold): RED — a
+// TOTAL pause — caps at 10 min regardless of backoff streak. The long backoff
+// holds belong at ORANGE (rationing, 20/s trickle). After RED's 10 min it
+// steps to ORANGE; if the source is still raging, ungated escalation puts it
+// back in RED within ~60s, which costs little — but if the source ebbed,
+// anonymous users regain partial service up to 20 min sooner.
+export const MAX_RED_DWELL_MS = 10 * 60 * 1000;
 
-export function effectiveDwellMs(reclampStreak: number): number {
-    return Math.min(MIN_UNHEALTHY_DWELL_MS * 2 ** reclampStreak, MAX_UNHEALTHY_DWELL_MS);
+export function effectiveDwellMs(reclampStreak: number, level: HealthLevel = 2): number {
+    const cap = level === 3 ? MAX_RED_DWELL_MS : MAX_UNHEALTHY_DWELL_MS;
+    return Math.min(MIN_UNHEALTHY_DWELL_MS * 2 ** reclampStreak, cap);
 }
 
 // Worker-side sampling rates. Search drives the ladder; singleton/list is the
@@ -381,7 +389,7 @@ export class SearchHealthController implements DurableObject {
                 ladder: { GREEN: 'no limit', YELLOW: '60/s', ORANGE: '20/s', RED: 'off (503)' },
                 backoff: {
                     reclampStreak: this.reclampStreak,
-                    nextUnhealthyHoldMin: effectiveDwellMs(this.reclampStreak) / 60000,
+                    nextHoldMin: { ORANGE: effectiveDwellMs(this.reclampStreak, 2) / 60000, RED: effectiveDwellMs(this.reclampStreak, 3) / 60000 },
                 },
                 window: this.ring.map(summarize),
                 currentBucket: this.current ? summarize(this.current) : null,
@@ -462,7 +470,7 @@ export class SearchHealthController implements DurableObject {
     private async evaluate(): Promise<void> {
         const severities = this.ring.map(bucketSeverity);
         const now = Date.now();
-        const next = nextLevel(this.level, severities, now - this.since, effectiveDwellMs(this.reclampStreak));
+        const next = nextLevel(this.level, severities, now - this.since, effectiveDwellMs(this.reclampStreak, this.level));
         if (next === this.level) return;
 
         const from = this.level;
@@ -503,7 +511,7 @@ export class SearchHealthController implements DurableObject {
                 const avg2 = last2 && last2.n ? Math.round(last2.sumMs / last2.n) : 0;
                 this.sendSlack(
                     `🔴 *OpenAlex search-health: RED* — anonymous works search paused (503) while the cluster drains. ` +
-                    `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak) / 60000} min. ` +
+                    `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak, 3) / 60000} min. ` +
                     `Keyed clients and the GUI are unaffected.`,
                 );
             }
@@ -542,7 +550,7 @@ export class SearchHealthController implements DurableObject {
             from: LEVEL_NAMES[from],
             to: LEVEL_NAMES[next],
             reclampStreak: this.reclampStreak,
-            dwellMin: next >= 2 ? effectiveDwellMs(this.reclampStreak) / 60000 : undefined,
+            dwellMin: next >= 2 ? effectiveDwellMs(this.reclampStreak, next) / 60000 : undefined,
             lastBucket: { searchN: last?.n ?? 0, avgMs: avg, errPct, collateralN: last?.otherN ?? 0 },
         }));
         try {

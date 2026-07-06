@@ -224,3 +224,17 @@ describe('v3.4 release-aware backoff', () => {
         expect(nextLevel(O, [R, R], 0, effectiveDwellMs(3))).toBe(R);
     });
 });
+
+describe('v3.6 RED dwell cap', () => {
+    it('RED holds cap at 10 min regardless of backoff streak', () => {
+        expect(effectiveDwellMs(0, 3)).toBe(5 * 60_000);
+        expect(effectiveDwellMs(1, 3)).toBe(10 * 60_000);
+        expect(effectiveDwellMs(3, 3)).toBe(10 * 60_000);  // capped (was 30 for ORANGE)
+        expect(effectiveDwellMs(10, 3)).toBe(10 * 60_000);
+    });
+
+    it('ORANGE keeps the full 30-min backoff ceiling', () => {
+        expect(effectiveDwellMs(3, 2)).toBe(30 * 60_000);
+        expect(effectiveDwellMs(3)).toBe(30 * 60_000);     // default level = ORANGE
+    });
+});
