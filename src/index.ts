@@ -571,27 +571,32 @@ export default {
         }
 
         // oxjob #521: throttle broad boolean searches (>5 OR/AND/NOT operators)
-        // to 1 req/s per client. These are the bursty, ES-thread-saturating queries;
+        // per client. These are the bursty, ES-thread-saturating queries;
         // the limit binds on the handful of high-rate senders, not interactive users.
         // Lowered from >10 to >5 (2026-06-27): the 6-10-operator cohort (cardiovascular/
         // systematic-review monitors) was slipping under the old threshold and saturating
         // the search thread pool. Interactive queries rarely exceed 5 operators.
+        // 2026-07-16: valid-key clients lifted to 5 req/s; anonymous stays at 1 req/s.
         const booleanOperators = classification.type === 'search'
             ? countBooleanOperators(url.searchParams) : 0;
         if (booleanOperators > 5) {
+            const booleanRatePerSec = hasValidApiKey ? 5 : 1;
             try {
                 const booleanCheck = await limiter.fetch("http://internal/check-boolean", {
                     method: "POST",
-                    body: JSON.stringify({ dailyLimit: limit })
+                    body: JSON.stringify({ dailyLimit: limit, intervalMs: 1000 / booleanRatePerSec })
                 }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
 
                 if (!booleanCheck.success) {
                     const retryAfter = Math.ceil(booleanCheck.retryAfter || 1);
+                    const keyHint = hasValidApiKey
+                        ? ""
+                        : " Clients with an API key get 5 requests per second (free at https://openalex.org/rest-api).";
                     const errorResponse = new Response(JSON.stringify({
                         error: "Rate limit exceeded",
                         message: `Your query uses ${booleanOperators} boolean operators (OR/AND/NOT). ` +
                             `Broad boolean searches are heavy for our search cluster, so queries with more ` +
-                            `than 5 operators are limited to 1 request per second per client. ` +
+                            `than 5 operators are limited to ${booleanRatePerSec} request${booleanRatePerSec === 1 ? "" : "s"} per second per client.${keyHint} ` +
                             `Please wait ${retryAfter}s and retry, space out these requests, or narrow the query ` +
                             `(fewer OR/AND/NOT terms). See https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication`,
                         reason: "broad_boolean_query",

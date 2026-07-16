@@ -112,6 +112,7 @@ export class RateLimiter implements DurableObject {
             credits?: number;
             onetimeBalance?: number;
             consumedWriteback?: number;
+            intervalMs?: number;
         }>();
         const { dailyLimit, perSecondLimit, credits = 1, onetimeBalance = 0 } = body;
 
@@ -156,10 +157,12 @@ export class RateLimiter implements DurableObject {
             return Response.json({ success: true });
         }
 
-        // oxjob #521: per-client 1 req/s limit for very broad boolean searches
-        // (>10 OR/AND/NOT operators). In-memory only, same shape as /check-semantic.
+        // oxjob #521: per-client rate limit for very broad boolean searches
+        // (>5 OR/AND/NOT operators). In-memory only, same shape as /check-semantic.
+        // Caller sets intervalMs per tier: 200ms (5/s) for valid-key clients,
+        // 1000ms (1/s) for everyone else.
         if (url.pathname === '/check-boolean') {
-            const BOOLEAN_INTERVAL_MS = 1000;
+            const BOOLEAN_INTERVAL_MS = body.intervalMs ?? 1000;
             const elapsed = now - this.lastBooleanTime;
             if (this.lastBooleanTime > 0 && elapsed < BOOLEAN_INTERVAL_MS) {
                 const retryAfter = (BOOLEAN_INTERVAL_MS - elapsed) / 1000;
