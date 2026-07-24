@@ -577,10 +577,17 @@ export default {
         // systematic-review monitors) was slipping under the old threshold and saturating
         // the search thread pool. Interactive queries rarely exceed 5 operators.
         // 2026-07-16: valid-key clients lifted to 5 req/s; anonymous stays at 1 req/s.
+        // 2026-07-24 (oxjob #677): paid plans lifted to 25 req/s — on the post-#469
+        // cluster these queries mean ~150-330ms took (not seconds), and 5 req/s was
+        // rejecting real production traffic from premium customers (Nestlé zd#22825,
+        // French Ministry, firstignite). Worst-case single-client burst at 25 req/s
+        // ≈ 4-8 concurrent mean-cost searches; the 5s ES timeout + 9s abort backstop
+        // remain the pathological-query defense.
         const booleanOperators = classification.type === 'search'
             ? countBooleanOperators(url.searchParams) : 0;
         if (booleanOperators > 5) {
-            const booleanRatePerSec = hasValidApiKey ? 5 : 1;
+            const hasPaidPlan = userPlan !== null && ENTERPRISE_PLANS.has(userPlan);
+            const booleanRatePerSec = hasPaidPlan ? 25 : hasValidApiKey ? 5 : 1;
             try {
                 const booleanCheck = await limiter.fetch("http://internal/check-boolean", {
                     method: "POST",
@@ -589,9 +596,11 @@ export default {
 
                 if (!booleanCheck.success) {
                     const retryAfter = Math.ceil(booleanCheck.retryAfter || 1);
-                    const keyHint = hasValidApiKey
+                    const keyHint = hasPaidPlan
                         ? ""
-                        : " Clients with an API key get 5 requests per second (free at https://openalex.org/rest-api).";
+                        : hasValidApiKey
+                            ? " Paid plans get 25 requests per second (https://openalex.org/pricing)."
+                            : " Clients with an API key get 5 requests per second (free at https://openalex.org/rest-api); paid plans get 25.";
                     const errorResponse = new Response(JSON.stringify({
                         error: "Rate limit exceeded",
                         message: `Your query uses ${booleanOperators} boolean operators (OR/AND/NOT). ` +
