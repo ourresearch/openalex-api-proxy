@@ -115,6 +115,16 @@ export default {
 
         const url = new URL(req.url);
 
+        // robots.txt for every hostname this proxy serves (api.openalex.org,
+        // content.openalex.org). Sits before API-key validation so compliant
+        // crawlers get a real 200 text/plain answer and are billed nothing —
+        // it used to fall through to the API 404 and cost a credit (oxjob #701).
+        if (url.pathname === "/robots.txt") {
+            return addCorsHeaders(new Response("User-agent: *\nAllow: /\n", {
+                headers: { "Content-Type": "text/plain; charset=utf-8" }
+            }));
+        }
+
         // Route /cv-parse/* to CV parser worker (before API key validation —
         // CV parse uses user JWT auth, not OpenAlex API keys)
         if (env.CV_PARSER && /^\/cv-parse(\/|$)/i.test(url.pathname)) {
