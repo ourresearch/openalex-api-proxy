@@ -197,6 +197,79 @@ export default {
             }
         }
 
+        // ─────────────────────────────────────────────────────────────────────
+        // GUI FRONT-PAGE AUTOCOMPLETE COMBO — ad-hoc, NON-REST, GUI-only.
+        //
+        // This deliberately breaks REST: it addresses no OpenAlex resource. It
+        // exists to optimize exactly ONE interaction — the autocomplete dropdown
+        // under the big search box on the openalex.org front page (basic search).
+        // That dropdown needs four suggestion lists at once (author names,
+        // institution names, keyword concepts, work titles). The GUI used to
+        // fetch them as FOUR parallel requests per keystroke-pause. Anonymous
+        // clients are capped at 10 req/s (perSecondLimit, below), so a fast
+        // typist's bursts (4 calls × a few pauses/sec) tripped that cap — and
+        // because the SPA renders any logged-out 429 as the daily-credit modal,
+        // it popped a scary "you've hit today's free limit" dialog mid-typing,
+        // even though NO credits were spent (it was the per-second throttle).
+        //
+        // Collapsing the four into ONE request per pause keeps the dropdown well
+        // under 10 req/s. We fan out to origin server-side and merge. It's free
+        // (0 credits) and sits BEFORE the rate limiter, like /ui-token: a single
+        // client request that can't trip the per-second cap.
+        //
+        // "GUI-only" is intent, not enforcement — any caller may hit it, which is
+        // fine: it does no more than four already-public, already-free calls,
+        // bundled. Keep it dumb and cheap. If you ever want a general, RESTful
+        // multi-entity autocomplete, design that separately — this is a pragmatic
+        // hack for one specific UI, not that.
+        // ─────────────────────────────────────────────────────────────────────
+        if (uiTokenPath === 'gui/autocomplete') {
+            if (req.method !== 'GET') {
+                return json(405, { error: "Method Not Allowed", message: "GET /gui/autocomplete?q=..." });
+            }
+            const q = (url.searchParams.get('q') || '').trim();
+            if (!q) {
+                return json(200, { authors: [], institutions: [], keywords: [], works: [] });
+            }
+            // Works titles are only wanted once the query is a few words long
+            // (the GUI passes works=0 for short queries) — skip that upstream call.
+            const includeWorks = url.searchParams.get('works') !== '0';
+
+            const trim = (s: string) => s.replace(/\/+$/, '');
+            const searchOrigin = trim(env.SEARCH_API_URL || env.OPENALEX_API_URL);
+            const apiOrigin = trim(env.OPENALEX_API_URL);
+            const eq = encodeURIComponent(q);
+            const SELECT = 'id,display_name,works_count';
+            const MAILTO = 'mailto=ui@openalex.org';
+
+            // Each source fails soft to [] so one slow/broken upstream can't blank
+            // the whole dropdown. author/institution use the light entity-search
+            // shape (per_page≤10 + select) the GUI already sent; keyword/work use
+            // the /autocomplete/* endpoints.
+            const sub = async (u: string): Promise<unknown[]> => {
+                try {
+                    const r = await fetch(u, {
+                        headers: { "User-Agent": "OpenAlex-Proxy/1.0", "Accept": "application/json" },
+                        signal: AbortSignal.timeout(9000),
+                    });
+                    if (!r.ok) return [];
+                    const j = await r.json() as { results?: unknown[] };
+                    return Array.isArray(j.results) ? j.results : [];
+                } catch { return []; }
+            };
+
+            const [authors, institutions, keywords, works] = await Promise.all([
+                sub(`${searchOrigin}/authors?search=${eq}&per_page=10&select=${SELECT}&${MAILTO}`),
+                sub(`${searchOrigin}/institutions?search=${eq}&per_page=10&select=${SELECT}&${MAILTO}`),
+                sub(`${apiOrigin}/autocomplete/keywords?q=${eq}&${MAILTO}`),
+                includeWorks
+                    ? sub(`${apiOrigin}/autocomplete/works?q=${eq}&${MAILTO}`)
+                    : Promise.resolve([] as unknown[]),
+            ]);
+
+            return json(200, { authors, institutions, keywords, works });
+        }
+
         // Is this request carrying a valid UI-provenance token? Provenance only:
         // NEVER gates the request — just tags analytics so the UI/non-UI split
         // (relied on by #338 + #340) stops being spoofable via `mailto`.
