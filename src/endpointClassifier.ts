@@ -113,9 +113,14 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
         return { type: 'list', creditCost: 1 };
     }
 
-    // Autocomplete
+    // Autocomplete: free for everyone. These are cheap prefix queries (≤25 tiny
+    // objects) that power the GUI search-box dropdown — the same intent as the
+    // isAutocompleteSearch() exemption above. Charging them drained the anon
+    // daily pool mid-typing (up to 2 credits per keystroke-pause, per IP), which
+    // popped the "hit today's free limit" modal while the user was still typing.
+    // The per-second limit still throttles abuse.
     if (segments[0] === 'autocomplete') {
-        return { type: 'list', creditCost: 1 };
+        return { type: 'list', creditCost: 0 };
     }
 
     // Default: treat as list (safe default)

@@ -156,16 +156,16 @@ describe('endpointClassifier', () => {
             expect(result.creditCost).toBe(1);
         });
 
-        it('classifies /autocomplete/works as list (1 credit)', () => {
+        it('classifies /autocomplete/works as list (0 credits)', () => {
             const result = classifyEndpoint('/autocomplete/works');
             expect(result.type).toBe('list');
-            expect(result.creditCost).toBe(1);
+            expect(result.creditCost).toBe(0);
         });
 
-        it('classifies /autocomplete/works?q=test as list (1 credit)', () => {
+        it('classifies /autocomplete/works?q=test as list (0 credits)', () => {
             const result = classifyEndpoint('/autocomplete/works?q=test');
             expect(result.type).toBe('list');
-            expect(result.creditCost).toBe(1);
+            expect(result.creditCost).toBe(0);
         });
     });
 
