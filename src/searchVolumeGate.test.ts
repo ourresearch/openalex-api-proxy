@@ -7,7 +7,7 @@ import {
     searchVolumeMessage,
 } from "./searchVolumeGate";
 
-const PAID = new Set(["premium-1M", "premium-2M", "institutional", "partner"]);
+const PAID = new Set(["premium-1M", "premium-2M", "member-plus", "institutional", "partner"]);
 
 function u(qs: string): URL {
     return new URL("https://api.openalex.org/works?" + qs);

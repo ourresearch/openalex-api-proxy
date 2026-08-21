@@ -1414,9 +1414,14 @@ function getForwardPath(url: URL, targetApiUrl: string, env: Env): string {
 }
 
 // Enterprise-tier plans: gated access to date filters, changefile downloads, etc.
+// Keep in sync with plans.py in openalex-users-api. 'member-plus' is the
+// Member+ org plan (users-api migration 074, 2026-08-20) that replaced
+// premium-1M for ~49 orgs; omitting it here locked them out of date filters,
+// changefiles and snapshot credentials.
 const ENTERPRISE_PLANS = new Set([
     'premium-1M', 'premium-2M', 'premium-5M', 'premium-10M',
     'institutional', 'institutional-1M', 'institutional-2M',
+    'member-plus',
     'partner',
 ]);
 
