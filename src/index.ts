@@ -1125,6 +1125,28 @@ export default {
             newHeaders.set("Cache-Control", "public, max-age=3600");
         }
 
+        // Drop Content-Length from HEAD responses on the API path (oxjob #848).
+        // The origin answers a HEAD by running the query and discarding the body,
+        // so the length it reports describes *that* execution. List/search bodies
+        // embed meta.db_response_time_ms (ES `took`), whose digit count moves
+        // between runs, so the next GET is routinely 1-2 bytes off — two GETs of
+        // the same URL disagree with each other too. Clients that treat the URL as
+        // a file (DuckDB httpfs `read_json`, some crawlers) HEAD for a size, then
+        // assert the GET matches it, and fail: zd#23471 / GH OpenAlex#14.
+        //
+        // We can't honour that contract anyway — the API ignores Range and returns
+        // 200 + the whole body — so promising a length is the bug, not the drift.
+        // Omitting it makes those clients fall back to a plain full download (the
+        // `SET force_download=true` workaround, but automatic). Verified under
+        // workerd against a mock origin that reproduces the drift: DuckDB went
+        // 33/40 -> 40/40 passing, and origin GETs per read_json fell ~4x (the
+        // failing path silently retries the GET several times before erroring).
+        // Scoped to HEAD on this path only; the content API (early-returned
+        // above) serves static R2 objects where a promised length is real.
+        if (req.method === "HEAD") {
+            newHeaders.delete("Content-Length");
+        }
+
         const finalResponse = addCorsHeaders(new Response(response.body, {
             status: response.status,
             statusText: response.statusText,
