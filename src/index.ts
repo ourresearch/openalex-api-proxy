@@ -1049,13 +1049,52 @@ export default {
         // and closing the connection also cancels the upstream search on disconnect. The
         // edge-cached changefiles listing skips the signal (it must not hit the 504 path).
         const isChangefilesListing = req.method === "GET" && isChangefilesBrowse;
+
+        // 2026-08-24 incident: /entities, /properties and /meta/entities are static
+        // OQL schema metadata served by elastic-api with NO Cache-Control. Measured
+        // during the incident: byte-identical across callers (no Vary, no Set-Cookie,
+        // same bytes with and without Authorization), but slow — /properties is 228 KB
+        // and took ~8s, /entities ~12s. The GUI fetches all three per page load, so
+        // they were ~16% of api.openalex.org traffic, each holding a dyno worker for
+        // seconds and starving the pool: a no-op request to `/` was taking 5.7s.
+        //
+        // Edge-cache them so the origin serves one per PoP per hour instead of one per
+        // page load. Two details that matter:
+        //   - cacheKey drops the query string. The GUI appends `mailto=`, and the
+        //     response doesn't vary by caller, so without this every mailto variant
+        //     would be its own entry and the hit rate would collapse.
+        //   - like the changefiles listing, this skips the 9s abort (it uses 25s
+        //     instead). On a cold miss a saturated origin needs longer than 9s, and a
+        //     504 populates nothing — the cache would never fill and never help.
+        const metadataPath = url.pathname.replace(/\/+$/, '').toLowerCase();
+        const isStaticMetadata = req.method === "GET"
+            && (metadataPath === '/entities' || metadataPath === '/properties' || metadataPath === '/meta/entities');
+
+        // These are public schema documents; an inbound Authorization header would
+        // make Cloudflare treat the response as private and skip the cache entirely.
+        // Safe to drop: the payload is identical with and without it (verified).
+        if (isStaticMetadata) {
+            proxyHeaders.delete("Authorization");
+        }
+
         let response: Response;
         try {
             response = await fetch(
-                proxyReq,
+                isStaticMetadata
+                    ? new Request(openalexUrl.toString(), { method: req.method, headers: proxyHeaders })
+                    : proxyReq,
                 isChangefilesListing
                     ? { cf: { cacheTtl: 3600, cacheEverything: true } }
-                    : { signal: AbortSignal.timeout(9000) }
+                    : isStaticMetadata
+                        ? {
+                            cf: {
+                                cacheTtl: 3600,
+                                cacheEverything: true,
+                                cacheKey: `${url.origin}${metadataPath}`
+                            },
+                            signal: AbortSignal.timeout(25000)
+                        }
+                        : { signal: AbortSignal.timeout(9000) }
             );
         } catch (error) {
             if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
