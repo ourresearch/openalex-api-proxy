@@ -1119,15 +1119,20 @@ export default {
             countProbeCacheKey = `${url.origin}${url.pathname}${qs ? '?' + qs : ''}`;
         }
 
-        // 2026-08-24 incident: TEMPORARILY 9000 → 6000. REVERT TO 9000 once ES is healthy.
-        // At the ~22% timeout rate seen during the incident, every hung request held a
-        // Heroku dyno worker *and* an ES query slot for a full 9s to deliver nothing;
-        // aborting sooner closes the connection, which cancels the upstream search and
-        // frees the worker a third faster. Still above ES's own 5s soft timeout so partial
-        // results are returned rather than cut off — that is why 6s and not 3s. With ES
-        // averaging 545-967ms during the incident, almost nothing legitimate completes in
-        // the 6-9s window, so the collateral is small and the reclaimed capacity is not.
-        const ORIGIN_ABORT_MS = 6000;
+        // 2026-08-24: briefly cut to 6000 during the incident on the theory that aborting
+        // sooner would free origin capacity. Reverted — the premise was wrong. Heroku +
+        // gunicorn do not abandon in-flight work when the client disconnects, so a shorter
+        // abort here does NOT release the dyno worker or the ES query; that request runs on
+        // until it completes or Heroku's router kills it at H12 (30s), which is why the
+        // origin's p99 sat at exactly 30s while the proxy was capping itself at 6s. The
+        // only effect of the shorter value was failing users sooner, so it is not worth the
+        // collateral. Reclaiming origin capacity has to happen at the origin (gunicorn
+        // --timeout, a server-side ES timeout) or by removing load (see the caches below).
+        //
+        // NB: the "cancels the upstream search on disconnect" claim in the oxjob #521 note
+        // above is unverified for this stack and is what led the 6s change astray. Treat it
+        // as an open question, not an established behaviour, before relying on it again.
+        const ORIGIN_ABORT_MS = 9000;
 
         // Built as an if/else rather than a nested ternary: four cases is past the point
         // where a chained `?:` is reviewable, and this path runs on every proxied request.
