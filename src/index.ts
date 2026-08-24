@@ -1077,24 +1077,86 @@ export default {
             proxyHeaders.delete("Authorization");
         }
 
+        // 2026-08-24 incident: the GUI's corpus-count probe, and the single largest
+        // consumer of Elasticsearch CPU on the platform. `/works?per-page=1&select=id`
+        // asks for ONE id, but the response carries meta.count, and an unfiltered count
+        // makes ES tally all ~322M works on every call. Measured in Analytics Engine:
+        // 826ms of ES time per request, 10.16M ms/hour — roughly 40% of ALL ES CPU,
+        // from this one query shape.
+        //
+        // Caching rather than rate limiting is deliberate. The load is diffuse (every
+        // front-page visitor; the heaviest single IP was 0.17% of sampled anon rows),
+        // so a per-client cap can't reduce the aggregate without breaking the UI for
+        // individuals — and the SPA renders a logged-out 429 as the daily-credit modal,
+        // so throttling would show "you've hit today's free limit" to users who spent
+        // nothing. The response is identical for every caller, so caching removes the
+        // load outright and still returns the right answer. 5 min of staleness on a
+        // 322M counter is immaterial.
+        //
+        // Narrow by construction: per-page=1 + select=id is a count probe, never a real
+        // data fetch. Restricted to unauthenticated callers so private-label resolution
+        // (which elastic-api derives from a forwarded Authorization header) can never
+        // vary a cached body — that also covers 100% of the observed load, which is
+        // entirely anonymous. Only mailto is dropped from the cache key; filter, corpus
+        // and data-version all stay, so distinct probes never collide.
+        const probePerPage = url.searchParams.get('per-page') ?? url.searchParams.get('per_page');
+        const isCountProbe = req.method === "GET"
+            && probePerPage === '1'
+            && url.searchParams.get('select') === 'id'
+            && !url.searchParams.has('cursor')
+            && !url.searchParams.has('page')
+            && !apiKey
+            && !req.headers.get("Authorization");
+
+        let countProbeCacheKey = '';
+        if (isCountProbe) {
+            const keyParams = new URLSearchParams();
+            for (const [k, v] of [...url.searchParams.entries()].sort()) {
+                if (k === 'mailto') continue;
+                keyParams.append(k, v);
+            }
+            const qs = keyParams.toString();
+            countProbeCacheKey = `${url.origin}${url.pathname}${qs ? '?' + qs : ''}`;
+        }
+
+        // 2026-08-24 incident: TEMPORARILY 9000 → 6000. REVERT TO 9000 once ES is healthy.
+        // At the ~22% timeout rate seen during the incident, every hung request held a
+        // Heroku dyno worker *and* an ES query slot for a full 9s to deliver nothing;
+        // aborting sooner closes the connection, which cancels the upstream search and
+        // frees the worker a third faster. Still above ES's own 5s soft timeout so partial
+        // results are returned rather than cut off — that is why 6s and not 3s. With ES
+        // averaging 545-967ms during the incident, almost nothing legitimate completes in
+        // the 6-9s window, so the collateral is small and the reclaimed capacity is not.
+        const ORIGIN_ABORT_MS = 6000;
+
+        // Built as an if/else rather than a nested ternary: four cases is past the point
+        // where a chained `?:` is reviewable, and this path runs on every proxied request.
+        let fetchInit: RequestInit;
+        if (isChangefilesListing) {
+            fetchInit = { cf: { cacheTtl: 3600, cacheEverything: true } };
+        } else if (isStaticMetadata) {
+            fetchInit = {
+                cf: { cacheTtl: 3600, cacheEverything: true, cacheKey: `${url.origin}${metadataPath}` },
+                signal: AbortSignal.timeout(25000)
+            };
+        } else if (isCountProbe) {
+            // Same 25s reasoning as the metadata paths: at 9s a cold miss 504s against a
+            // saturated origin and the cache never populates, so the fix would do nothing.
+            fetchInit = {
+                cf: { cacheTtl: 300, cacheEverything: true, cacheKey: countProbeCacheKey },
+                signal: AbortSignal.timeout(25000)
+            };
+        } else {
+            fetchInit = { signal: AbortSignal.timeout(ORIGIN_ABORT_MS) };
+        }
+
         let response: Response;
         try {
             response = await fetch(
                 isStaticMetadata
                     ? new Request(openalexUrl.toString(), { method: req.method, headers: proxyHeaders })
                     : proxyReq,
-                isChangefilesListing
-                    ? { cf: { cacheTtl: 3600, cacheEverything: true } }
-                    : isStaticMetadata
-                        ? {
-                            cf: {
-                                cacheTtl: 3600,
-                                cacheEverything: true,
-                                cacheKey: `${url.origin}${metadataPath}`
-                            },
-                            signal: AbortSignal.timeout(25000)
-                        }
-                        : { signal: AbortSignal.timeout(9000) }
+                fetchInit
             );
         } catch (error) {
             if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
