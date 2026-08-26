@@ -156,8 +156,12 @@ async function parsePublicationsWithClaude(
   const truncated = text.length > 100000 ? text.substring(0, 100000) : text;
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 8000,
+    // claude-sonnet-4-20250514 was retired by Anthropic (API now 404s it);
+    // claude-sonnet-5 is its successor. Sonnet 5 runs adaptive thinking by
+    // default and uses a denser tokenizer, so max_tokens is raised and the
+    // text block is located by type below (content[0] may be a thinking block).
+    model: 'claude-sonnet-5',
+    max_tokens: 16000,
     messages: [
       {
         role: 'user',
@@ -183,7 +187,12 @@ ${truncated}`,
     ],
   });
 
-  const content = (response.content[0] as any).text.trim();
+  const textBlock = response.content.find((b: any) => b.type === 'text');
+  if (!textBlock) {
+    console.error('No text block in Claude response; stop_reason:', response.stop_reason);
+    throw new Error('Failed to parse publications from CV');
+  }
+  const content = (textBlock as any).text.trim();
 
   try {
     let jsonStr = content;
