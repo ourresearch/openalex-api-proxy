@@ -129,7 +129,7 @@ export async function searchOpenAlex(
 
 // ─── DOI Cleaning ───────────────────────────────────────────
 
-function cleanDOI(doi: string): string | null {
+export function cleanDOI(doi: string): string | null {
   if (!doi) return null;
   let d = doi.trim();
   // Strip URL prefixes
@@ -174,7 +174,7 @@ function tokenize(title: string): Set<string> {
  * Fuzzy title similarity using word overlap (F1 score).
  * Also considers stem/prefix matching for partial word matches.
  */
-function titleSimilarity(title1: string, title2: string): number {
+export function titleSimilarity(title1: string, title2: string): number {
   const words1 = tokenize(title1);
   const words2 = tokenize(title2);
 
@@ -211,7 +211,7 @@ function titleSimilarity(title1: string, title2: string): number {
 /**
  * Pick the best matching result, considering title similarity + year bonus.
  */
-function bestMatch(
+export function bestMatch(
   results: any[] | undefined,
   publication: CvPublication,
   threshold: number = 0.35
@@ -266,7 +266,7 @@ function cleanTitle(title: string): string {
     .trim();
 }
 
-function extractKeyWords(title: string): string {
+export function extractKeyWords(title: string): string {
   return cleanTitle(title)
     .toLowerCase()
     .split(/\s+/)

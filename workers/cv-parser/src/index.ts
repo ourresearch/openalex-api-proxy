@@ -10,6 +10,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { extractText } from './extractText';
+import { parsePublicationsJson } from './parseClaudeResponse';
 import {
   searchOpenAlex,
   setApiKey,
@@ -69,8 +70,11 @@ export default {
 async function handleParseCv(request: Request, env: Env): Promise<ParseCvResponse> {
   const formData = await request.formData();
 
-  const file = formData.get('file');
-  if (!file || !(file instanceof File)) {
+  // workers-types declares formData.get() as string | null, but at runtime a
+  // multipart file part arrives as a File — go through `unknown` so the
+  // instanceof narrowing typechecks.
+  const file = formData.get('file') as unknown;
+  if (!(file instanceof File)) {
     throw new Error('No file uploaded');
   }
 
@@ -195,14 +199,10 @@ ${truncated}`,
   const content = (textBlock as any).text.trim();
 
   try {
-    let jsonStr = content;
-    if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    }
-    return JSON.parse(jsonStr);
-  } catch {
+    return parsePublicationsJson(content);
+  } catch (err) {
     console.error('Failed to parse Claude response:', content.substring(0, 500));
-    throw new Error('Failed to parse publications from CV');
+    throw err;
   }
 }
 

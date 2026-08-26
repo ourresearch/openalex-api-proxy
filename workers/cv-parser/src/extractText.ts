@@ -78,18 +78,9 @@ async function extractDocText(buffer: Buffer): Promise<string> {
     // mammoth couldn't handle this .doc — try next strategy
   }
 
-  // Strategy 2: Try word-extractor (may not work in CF Workers runtime)
-  try {
-    const WordExtractor = (await import('word-extractor')).default;
-    const extractor = new WordExtractor();
-    const doc = await extractor.extract(buffer);
-    const body = doc.getBody();
-    if (body && body.trim().length > 0) return body;
-  } catch (err: any) {
-    console.error('word-extractor failed:', err.message);
-  }
-
-  // Strategy 3: Brute-force text extraction — pull readable ASCII/UTF strings from binary
+  // Strategy 2: Brute-force text extraction — pull readable ASCII/UTF strings from binary.
+  // (A word-extractor strategy used to sit here, but the package was never added to
+  // package.json, so its dynamic import always threw at runtime — removed as dead code.)
   try {
     const text = extractRawStrings(buffer);
     if (text.length > 100) {
