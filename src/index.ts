@@ -761,7 +761,7 @@ export default {
                     });
 
                     logAnalytics({
-                        ctx, env, apiKey, req, url, scope,
+                        ctx, env, apiKey, req, url, scope: 'wide_or', // blob5 — so these 429s are countable in AE
                         responseTime: Date.now() - startTime,
                         statusCode: 429,
                         rateLimit: limit,
