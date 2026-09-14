@@ -167,3 +167,7 @@ dist
 .wrangler/
 
 .idea/
+
+# python
+__pycache__/
+*.pyc
