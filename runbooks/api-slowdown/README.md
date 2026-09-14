@@ -13,9 +13,19 @@ cp runbooks/api-slowdown/.env.example runbooks/api-slowdown/.env   # then fill i
 repo's `.dev.vars` if you already have that. The wrangler OAuth token is NOT a substitute: it
 expires every ~8 h and an expired token renders as a clean table of zeros.
 
+## Check the setup
+```
+python3 runbooks/api-slowdown/tools/check_setup.py
+```
+One PASS/WARN/FAIL line per dependency (credential file, each key, prod ES + the APIs the
+scripts use, monitoring ES slow log + metricbeat, Analytics Engine, Heroku/psql for the
+`rate_throttled` lever, wrangler). Exit 1 on any FAIL. Run it first on a new machine and
+whenever a script returns something that looks too clean.
+
 ## The recipe
 | step | script | what it answers | time |
 |---|---|---|---|
+| 0 | `tools/check_setup.py` | Can I reach everything? | 20 s |
 | 1a | `tools/es_health.py` | Is ES saturated? nodes at `49/49` search threads, queues, CPU, tombstones | 10 s |
 | 1b | `tools/es_live.py` | **shard-qps × ms/query = utilization**; per-index load; in-flight query shapes and the oldest ones | 1 min |
 | 2 | `tools/es_prior_day_compare.py [HH:MM]` | Is this level normal for the hour? Same window 1/2/7 days ago | 30 s |
