@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS } from './endpointClassifier';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
 
@@ -407,5 +407,50 @@ describe('endpointClassifier', () => {
             expect(result.type).toBe('list');
             expect(result.creditCost).toBe(1);
         });
+    });
+});
+
+describe('countWideOrTerms (oxjob #876)', () => {
+    const wide = (qs: string) => countWideOrTerms(new URLSearchParams(qs));
+    const topics = (n: number) => Array.from({ length: n }, (_, i) => `T1${String(i).padStart(4, '0')}`).join('|');
+
+    it('returns 0 with no filter', () => {
+        expect(countWideOrTerms(undefined).count).toBe(0);
+        expect(wide('search=cancer').count).toBe(0);
+        expect(wide('filter=publication_year:2020').count).toBe(0);
+    });
+
+    it('counts distinct OR terms on topics.id and names the field', () => {
+        expect(wide(`filter=topics.id:${topics(3)}`)).toEqual({ field: 'topics.id', count: 3 });
+        expect(wide(`filter=topics.id:${topics(100)},language:en`)).toEqual({ field: 'topics.id', count: 100 });
+        expect(wide(`filter=language:en,primary_topic.id:${topics(12)}`).count).toBe(12);
+        expect(wide(`filter=concepts.id:C1|C2|C3`).count).toBe(3);
+    });
+
+    it('dedupes repeated terms and ignores case/whitespace', () => {
+        expect(wide('filter=topics.id:T1|t1| T1 |T2').count).toBe(2);
+    });
+
+    it('ignores negated lists — a NOT list is free for ES', () => {
+        expect(wide(`filter=topics.id:!${topics(325)}`).count).toBe(0);
+        expect(wide(`filter=topics.id:${topics(4)},topics.id:!${topics(325)}`).count).toBe(4);
+    });
+
+    it('ignores identifier and other non-wide fields regardless of length', () => {
+        const ids = Array.from({ length: 425 }, (_, i) => `W${i}`).join('|');
+        expect(wide(`filter=openalex:${ids}`).count).toBe(0);
+        expect(wide(`filter=ids.openalex:${ids}`).count).toBe(0);
+        expect(wide(`filter=doi:${ids}`).count).toBe(0);
+        expect(wide(`filter=authorships.institutions.id:${ids}`).count).toBe(0);
+        expect(wide(`filter=topics.subfield.id:${ids}`).count).toBe(0);
+    });
+
+    it('takes the worst key across repeated filter params', () => {
+        expect(wide(`filter=topics.id:${topics(2)}&filter=concepts.id:${topics(7)}`)).toEqual({ field: 'concepts.id', count: 7 });
+    });
+
+    it('the real 2026-09-14 shape trips the threshold, a 10-topic chunk does not', () => {
+        expect(wide(`filter=topics.id:${topics(100)},language:en,topics.id:!${topics(325)}&per-page=200`).count).toBeGreaterThan(WIDE_OR_MAX_TERMS);
+        expect(wide(`filter=topics.id:${topics(10)},language:en`).count).toBe(WIDE_OR_MAX_TERMS);
     });
 });

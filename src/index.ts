@@ -1,7 +1,7 @@
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, EndpointClassification } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
@@ -718,6 +718,63 @@ export default {
             } catch (error) {
                 // Fail-open: if DO call fails, allow the request through
                 console.error("Boolean rate limit check error:", error);
+            }
+        }
+
+        // oxjob #876 (2026-09-14): throttle filter OR-lists with >10 distinct terms on a
+        // wide field (topics/concepts) to 1 req/s per client, every tier. One prepaid key
+        // sweeping /works with 100-term topics.id filters (2-5s ES took each, ~7 req/s)
+        // saturated every search thread on the cluster; it was a keyed list call, so
+        // the boolean throttle, search pricing and the anon ladder all missed it.
+        // Cost scales with distinct wide terms, not clause count — identifier OR-lists
+        // (doi, openalex ids) are exempt by construction. Flat 1 req/s because at
+        // ~144 thread-seconds per request even 2 req/s is a quarter of the cluster.
+        const wideOr = countWideOrTerms(url.searchParams);
+        if (wideOr.count > WIDE_OR_MAX_TERMS) {
+            try {
+                const wideOrCheck = await limiter.fetch("http://internal/check-wide-or", {
+                    method: "POST",
+                    body: JSON.stringify({ intervalMs: 1000 })
+                }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
+
+                if (!wideOrCheck.success) {
+                    const retryAfter = Math.ceil(wideOrCheck.retryAfter || 1);
+                    const errorResponse = new Response(JSON.stringify({
+                        error: "Rate limit exceeded",
+                        message: `Your filter ORs ${wideOr.count} values on ${wideOr.field}. ` +
+                            `Each ${wideOr.field} value matches a large share of the index, so OR-lists longer ` +
+                            `than ${WIDE_OR_MAX_TERMS} terms are limited to 1 request per second per client. ` +
+                            `Please wait ${retryAfter}s and retry, or split the list into requests of at most ` +
+                            `${WIDE_OR_MAX_TERMS} ${wideOr.field} values each. ` +
+                            `See https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication`,
+                        reason: "wide_or_filter",
+                        field: wideOr.field,
+                        orTerms: wideOr.count,
+                        retryAfter
+                    }), {
+                        status: 429,
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Retry-After": retryAfter.toString(),
+                            ...Object.fromEntries(getCorsHeaders())
+                        }
+                    });
+
+                    logAnalytics({
+                        ctx, env, apiKey, req, url, scope,
+                        responseTime: Date.now() - startTime,
+                        statusCode: 429,
+                        rateLimit: limit,
+                        rateLimitRemaining: 0,
+                        endpointType: classification.type,
+                        creditCost
+                    });
+
+                    return errorResponse;
+                }
+            } catch (error) {
+                // Fail-open: if DO call fails, allow the request through
+                console.error("Wide OR rate limit check error:", error);
             }
         }
 

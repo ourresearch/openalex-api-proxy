@@ -25,6 +25,7 @@ export class RateLimiter implements DurableObject {
     private lastSemanticTime: number = 0; // Temporary: 1 req/s limit for semantic search
     private lastThrottleTime: number = 0; // oxjob #166: admin rate-throttle
     private lastBooleanTime: number = 0; // oxjob #521/#677: rate limit for >5-operator boolean searches
+    private lastWideOrTime: number = 0; // oxjob #876: rate limit for >10-term OR lists on wide filter fields
 
     constructor(private readonly state: DurableObjectState) {
         this.state.blockConcurrencyWhile(async () => {
@@ -169,6 +170,20 @@ export class RateLimiter implements DurableObject {
                 return Response.json({ success: false, retryAfter });
             }
             this.lastBooleanTime = now;
+            return Response.json({ success: true });
+        }
+
+        // oxjob #876: 1 req/s for filter OR-lists with >10 distinct terms on a wide
+        // field (topics/concepts). Same shape as /check-boolean, separate timer so
+        // the two throttles don't share a clock.
+        if (url.pathname === '/check-wide-or') {
+            const WIDE_OR_INTERVAL_MS = body.intervalMs ?? 1000;
+            const elapsed = now - this.lastWideOrTime;
+            if (this.lastWideOrTime > 0 && elapsed < WIDE_OR_INTERVAL_MS) {
+                const retryAfter = (WIDE_OR_INTERVAL_MS - elapsed) / 1000;
+                return Response.json({ success: false, retryAfter });
+            }
+            this.lastWideOrTime = now;
             return Response.json({ success: true });
         }
 

@@ -54,6 +54,49 @@ export function countBooleanOperators(searchParams?: URLSearchParams): number {
     return matches ? matches.length : 0;
 }
 
+/**
+ * Filter fields where a single OR'd value matches tens of thousands of works, so an
+ * OR-list's ES cost grows with every distinct term (oxjob #876, 2026-09-14). Measured on
+ * works-v34: 1 topic 0.3s, 10 topics 0.5s, 25 topics 1.5s, 100 topics 2.0s — versus
+ * 425 OR'd `ids.openalex` at 0.5s flat, because identifier terms match one document each.
+ * Deliberately narrow to start (topics + concepts); institutions/sources/countries/etc.
+ * are candidates if the same shape shows up on them.
+ */
+export const WIDE_OR_FILTER_FIELDS = new Set([
+    'topics.id',
+    'primary_topic.id',
+    'concepts.id',
+    'concept.id',
+]);
+
+export const WIDE_OR_MAX_TERMS = 10;
+
+/**
+ * Largest number of distinct OR'd values on any wide filter field across every
+ * `filter` param. Negated lists (`topics.id:!T1|T2`) are not counted — the replay
+ * showed a 325-term NOT list costs nothing. Returns {field, count} of the worst key
+ * so the 429 body can name it.
+ */
+export function countWideOrTerms(searchParams?: URLSearchParams): { field: string; count: number } {
+    let worst = { field: '', count: 0 };
+    if (!searchParams) return worst;
+    for (const value of searchParams.getAll('filter')) {
+        for (const clause of value.split(',')) {
+            const colon = clause.indexOf(':');
+            if (colon < 0) continue;
+            const field = clause.slice(0, colon).trim().toLowerCase();
+            if (!WIDE_OR_FILTER_FIELDS.has(field)) continue;
+            const terms = clause.slice(colon + 1).trim();
+            if (terms.startsWith('!')) continue;
+            const distinct = new Set(
+                terms.split('|').map(t => t.trim().toLowerCase()).filter(t => t.length > 0)
+            );
+            if (distinct.size > worst.count) worst = { field, count: distinct.size };
+        }
+    }
+    return worst;
+}
+
 export function classifyEndpoint(pathname: string, searchParams?: URLSearchParams): EndpointClassification {
     const normalized = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
     const segments = normalized.split('/');
