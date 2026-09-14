@@ -4,6 +4,13 @@ Written after the 2026-08-24 (botnet × uncached bootstrap fan-out) and 2026-09-
 key's 425-term `topics.id` OR-list) incidents — oxjob #876 has the narratives. Every step below
 is a script in `tools/`, stdlib-only Python 3.11+, read-only against ES and Cloudflare.
 
+## Where things go
+- **This runbook** is the evergreen recipe and levers. Fix it here when a step or threshold is wrong.
+- **Each incident is its own oxjob** (`oxjobs/working/<date-or-cause>/`): the timeline, the numbers
+  from these scripts, what lever was pulled and when, and the follow-ups. Link the job to this
+  README rather than copying the recipe into it. Precedents: #876 (08-24 botnet × bootstrap fan-out,
+  and the 09-14 topic-downloader recurrence logged there before this split existed).
+
 ## Setup (once per machine)
 ```
 cp runbooks/api-slowdown/.env.example runbooks/api-slowdown/.env   # then fill in the 4 values
