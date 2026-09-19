@@ -844,6 +844,14 @@ export default {
             let message: string;
             if (isPerSecond) {
                 message = `Rate limit exceeded: ${perSecondLimit} requests per second. Please slow down.`;
+            } else if (!apiKey) {
+                // Anonymous: the exhausted budget is the free per-IP one, shared by
+                // everyone behind the same NAT (an office, a campus). Say so, and say
+                // the way out is the caller's OWN key — most people who hit this
+                // already have one and just didn't send it (oxjob #1245: a GUI
+                // "View in API" tab opened without a key while the user's battery
+                // icon showed 95% left).
+                message = `Insufficient budget. This request has no API key, so it counts against the free daily budget shared by everyone on your network's IP address, and that budget is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Use your own key instead: add ?api_key=YOUR_KEY to the URL, or send it as an "Authorization: Bearer YOUR_KEY" header. Keys are free and have their own budget: https://help.openalex.org/api/authentication/`;
             } else if (onetimeCreditsBalance > 0) {
                 message = `Insufficient budget. This request costs $${costUsd} but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else {
