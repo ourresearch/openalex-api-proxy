@@ -230,3 +230,20 @@ function isSingletonIdentifier(segment: string): boolean {
     const lower = segment.toLowerCase();
     return EXTERNAL_ID_PREFIXES.some(prefix => lower.startsWith(prefix));
 }
+
+/**
+ * Credits actually owed once the origin has answered (oxjob #863).
+ *
+ * The limiter charges `creditCost` at /check, before the origin is called, and
+ * the response path used to stamp that same number on every status. So a typo'd
+ * `search=` paid full search price for a 400 that never reached Elasticsearch.
+ * Any error response — 4xx (nothing served, and ~90% of 400s are rejected before
+ * ES) or 5xx (our fault) — is now free; the caller refunds the difference.
+ *
+ * Abuse note: a free 400 is a free "is this filter key valid?" probe, but the
+ * per-second bucket still runs at /check ahead of the charge, so probe rate is
+ * bounded exactly as before.
+ */
+export function billableCreditCost(status: number, creditCost: number): number {
+    return status >= 400 ? 0 : creditCost;
+}

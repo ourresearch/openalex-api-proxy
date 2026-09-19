@@ -1,7 +1,7 @@
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, EndpointClassification } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
@@ -1268,18 +1268,39 @@ export default {
         // tees the body into two independent streams; user stream is unaffected.
         const sampledResponseForAnalytics = shouldSampleEsTook() ? response.clone() : null;
 
+        // Error responses are free (oxjob #863). /check already charged creditCost
+        // before the origin call; if the origin answered 4xx/5xx, give it back the
+        // same way the content path and the 504 path do, and report the refunded
+        // balance in the headers so a client watching X-RateLimit-Remaining sees
+        // it hold steady across a failed request.
+        const actualCost = billableCreditCost(response.status, creditCost);
+        let adjustedRemaining = rateLimitResult.remaining ?? 0;
+        let adjustedOnetimeRemaining = rateLimitResult.onetimeRemaining ?? 0;
+        if (actualCost < creditCost) {
+            try {
+                const refundResult = await limiter.fetch("http://internal/refund", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit: limit, credits: creditCost - actualCost, onetimeBalance: onetimeCreditsBalance })
+                }).then(res => res.json() as Promise<{ remaining: number; onetimeRemaining: number }>);
+                adjustedRemaining = refundResult.remaining;
+                adjustedOnetimeRemaining = refundResult.onetimeRemaining;
+            } catch (error) {
+                console.error("Failed to refund credits for error response:", error);
+            }
+        }
+
         // Return response with rate limit headers
         const newHeaders = new Headers(response.headers);
         // New USD headers
         newHeaders.set("X-RateLimit-Limit-USD", creditsToUsd(limit).toString());
-        newHeaders.set("X-RateLimit-Remaining-USD", creditsToUsd(rateLimitResult.remaining ?? 0).toString());
-        newHeaders.set("X-RateLimit-Prepaid-Remaining-USD", creditsToUsd(rateLimitResult.onetimeRemaining ?? 0).toString());
-        newHeaders.set("X-RateLimit-Cost-USD", creditsToUsd(creditCost).toString());
+        newHeaders.set("X-RateLimit-Remaining-USD", creditsToUsd(adjustedRemaining).toString());
+        newHeaders.set("X-RateLimit-Prepaid-Remaining-USD", creditsToUsd(adjustedOnetimeRemaining).toString());
+        newHeaders.set("X-RateLimit-Cost-USD", creditsToUsd(actualCost).toString());
         // Legacy headers (kept for backward compat during transition)
         newHeaders.set("X-RateLimit-Limit", limit.toString());
-        newHeaders.set("X-RateLimit-Remaining", (rateLimitResult.remaining ?? 0).toString());
-        newHeaders.set("X-RateLimit-Onetime-Remaining", (rateLimitResult.onetimeRemaining ?? 0).toString());
-        newHeaders.set("X-RateLimit-Credits-Used", creditCost.toString());
+        newHeaders.set("X-RateLimit-Remaining", adjustedRemaining.toString());
+        newHeaders.set("X-RateLimit-Onetime-Remaining", adjustedOnetimeRemaining.toString());
+        newHeaders.set("X-RateLimit-Credits-Used", actualCost.toString());
         newHeaders.set("X-RateLimit-Reset", getSecondsUntilMidnightUTC().toString());
 
         // Surface the 1h listing TTL to clients/downstream too, overriding the
@@ -1327,9 +1348,9 @@ export default {
             responseTime: Date.now() - startTime,
             statusCode: response.status,
             rateLimit: limit,
-            rateLimitRemaining: rateLimitResult.remaining ?? 0,
+            rateLimitRemaining: adjustedRemaining,
             endpointType: classification.type,
-            creditCost,
+            creditCost: actualCost,
             trustedUi,
             responseForEsTook: sampledResponseForAnalytics
         });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost } from './endpointClassifier';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
 
@@ -452,5 +452,27 @@ describe('countWideOrTerms (oxjob #876)', () => {
     it('the real 2026-09-14 shape trips the threshold, a 10-topic chunk does not', () => {
         expect(wide(`filter=topics.id:${topics(100)},language:en,topics.id:!${topics(325)}&per-page=200`).count).toBeGreaterThan(WIDE_OR_MAX_TERMS);
         expect(wide(`filter=topics.id:${topics(10)},language:en`).count).toBe(WIDE_OR_MAX_TERMS);
+    });
+});
+
+describe('billableCreditCost (oxjob #863)', () => {
+    it('charges the classified cost on success and redirects', () => {
+        expect(billableCreditCost(200, 10)).toBe(10);
+        expect(billableCreditCost(301, 1)).toBe(1);
+        expect(billableCreditCost(304, 1)).toBe(1);
+    });
+
+    it('charges nothing for any 4xx or 5xx', () => {
+        expect(billableCreditCost(400, 10)).toBe(0);
+        expect(billableCreditCost(403, 1)).toBe(0);
+        expect(billableCreditCost(404, 1)).toBe(0);
+        expect(billableCreditCost(429, 10)).toBe(0);
+        expect(billableCreditCost(500, 100)).toBe(0);
+        expect(billableCreditCost(503, 10)).toBe(0);
+    });
+
+    it('is a no-op for free endpoints', () => {
+        expect(billableCreditCost(200, 0)).toBe(0);
+        expect(billableCreditCost(400, 0)).toBe(0);
     });
 });
