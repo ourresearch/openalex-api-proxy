@@ -1,3 +1,4 @@
+import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
@@ -17,7 +18,8 @@ export interface Env {
     TEXT_API_URL: string;
     SEARCH_API_URL?: string;  // Optional - falls back to OPENALEX_API_URL if not set
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
-    CV_PARSER?: Fetcher;      // Service binding to openalex-cv-parser
+    CV_PARSER?: Fetcher;
+    AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
     // oxjob #338 Phase 5a — UI-provenance token (Turnstile-minted). Both optional:
     // if either is unset the feature is inert (no mint; every request just tags
     // trustedUi=false). It can NEVER block traffic. Set as Worker secrets.
@@ -107,6 +109,13 @@ export default {
                 status: 204,
                 headers: getCorsHeaders()
             });
+        }
+
+        // Author fixes (oxjob #1430): its own app, its own auth (site-wide keys),
+        // no credits. Before the method gate because fixes use PATCH.
+        if (env.AUTHOR_FIXES_URL && isAuthorFixesPath(new URL(req.url).pathname)) {
+            const r = await fetch(await authorFixesRequest(req, env.AUTHOR_FIXES_URL));
+            return addCorsHeaders(new Response(r.body, { status: r.status, headers: r.headers }));
         }
 
         if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "POST") {
@@ -1541,7 +1550,7 @@ async function writebackOnetimeCredits(
 function getCorsHeaders(): Headers {
     const headers = new Headers();
     headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
+    headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type, X-OpenAlex-UI");
     headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, X-RateLimit-Limit-USD, X-RateLimit-Remaining-USD, X-RateLimit-Prepaid-Remaining-USD, X-RateLimit-Cost-USD, X-RateLimit-Cost-Required-USD, Retry-After");
     return headers;
