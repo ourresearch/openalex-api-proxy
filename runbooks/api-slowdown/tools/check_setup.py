@@ -38,15 +38,17 @@ for k, where in [("ES_URL_WALDEN", ".env"), ("ES_URL_MONITORING", ".env"), ("R2_
     else:
         report("FAIL", f"{k} set", "empty", f"add {k}=... to {where}")
 
+works = "works"  # concrete index behind the alias, resolved below when prod ES is reachable
 # 3. production ES: health + the indices the scripts assume + node stats permission
 if ENV.get("ES_URL_WALDEN"):
     try:
         es = es_client(ENV["ES_URL_WALDEN"])
         h = es("/_cluster/health", timeout=30)
         report("PASS", "prod ES reachable", f"status={h['status']} nodes={h['number_of_nodes']} data={h['number_of_data_nodes']}")
-        idx = es("/_cat/indices/works-v*?h=index,docs.count&s=index", timeout=30).strip().splitlines()
-        report("PASS" if idx else "FAIL", "works index present", ", ".join(l.split()[0] for l in idx) or "no works-v* index",
-               "es_live.py / es_replay assume works-v34 — update the index name in the scripts if it was reindexed")
+        names = sorted(es("/_alias/works", timeout=30))
+        report("PASS" if len(names) == 1 else "FAIL", "works alias resolves", f"works -> {names}",
+               "the scripts read the 'works' alias; it must point at exactly one index (a rebuild swap in progress?)")
+        works = names[0] if names else works
         ns = es("/_nodes/stats/indices/search?filter_path=nodes.*.indices.search.query_total", timeout=30)
         report("PASS", "node stats readable", f"{len(ns.get('nodes', {}))} nodes (needed for shard-qps)")
         t = es("/_tasks?actions=indices:data/read/search&detailed=true&group_by=none", timeout=30)
@@ -68,10 +70,10 @@ if ENV.get("ES_URL_MONITORING"):
         report("PASS" if n else "WARN", "slowlog shipping", f"{n} slowlog entries in the last 6h",
                "0 can be a genuinely quiet cluster; if the cluster is busy, filebeat→monitoring shipping is broken")
         r = mon("/.ds-.monitoring-es-8-mb-*/_search", {"size": 0, "query": {"bool": {"filter": [
-            {"term": {"elasticsearch.index.name": "works-v34"}}, {"range": {"@timestamp": {"gte": "now-30m"}}}]}}}, timeout=60)
+            {"term": {"elasticsearch.index.name": works}}, {"range": {"@timestamp": {"gte": "now-30m"}}}]}}}, timeout=60)
         n = r["hits"]["total"]["value"]
-        report("PASS" if n else "FAIL", "metricbeat index stats", f"{n} works-v34 docs in the last 30 min (needed by es_prior_day_compare)",
-               "metricbeat→monitoring shipping stopped, or the index was renamed")
+        report("PASS" if n else "FAIL", "metricbeat index stats", f"{n} {works} docs in the last 30 min (needed by es_prior_day_compare)",
+               "metricbeat→monitoring shipping stopped, or the alias moved to an index metricbeat has not reported yet")
     except SystemExit as e:
         report("FAIL", "monitoring ES reachable", str(e)[:160], "check ES_URL_MONITORING; password was last reset in the Elastic Cloud UI (openalex-prod-monitoring)")
     except Exception as e:

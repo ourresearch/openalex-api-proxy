@@ -1,12 +1,12 @@
-"""Step 2: is this load normal for the hour? works-v34 shard-qps / ms/query / util for a 10-min window
+"""Step 2: is this load normal for the hour? works-index shard-qps / ms/query / util for a 10-min window
 today vs the same window 1, 2 and 7 days ago, from the monitoring cluster's metricbeat docs.
 usage: es_prior_day_compare.py [HH:MM UTC window start, default = 12 min ago]"""
 import datetime, sys
-from _common import monitoring, walden, SEARCH_THREADS
+from _common import monitoring, walden, works_index, SEARCH_THREADS
 
-mon = monitoring(); es = walden()
+mon = monitoring(); es = walden(); WORKS = works_index(es)
 
-def window(start, minutes=10, index="works-v34"):
+def window(start, minutes=10, index=WORKS):
     end = start + datetime.timedelta(minutes=minutes)
     body = {"size": 0, "query": {"bool": {"filter": [{"term": {"elasticsearch.index.name": index}},
             {"range": {"@timestamp": {"gte": start.isoformat(), "lte": end.isoformat()}}}]}},
@@ -27,7 +27,7 @@ if len(sys.argv) > 1:
     hh, mm = map(int, sys.argv[1].split(":")); start = now.replace(hour=hh, minute=mm)
 else:
     start = now - datetime.timedelta(minutes=12)
-print(f"works-v34, 10-min window starting {start.strftime('%H:%M')} UTC")
+print(f"{WORKS}, 10-min window starting {start.strftime('%H:%M')} UTC")
 print(f"{'':16s} {'shard-qps':>10s} {'ms/query':>9s} {'thread-s/s':>11s} {'util':>6s}")
 for label, s in [("today", start), ("yesterday", start - datetime.timedelta(days=1)),
                  ("2 days ago", start - datetime.timedelta(days=2)), ("7 days ago", start - datetime.timedelta(days=7))]:

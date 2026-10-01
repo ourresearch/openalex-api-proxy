@@ -71,6 +71,17 @@ def monitoring():
     return es_client(ENV["ES_URL_MONITORING"])
 
 
+WORKS_ALIAS = "works"  # the API and walden read/write this alias; a reindex swaps the index behind it (oxjob #1456)
+
+
+def works_index(es):
+    """The concrete index behind the works alias (metricbeat docs are keyed by concrete name, not alias)."""
+    names = sorted(es(f"/_alias/{WORKS_ALIAS}", timeout=30))
+    if len(names) != 1:
+        raise SystemExit(f"alias {WORKS_ALIAS!r} resolves to {names}, expected exactly one index")
+    return names[0]
+
+
 def ae_query(sql):
     """Cloudflare Analytics Engine SQL. Counts are sum(_sample_interval); position() needs IN; no quantile()."""
     need("R2_ACCOUNT_ID", "ANALYTICS_READ_ONLY_API_KEY")

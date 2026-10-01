@@ -12,6 +12,6 @@ print(es("/_cat/nodes?v&h=name,node.role,cpu,load_1m,load_5m,heap.percent,ram.pe
 print("SEARCH THREAD POOL (healthy: active well under 49, queue 0):")
 print(es("/_cat/thread_pool/search?v&h=node_name,active,queue,rejected,completed,size&s=active:desc"))
 print("PENDING TASKS:", (es("/_cat/pending_tasks?v") or "").strip() or "(none)")
-print("\nINDICES (docs.deleted / docs.count = tombstone share; works-v34 was 23 % on 08-24, 28 % on 09-14):")
+print("\nINDICES (docs.deleted / docs.count = tombstone share; the works index was 23 % on 08-24, 28 % on 09-14 (works-v34)):")
 print(es("/_cat/indices/works*,authors*,institutions*,sources*,funders*,publishers*,topics*,keywords*?v&h=index,health,pri,rep,docs.count,docs.deleted,store.size,segments.count&s=index"))
 print("MERGES:", es("/_cat/nodes?h=name,merges.current&s=merges.current:desc").split("\n")[0])

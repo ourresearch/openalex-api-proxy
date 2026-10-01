@@ -2,7 +2,7 @@
 Run on a QUIET cluster only — each variant is a real 72-shard query. Edit VARIANTS for the shape at hand.
 usage: es_replay_slowlog_query.py <substring that identifies the shape in the slowlog source> [minutes back]"""
 import copy, json, sys
-from _common import monitoring, walden
+from _common import monitoring, walden, WORKS_ALIAS
 
 needle = sys.argv[1] if len(sys.argv) > 1 else "topics.id.lower"; mins = int(sys.argv[2]) if len(sys.argv) > 2 else 120
 mon = monitoring(); es = walden()
@@ -21,7 +21,7 @@ print("shape keys:", list(q.keys()), "| size", q.get("size"), "| track_total_hit
 def run(label, body, n=2):
     tooks = []; total = None
     for _ in range(n):
-        res = es("/works-v34/_search", body); tooks.append(res["took"]); total = res["hits"]["total"]
+        res = es(f"/{WORKS_ALIAS}/_search", body); tooks.append(res["took"]); total = res["hits"]["total"]
     print(f"{label:55s} took={tooks} ms  total={total}")
 
 def find_should(node):
@@ -45,7 +45,7 @@ if sh:
             b = copy.deepcopy(q); s2 = find_should(b); del s2[n:]; run(f"D. first {n} OR terms", b)
     b = copy.deepcopy(q); s2 = find_should(b); vals = [list(x["term"].values())[0]["value"] for x in s2]; fld = list(s2[0]["term"].keys())[0]
     s2[:] = [{"terms": {fld: vals}}]; run("E. same terms as ONE terms query", b)
-    ids = [h["_id"] for h in es("/works-v34/_search", {"size": len(sh), "_source": False, "query": {"match_all": {}}})["hits"]["hits"]]
+    ids = [h["_id"] for h in es(f"/{WORKS_ALIAS}/_search", {"size": len(sh), "_source": False, "query": {"match_all": {}}})["hits"]["hits"]]
     b = copy.deepcopy(q); s2 = find_should(b); s2[:] = [{"term": {"ids.openalex": {"value": i}}} for i in ids]; run(f"F. control: {len(ids)} OR'd ids.openalex", b)
 run("G. control: plain 1-source list, size 25", {"size": 25, "query": {"bool": {"filter": [{"term": {"is_xpac": {"value": "false"}}},
     {"term": {"primary_location.source.id.lower": {"value": "https://openalex.org/S137773608"}}}]}}, "sort": q.get("sort"), "track_total_hits": 2147483647})
