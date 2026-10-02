@@ -1,6 +1,7 @@
 import { isCacheableCountProbe } from './countProbe';
 import { authorizationToForward } from './forwardAuth';
 import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
+import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
@@ -21,6 +22,7 @@ export interface Env {
     SEARCH_API_URL?: string;  // Optional - falls back to OPENALEX_API_URL if not set
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
     CV_PARSER?: Fetcher;
+    COLLECTIONS_PROXY_KEY?: string; // Worker secret, same value as users-api's (oxjob #1515)
     AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
     // oxjob #338 Phase 5a — UI-provenance token (Turnstile-minted). Both optional:
     // if either is unset the feature is inert (no mint; every request just tags
@@ -117,6 +119,13 @@ export default {
         // no credits. Before the method gate because fixes use PATCH.
         if (env.AUTHOR_FIXES_URL && isAuthorFixesPath(new URL(req.url).pathname)) {
             const r = await fetch(await authorFixesRequest(req, env.AUTHOR_FIXES_URL));
+            return addCorsHeaders(new Response(r.body, { status: r.status, headers: r.headers }));
+        }
+
+        // Collections (oxjob #1515): users-api serves them, with its own auth and access
+        // checks, no credits. Before the method gate because they use PATCH and DELETE.
+        if (isCollectionsPath(new URL(req.url).pathname)) {
+            const r = await fetch(await collectionsRequest(req, USERS_API_URL, env.COLLECTIONS_PROXY_KEY));
             return addCorsHeaders(new Response(r.body, { status: r.status, headers: r.headers }));
         }
 
