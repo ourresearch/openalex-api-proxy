@@ -1,3 +1,4 @@
+import { isCacheableCountProbe } from './countProbe';
 import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
@@ -1173,14 +1174,12 @@ export default {
         // vary a cached body — that also covers 100% of the observed load, which is
         // entirely anonymous. Only mailto is dropped from the cache key; filter, corpus
         // and data-version all stay, so distinct probes never collide.
-        const probePerPage = url.searchParams.get('per-page') ?? url.searchParams.get('per_page');
-        const isCountProbe = req.method === "GET"
-            && probePerPage === '1'
-            && url.searchParams.get('select') === 'id'
-            && !url.searchParams.has('cursor')
-            && !url.searchParams.has('page')
-            && !apiKey
-            && !req.headers.get("Authorization");
+        //
+        // Probes that name a collection (`col_…`) are never cached: their count depends
+        // on the collection's members and on whether it's shared by link (oxjob #646).
+        const isCountProbe = isCacheableCountProbe(
+            url, req.method, !!apiKey, !!req.headers.get("Authorization"),
+        );
 
         let countProbeCacheKey = '';
         if (isCountProbe) {
