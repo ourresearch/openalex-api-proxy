@@ -1,4 +1,5 @@
 import { isCacheableCountProbe } from './countProbe';
+import { authorizationToForward } from './forwardAuth';
 import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
@@ -1092,12 +1093,14 @@ export default {
             proxyHeaders.set("Content-Type", req.headers.get("Content-Type") || "application/json");
         }
 
-        // Forward Authorization so elastic-api can relay it to users-api for
-        // private-label resolution (oxjob #228 QA-040). Proxy has already
-        // validated the api_key above; users-api re-validates by lookup.
-        const incomingAuth = req.headers.get("Authorization");
-        if (incomingAuth) {
-            proxyHeaders.set("Authorization", incomingAuth);
+        // Forward the caller's key so elastic-api can relay it to users-api for
+        // collection resolution (oxjob #228 QA-040), whether it came as a Bearer
+        // header or as ?api_key= (#283, oxjob #1505). Proxy has already validated
+        // the key above; users-api re-validates by lookup.
+        const forwardedAuth = authorizationToForward(
+            req.headers.get("Authorization"), apiKey, hasValidApiKey);
+        if (forwardedAuth) {
+            proxyHeaders.set("Authorization", forwardedAuth);
         }
 
         const proxyReq = new Request(openalexUrl.toString(), {
