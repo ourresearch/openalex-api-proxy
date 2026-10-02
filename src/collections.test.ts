@@ -25,6 +25,11 @@ describe('collections routing', () => {
         expect(out.headers.get('Cookie')).toBeNull();
         expect(await out.text()).toBe('{"member_ids":["W1"]}');
     });
+    it('passes the admin impersonation header through', async () => {
+        const req = new Request('https://api.openalex.org/collections', { headers: { Authorization: 'Bearer k', 'X-Impersonate-User': 'user-1' } });
+        const out = await collectionsRequest(req, USERS_API_URL);
+        expect(out.headers.get('X-Impersonate-User')).toBe('user-1');
+    });
     it('moves ?api_key= into a Bearer header and out of the URL', async () => {
         const req = new Request('https://api.openalex.org/collections?api_key=sekret&per_page=5');
         const out = await collectionsRequest(req, USERS_API_URL);

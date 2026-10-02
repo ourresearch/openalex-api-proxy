@@ -33,7 +33,9 @@ export async function collectionsRequest(req: Request, originBase: string, proxy
     const target = new URL("/api" + url.pathname + url.search, originBase);
 
     const headers = new Headers();
-    for (const h of ["Content-Type", "Accept"]) {
+    // X-Impersonate-User: the website's admin "act as this user"; users-api honors it
+    // only when the key belongs to an admin.
+    for (const h of ["Content-Type", "Accept", "X-Impersonate-User"]) {
         const v = req.headers.get(h);
         if (v) headers.set(h, v);
     }
