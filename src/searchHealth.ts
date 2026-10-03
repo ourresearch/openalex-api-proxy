@@ -721,6 +721,16 @@ export async function checkAnonSearchBudget(
     }
 }
 
+// The level this isolate last saw, without a DO call (it never blocks a request).
+// FORCE_HEALTH_STATE wins; a note older than FAIL_CLOSED_MAX_STALENESS_MS reads as
+// GREEN. Used to drop rerank=true while the cluster is struggling (oxjob #1521).
+export function cachedHealthLevel(env: { FORCE_HEALTH_STATE?: string }): HealthLevel {
+    const forced = parseForceState(env.FORCE_HEALTH_STATE);
+    if (forced !== null) return forced;
+    if (Date.now() - lastKnownState.at >= FAIL_CLOSED_MAX_STALENESS_MS) return 0;
+    return lastKnownState.level;
+}
+
 async function refreshStateInBackground(env: { SEARCH_HEALTH: DurableObjectNamespace }): Promise<void> {
     try {
         const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));

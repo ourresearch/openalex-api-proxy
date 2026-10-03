@@ -476,3 +476,26 @@ describe('billableCreditCost (oxjob #863)', () => {
         expect(billableCreditCost(400, 0)).toBe(0);
     });
 });
+
+describe('rerank=true (oxjob #1521)', () => {
+    it('prices a reranked search at 20 credits', () => {
+        const r = classifyEndpoint('/works', new URLSearchParams('search.title_abstract_keywords=remote+work&rerank=true'));
+        expect(r.type).toBe('search');
+        expect(r.creditCost).toBe(20);
+    });
+
+    it('keeps a plain search at 10 credits, and rerank=false is plain', () => {
+        expect(classifyEndpoint('/works', new URLSearchParams('search=remote+work')).creditCost).toBe(10);
+        expect(classifyEndpoint('/works', new URLSearchParams('search=remote+work&rerank=false')).creditCost).toBe(10);
+    });
+
+    it('counts the title_abstract_keywords.search filter as a search', () => {
+        const r = classifyEndpoint('/works', new URLSearchParams('filter=title_abstract_keywords.search:coral+bleaching'));
+        expect(r.type).toBe('search');
+        expect(r.creditCost).toBe(10);
+    });
+
+    it('does not charge rerank on a non-search list', () => {
+        expect(classifyEndpoint('/works', new URLSearchParams('filter=publication_year:2020&rerank=true')).creditCost).toBe(1);
+    });
+});

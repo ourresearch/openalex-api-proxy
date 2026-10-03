@@ -29,7 +29,8 @@ const SEARCH_FILTERS = [
     'raw_affiliation_strings.search',
     'raw_author_name.search',
     'title.search',
-    'title_and_abstract.search'
+    'title_and_abstract.search',
+    'title_abstract_keywords.search'
 ];
 
 /**
@@ -147,9 +148,10 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
             return { type: 'semantic', creditCost: 10 };
         }
 
-        // Check if request has search params → 10 credits
+        // Check if request has search params → 10 credits; rerank=true (Jev reorders
+        // the top 100, oxjob #1521) doubles it to 20.
         if (searchParams && hasSearchParams(searchParams)) {
-            return { type: 'search', creditCost: 10 };
+            return { type: 'search', creditCost: isRerank(searchParams) ? 20 : 10 };
         }
 
         // List: /entity or /entity?...
@@ -202,6 +204,11 @@ function hasSemanticSearch(searchParams: URLSearchParams): boolean {
  * - Any search.* dot notation param (except search.semantic, which is 10 credits)
  * - Search-type filters in filter= (e.g., title.search:, abstract.search:)
  */
+/** rerank=true: the origin asks Jev to reorder the top 100 of a works search (oxjob #1521). */
+export function isRerank(searchParams: URLSearchParams): boolean {
+    return searchParams.get('rerank') === 'true';
+}
+
 function hasSearchParams(searchParams: URLSearchParams): boolean {
     // Check for search or search.* params (excluding search.semantic)
     for (const key of searchParams.keys()) {

@@ -238,3 +238,12 @@ describe('v3.6 RED dwell cap', () => {
         expect(effectiveDwellMs(3)).toBe(30 * 60_000);     // default level = ORANGE
     });
 });
+
+describe('cachedHealthLevel (oxjob #1521 rerank gate)', () => {
+    it('honors FORCE_HEALTH_STATE and reads GREEN with no fresh note', async () => {
+        const { cachedHealthLevel } = await import('./searchHealth');
+        expect(cachedHealthLevel({ FORCE_HEALTH_STATE: 'YELLOW' })).toBe(1);
+        expect(cachedHealthLevel({ FORCE_HEALTH_STATE: 'RED' })).toBe(3);
+        expect(cachedHealthLevel({})).toBe(0);
+    });
+});

@@ -5,12 +5,12 @@ import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collecti
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, EndpointClassification } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, EndpointClassification, isRerank } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
-import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
+import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 
 export interface Env {
     HYPERDRIVE: Hyperdrive;
@@ -552,11 +552,18 @@ export default {
             return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt);
         }
 
+        // rerank=true (oxjob #1521): while the search-health ladder is at YELLOW or
+        // above, drop it, so rerank never adds load to a struggling cluster. The
+        // search runs in its normal order (meta.reranked is absent) at the normal price.
+        if (isRerank(url.searchParams) && cachedHealthLevel(env) >= 1) {
+            url.searchParams.delete('rerank');
+        }
+
         // Classify endpoint and determine credit cost
         const classification = classifyEndpoint(url.pathname, url.searchParams);
-        // Grandfathered users get search at 1 credit instead of 10
+        // Grandfathered users get search at 1 credit instead of 10 (2 instead of 20 with rerank)
         const creditCost = (isGrandfathered && classification.type === 'search')
-            ? 1
+            ? (isRerank(url.searchParams) ? 2 : 1)
             : classification.creditCost;
 
         // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
@@ -1626,7 +1633,8 @@ function getTargetApiUrl(url: URL, env: Env): string {
                         'raw_affiliation_strings.search',
                         'raw_author_name.search',
                         'title.search',
-                        'title_and_abstract.search'
+                        'title_and_abstract.search',
+                        'title_abstract_keywords.search'
                     ];
                     const hasSearchFilter = filterParams.some(fp =>
                         SEARCH_FILTERS.some(f => fp.includes(f))
@@ -1775,6 +1783,7 @@ async function handleRateLimitEndpoint(
     const dailyRemaining = statusResult.daily?.remaining ?? statusResult.remaining;
     const onetimeRemaining = statusResult.onetime?.remaining ?? 0;
     const searchCreditCost = isGrandfathered ? 1 : 10;
+    const rerankSearchCreditCost = searchCreditCost * 2;  // rerank=true, oxjob #1521
 
     return json(200, {
         api_key: maskApiKey(apiKey),
@@ -1793,6 +1802,7 @@ async function handleRateLimitEndpoint(
                 singleton: 0,
                 list: creditsToUsd(1),
                 search: creditsToUsd(searchCreditCost),
+                search_rerank: creditsToUsd(rerankSearchCreditCost),
                 content: creditsToUsd(100),
                 semantic: creditsToUsd(10),
                 text: creditsToUsd(100)
@@ -1808,6 +1818,7 @@ async function handleRateLimitEndpoint(
                 singleton: 0,
                 list: 1,
                 search: searchCreditCost,
+                search_rerank: rerankSearchCreditCost,
                 content: 100,
                 semantic: 10,
                 text: 100
