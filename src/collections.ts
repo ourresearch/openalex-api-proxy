@@ -1,14 +1,15 @@
-// Collections (oxjob #1515): api.openalex.org/collections[/...] is served by users-api,
-// under its /api prefix, the way /authors/{id}/fixes is served by the author-fixes app
-// (authorFixes.ts). They are a user's own lists, not entity reads: users-api checks the
-// caller's key and each collection's access itself, and the proxy charges no credits.
+// Collections (oxjob #1515) and saved searches (#1509): api.openalex.org/collections[/...]
+// and /saved-searches[/...] are served by users-api, under its /api prefix, the way
+// /authors/{id}/fixes is served by the author-fixes app (authorFixes.ts). They are a
+// user's own lists and searches, not entity reads: users-api checks the caller's key and
+// each collection's access itself, and the proxy charges no credits.
 //
 // users-api reads only `Authorization: Bearer`, so a key sent as `?api_key=` (or the
 // api_key header) is moved into that header and dropped from the URL. users-api limits
 // logged-out reads per caller IP; from here it would see Cloudflare's egress IP, so the
 // proxy names the caller's IP in a header users-api trusts only with the shared secret.
 export const USERS_API_URL = "https://user.openalex.org";
-export const COLLECTIONS_PATH = /^\/collections(?:\/.*)?$/;
+export const COLLECTIONS_PATH = /^\/(?:collections|saved-searches)(?:\/.*)?$/;
 export const PROXY_KEY_HEADER = "X-Collection-Proxy-Key";
 export const CLIENT_IP_HEADER = "X-Collection-Client-IP";
 

@@ -4,12 +4,13 @@ import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collecti
 describe('collections routing', () => {
     it('matches the collections resource and everything under it', () => {
         for (const p of ['/collections', '/collections/', '/collections/col_abc', '/collections/col_abc/members',
-                         '/collections/col_abc/members/W1', '/collections/col_abc/members/https://openalex.org/W1']) {
+                         '/collections/col_abc/members/W1', '/collections/col_abc/members/https://openalex.org/W1',
+                         '/saved-searches', '/saved-searches/abc123']) {
             expect(isCollectionsPath(p)).toBe(true);
         }
     });
     it('leaves everything else alone', () => {
-        for (const p of ['/works', '/collectionsx', '/works/collections', '/', '/me/collections']) {
+        for (const p of ['/works', '/collectionsx', '/works/collections', '/', '/me/collections', '/me/saved-searches', '/saved-searchesx']) {
             expect(isCollectionsPath(p)).toBe(false);
         }
     });
