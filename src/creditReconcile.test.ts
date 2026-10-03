@@ -192,6 +192,15 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
         expect(originRequests[0].headers.get('X-Credits-Grandfathered')).toBeNull();
     });
 
+    it('never forwards a client-sent cost header (they would be a discount)', async () => {
+        const { originRequests } = await run(OQL, { status: 200 }, {
+            headers: { 'X-Credits-Grandfathered': '1', 'X-Credits-Remaining': '99999999', 'X-Cost-USD': '1' },
+        });
+        expect(originRequests[0].headers.get('X-Credits-Grandfathered')).toBeNull();
+        expect(originRequests[0].headers.get('X-Credits-Remaining')).toBe('999');
+        expect(originRequests[0].headers.get('X-Cost-USD')).toBe('0.0001');
+    });
+
     it('sends X-Credits-Remaining on a POST to the OQL door too', async () => {
         const { originRequests } = await run('/', { status: 200 }, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oql: 'works' }),
