@@ -514,3 +514,23 @@ describe('rerank=true (oxjob #1521)', () => {
         expect(r.creditCost + rerankCredits(r.type, true)).toBe(11);
     });
 });
+
+describe('/query is free (oxjob #1533)', () => {
+    it.each([
+        '/query',
+        '/query/oql/works%20where%20year%20%3E%20(2020)',
+        '/query/oqo/%7B%7D',
+        '/query/oxurl/works%3Ffilter%3Dpublication_year%3A2020',
+        '/Query/OQL/works',
+    ])('%s costs 0 credits', (path) => {
+        expect(classifyEndpoint(path, new URLSearchParams()).creditCost).toBe(0);
+    });
+
+    it('stays free with a search in the query it checks', () => {
+        expect(classifyEndpoint('/query', new URLSearchParams('oql=works+where+title+has+(kelp)')).creditCost).toBe(0);
+    });
+
+    it('leaves the OQL door on the root at list price', () => {
+        expect(classifyEndpoint('/', new URLSearchParams('oql=works')).creditCost).toBe(1);
+    });
+});

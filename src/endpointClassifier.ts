@@ -167,6 +167,13 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
         return { type: 'list', creditCost: 0 };
     }
 
+    // The translate resource and its free check (/query, /query/oql/<q>, /query/oqo/<q>,
+    // /query/oxurl/<q>): it parses, validates and prices a query without running it, so
+    // it's free (Jason, 2026-10-03, #1512 SYNTAX.md Decided; oxjob #1533).
+    if (segments[0] === 'query') {
+        return { type: 'list', creditCost: 0 };
+    }
+
     // Default: treat as list (safe default)
     return { type: 'list', creditCost: 1 };
 }
