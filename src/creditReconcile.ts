@@ -29,6 +29,10 @@ export function actualCreditCost(status: number, charged: number, originCost: st
  *  that prices OQL like the URL API can price their searches the same way. */
 export const GRANDFATHERED_HEADER = "X-Credits-Grandfathered";
 
+/** Sent as "1" when the request came from the openalex.org website (UI token or Origin/Referer), so the
+ *  origin can price a website facet (a group by on a search) at 1 credit instead of 10 (Jason, 2026-10-03). */
+export const WEBSITE_HEADER = "X-Credits-Website";
+
 export function creditsRemainingForOrigin(remaining?: number, onetimeRemaining?: number): number {
     return Math.max(0, remaining ?? 0) + Math.max(0, onetimeRemaining ?? 0);
 }

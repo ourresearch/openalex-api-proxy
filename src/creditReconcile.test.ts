@@ -201,6 +201,25 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
         expect(originRequests[0].headers.get('X-Cost-USD')).toBe('0.0001');
     });
 
+    const FACET = '/works?search=coral&group_by=publication_year&per_page=200';
+
+    it('prices a website facet at 1 credit and tells the origin it came from the website', async () => {
+        const { res, originRequests } = await run(FACET, { status: 200 }, { headers: { Origin: 'https://openalex.org' } });
+        expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('1');
+        expect(originRequests[0].headers.get('X-Credits-Website')).toBe('1');
+    });
+
+    it('prices the same group_by from anywhere else as the search (10)', async () => {
+        const { res, originRequests } = await run(FACET, { status: 200 }, { headers: { Origin: 'https://example.com' } });
+        expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('10');
+        expect(originRequests[0].headers.get('X-Credits-Website')).toBeNull();
+    });
+
+    it('never forwards a client-sent X-Credits-Website', async () => {
+        const { originRequests } = await run(OQL, { status: 200 }, { headers: { 'X-Credits-Website': '1' } });
+        expect(originRequests[0].headers.get('X-Credits-Website')).toBeNull();
+    });
+
     it('sends X-Credits-Remaining on a POST to the OQL door too', async () => {
         const { originRequests } = await run('/', { status: 200 }, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oql: 'works' }),

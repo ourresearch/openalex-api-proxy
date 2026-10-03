@@ -98,7 +98,11 @@ export function countWideOrTerms(searchParams?: URLSearchParams): { field: strin
     return worst;
 }
 
-export function classifyEndpoint(pathname: string, searchParams?: URLSearchParams): EndpointClassification {
+export function classifyEndpoint(
+    pathname: string,
+    searchParams?: URLSearchParams,
+    opts: { websiteFacet?: boolean } = {},
+): EndpointClassification {
     const normalized = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
     const segments = normalized.split('/');
 
@@ -130,9 +134,16 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
             return { type: 'singleton', creditCost: 0 };
         }
 
-        // group_by requests are capped at 1 credit (list pricing) regardless of
-        // other params, to keep GUI facet calls affordable
+        // A group_by costs what its query costs: 1 on a list, 10 on a search. The
+        // website's facets (a group_by on the user's search, five a page) are the one
+        // exception at list price, so browsing stays affordable: "cheap or free, but
+        // ONLY in this facet context" (Jason, 2026-10-03, oxjob #1533). Until then any
+        // group_by was 1 for every caller, which priced a search's counts at a tenth
+        // of the search.
+        // Decided here, before the free autocomplete shape, so a group_by can't ride it.
         if (searchParams && (searchParams.has('group_by') || searchParams.has('group-by'))) {
+            if (hasSemanticSearch(searchParams) && !opts.websiteFacet) return { type: 'semantic', creditCost: 10 };
+            if (hasSearchParams(searchParams) && !opts.websiteFacet) return { type: 'search', creditCost: 10 };
             return { type: 'list', creditCost: 1 };
         }
 

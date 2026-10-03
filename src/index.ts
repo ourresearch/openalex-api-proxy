@@ -4,7 +4,7 @@ import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER } from "./creditReconcile";
+import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER } from "./creditReconcile";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
@@ -576,19 +576,13 @@ export default {
             rerankAsked = false;
         }
 
-        // Classify endpoint and determine credit cost
-        const classification = classifyEndpoint(url.pathname, url.searchParams);
-        // Grandfathered users get search at 1 credit instead of 10; rerank adds RERANK_CREDITS for everyone
-        const creditCost = ((isGrandfathered && classification.type === 'search') ? 1 : classification.creditCost)
-            + rerankCredits(classification.type, rerankAsked);
-
-        // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
-        // comment at the top of the file and searchHealth.ts).
-        // GUI carve-out: trustedUi (HMAC UI-provenance token) is the unspoofable
-        // signal, but when the UI-token mint hasn't landed the GUI's keyless search
-        // is untrusted too — that broke the frontend on 2026-07-01. So ALSO honor the
-        // browser Origin/Referer: openalex.org fetches always carry it on the request
-        // itself (the CORS preflight is an OPTIONS, already short-circuited above).
+        // Did the request come from the openalex.org website? trustedUi (HMAC
+        // UI-provenance token) is the unspoofable signal, but when the UI-token mint
+        // hasn't landed the GUI's keyless search is untrusted too — that broke the
+        // frontend on 2026-07-01. So ALSO honor the browser Origin/Referer:
+        // openalex.org fetches always carry it on the request itself (the CORS
+        // preflight is an OPTIONS, already short-circuited above). Used by the
+        // anon-search ladder carve-out and the website-facet price (oxjob #1533).
         const guiOrigin = ((): boolean => {
             for (const h of [req.headers.get("Origin"), req.headers.get("Referer")]) {
                 if (!h) continue;
@@ -599,6 +593,17 @@ export default {
             }
             return false;
         })();
+        const fromWebsite = trustedUi || guiOrigin;
+
+        // Classify endpoint and determine credit cost
+        const classification = classifyEndpoint(url.pathname, url.searchParams, { websiteFacet: fromWebsite });
+        // Grandfathered users get search at 1 credit instead of 10; rerank adds RERANK_CREDITS for everyone
+        const creditCost = ((isGrandfathered && classification.type === 'search') ? 1 : classification.creditCost)
+            + rerankCredits(classification.type, rerankAsked);
+
+        // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
+        // comment at the top of the file and searchHealth.ts). Website traffic is
+        // carved out (fromWebsite, above).
         // Scope: /works search only — the recurring saturation driver. Search on
         // other entities (/authors, /sources, …) is not gated by the ladder.
         // Runs BEFORE the credits DO, so rejected requests are edge-cheap and
@@ -1127,6 +1132,7 @@ export default {
             [CREDITS_REMAINING_HEADER]: creditsRemainingForOrigin(rateLimitResult.remaining, rateLimitResult.onetimeRemaining).toString()
         });
         if (isGrandfathered) proxyHeaders.set(GRANDFATHERED_HEADER, "1");
+        if (fromWebsite) proxyHeaders.set(WEBSITE_HEADER, "1");
 
         // Only add Content-Type for POST requests
         if (req.method === "POST") {

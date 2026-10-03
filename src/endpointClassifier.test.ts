@@ -233,26 +233,36 @@ describe('endpointClassifier', () => {
         });
     });
 
-    describe('group_by endpoints (1 credit override)', () => {
-        it('classifies search + group_by as list (1 credit)', () => {
+    describe('group_by endpoints (oxjob #1533: 1 credit only on a list or as a website facet)', () => {
+        it('prices search + group_by as the search (10 credits)', () => {
             const params = new URLSearchParams('search=frogs&group_by=type');
             const result = classifyEndpoint('/works', params);
+            expect(result.type).toBe('search');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('prices a search filter + group-by (hyphenated) as the search', () => {
+            const params = new URLSearchParams('filter=title.search:frogs&group-by=type');
+            expect(classifyEndpoint('/works', params).creditCost).toBe(10);
+        });
+
+        it('prices semantic search + group_by as semantic (10 credits)', () => {
+            const result = classifyEndpoint('/works', new URLSearchParams('search.semantic=frogs&group_by=type'));
+            expect(result.type).toBe('semantic');
+            expect(result.creditCost).toBe(10);
+        });
+
+        it('keeps a website facet (group_by on a search) at 1 credit', () => {
+            const params = new URLSearchParams('search=frogs&group_by=type&per_page=200');
+            const result = classifyEndpoint('/works', params, { websiteFacet: true });
             expect(result.type).toBe('list');
             expect(result.creditCost).toBe(1);
         });
 
-        it('classifies search + group-by (hyphenated) as list (1 credit)', () => {
-            const params = new URLSearchParams('search=frogs&group-by=type');
-            const result = classifyEndpoint('/works', params);
-            expect(result.type).toBe('list');
-            expect(result.creditCost).toBe(1);
-        });
-
-        it('classifies group_by without search as list (1 credit)', () => {
+        it('classifies group_by without search as list (1 credit), website or not', () => {
             const params = new URLSearchParams('group_by=type');
-            const result = classifyEndpoint('/works', params);
-            expect(result.type).toBe('list');
-            expect(result.creditCost).toBe(1);
+            expect(classifyEndpoint('/works', params).creditCost).toBe(1);
+            expect(classifyEndpoint('/works', params, { websiteFacet: true }).creditCost).toBe(1);
         });
     });
 
@@ -299,11 +309,10 @@ describe('endpointClassifier', () => {
             expect(result.creditCost).toBe(10);
         });
 
-        it('group_by still overrides even with autocomplete pattern', () => {
+        it('a group_by never rides the free autocomplete shape', () => {
             const params = new URLSearchParams('search=frogs&per_page=10&select=id,display_name,works_count&group_by=type');
-            const result = classifyEndpoint('/works', params);
-            expect(result.type).toBe('list');
-            expect(result.creditCost).toBe(1);
+            expect(classifyEndpoint('/works', params).creditCost).toBe(10);
+            expect(classifyEndpoint('/works', params, { websiteFacet: true }).creditCost).toBe(1);
         });
     });
 
