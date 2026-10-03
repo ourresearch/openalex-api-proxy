@@ -1,3 +1,5 @@
+import { splitCharge } from "./creditReconcile";
+
 interface TokenBucket {
     tokens: number;
     lastRefill: number;
@@ -103,6 +105,20 @@ export class RateLimiter implements DurableObject {
         if (needsReschedule) {
             await this.state.storage.setAlarm(Date.now() + PERSIST_INTERVAL_MS);
         }
+    }
+
+    // Settle writes (/refund, /charge) persist at once: a DO eviction before the next
+    // /check would otherwise lose them, and prepaid credits are real money.
+    private async persistDailyNow(): Promise<void> {
+        await this.state.storage.put('counter', { count: this.dailyCounter!.count, date: this.dailyCounter!.date });
+        this.dailyCounter!.dirty = false;
+        this.dailyCounter!.lastPersisted = Date.now();
+    }
+
+    private async persistOnetimeNow(): Promise<void> {
+        await this.state.storage.put('onetime', { consumed: this.onetimeCounter!.consumed });
+        this.onetimeCounter!.dirty = false;
+        this.onetimeCounter!.lastPersisted = Date.now();
     }
 
     async fetch(request: Request): Promise<Response> {
@@ -260,10 +276,7 @@ export class RateLimiter implements DurableObject {
                 const dailyRefund = Math.min(refundRemaining, this.dailyCounter!.count);
                 if (dailyRefund > 0) {
                     this.dailyCounter!.count -= dailyRefund;
-                    // Persist immediately — DO eviction before next /check would lose the refund
-                    await this.state.storage.put('counter', { count: this.dailyCounter!.count, date: this.dailyCounter!.date });
-                    this.dailyCounter!.dirty = false;
-                    this.dailyCounter!.lastPersisted = Date.now();
+                    await this.persistDailyNow();
                     refundRemaining -= dailyRefund;
                 }
             }
@@ -273,10 +286,7 @@ export class RateLimiter implements DurableObject {
                 const onetimeRefund = Math.min(refundRemaining, this.onetimeCounter.consumed);
                 if (onetimeRefund > 0) {
                     this.onetimeCounter.consumed -= onetimeRefund;
-                    // Persist immediately — same reason as daily
-                    await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
-                    this.onetimeCounter.dirty = false;
-                    this.onetimeCounter.lastPersisted = Date.now();
+                    await this.persistOnetimeNow();
                 }
             }
 
@@ -285,6 +295,29 @@ export class RateLimiter implements DurableObject {
                 refunded: credits,
                 remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
                 onetimeRemaining
+            });
+        }
+
+        // Charge endpoint - the mirror of /refund (oxjob #1533): a query priced from its plan
+        // can cost more than /check charged up front. Daily pool first, then one-time; no
+        // limit test, since the origin has already answered (see splitCharge).
+        if (url.pathname === '/charge') {
+            const onetimeAvailable = Math.max(0, onetimeBalance - this.onetimeCounter!.consumed);
+            const split = splitCharge(credits, dailyLimit - this.dailyCounter!.count, onetimeAvailable);
+
+            if (split.daily > 0) {
+                this.dailyCounter!.count += split.daily;
+                await this.persistDailyNow();
+            }
+            if (split.onetime > 0) {
+                this.onetimeCounter!.consumed += split.onetime;
+                await this.persistOnetimeNow();
+            }
+
+            return Response.json({
+                charged: credits,
+                remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
+                onetimeRemaining: Math.max(0, onetimeBalance - this.onetimeCounter!.consumed)
             });
         }
 
