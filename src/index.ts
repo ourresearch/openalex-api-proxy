@@ -4,7 +4,7 @@ import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER } from "./creditReconcile";
+import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER } from "./creditReconcile";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
@@ -1126,6 +1126,7 @@ export default {
             // query from its plan can refuse one that won't fit before running it (oxjob #1533)
             [CREDITS_REMAINING_HEADER]: creditsRemainingForOrigin(rateLimitResult.remaining, rateLimitResult.onetimeRemaining).toString()
         });
+        if (isGrandfathered) proxyHeaders.set(GRANDFATHERED_HEADER, "1");
 
         // Only add Content-Type for POST requests
         if (req.method === "POST") {

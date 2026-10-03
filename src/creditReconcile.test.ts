@@ -188,6 +188,8 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
         // anonymous: 1,000 a day (no key, no prepaid), 1 taken up front
         expect(originRequests[0].headers.get('X-Credits-Remaining')).toBe('999');
         expect(originRequests[0].headers.get('X-Cost-USD')).toBe('0.0001');
+        // only a grandfathered key is flagged; anonymous callers never are
+        expect(originRequests[0].headers.get('X-Credits-Grandfathered')).toBeNull();
     });
 
     it('sends X-Credits-Remaining on a POST to the OQL door too', async () => {

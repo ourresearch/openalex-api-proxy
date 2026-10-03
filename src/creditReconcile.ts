@@ -25,6 +25,10 @@ export function actualCreditCost(status: number, charged: number, originCost: st
     return billableCreditCost(status, price);
 }
 
+/** Sent as "1" for a grandfathered key, whose searches cost 1 credit instead of 10, so an origin
+ *  that prices OQL like the URL API can price their searches the same way. */
+export const GRANDFATHERED_HEADER = "X-Credits-Grandfathered";
+
 export function creditsRemainingForOrigin(remaining?: number, onetimeRemaining?: number): number {
     return Math.max(0, remaining ?? 0) + Math.max(0, onetimeRemaining ?? 0);
 }
