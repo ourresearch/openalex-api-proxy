@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank } from './endpointClassifier';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
 
@@ -478,10 +478,24 @@ describe('billableCreditCost (oxjob #863)', () => {
 });
 
 describe('rerank=true (oxjob #1521)', () => {
-    it('prices a reranked search at 20 credits', () => {
+    it('prices a reranked search at 10 + 10 credits', () => {
         const r = classifyEndpoint('/works', new URLSearchParams('search.title_abstract_keywords=remote+work&rerank=true'));
         expect(r.type).toBe('search');
-        expect(r.creditCost).toBe(20);
+        expect(r.creditCost + rerankCredits(r.type, true)).toBe(20);
+    });
+
+    it('adds 10 credits to an OQL request on the root, and nothing to a free one', () => {
+        const root = classifyEndpoint('/', new URLSearchParams('oql=works+where+title%2Fabstract%2Fkeywords+has+(kelp)'));
+        expect(root.creditCost + rerankCredits(root.type, true)).toBe(11);
+        expect(rerankCredits('singleton', true)).toBe(0);
+        expect(rerankCredits('search', false)).toBe(0);
+    });
+
+    it('reads rerank from a POST body', () => {
+        expect(bodyAsksRerank({ oql: 'works', rerank: true })).toBe(true);
+        expect(bodyAsksRerank({ oql: 'works', rerank: 'true' })).toBe(true);
+        expect(bodyAsksRerank({ oql: 'works' })).toBe(false);
+        expect(bodyAsksRerank(null)).toBe(false);
     });
 
     it('keeps a plain search at 10 credits, and rerank=false is plain', () => {
@@ -495,7 +509,8 @@ describe('rerank=true (oxjob #1521)', () => {
         expect(r.creditCost).toBe(10);
     });
 
-    it('does not charge rerank on a non-search list', () => {
-        expect(classifyEndpoint('/works', new URLSearchParams('filter=publication_year:2020&rerank=true')).creditCost).toBe(1);
+    it('prices a list request with rerank at 1 + 10 (the origin 400s it, and errors are refunded)', () => {
+        const r = classifyEndpoint('/works', new URLSearchParams('filter=publication_year:2020&rerank=true'));
+        expect(r.creditCost + rerankCredits(r.type, true)).toBe(11);
     });
 });

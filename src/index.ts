@@ -5,7 +5,7 @@ import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collecti
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, EndpointClassification, isRerank } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
@@ -552,19 +552,34 @@ export default {
             return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt);
         }
 
-        // rerank=true (oxjob #1521): while the search-health ladder is at YELLOW or
-        // above, drop it, so rerank never adds load to a struggling cluster. The
-        // search runs in its normal order (meta.reranked is absent) at the normal price.
-        if (isRerank(url.searchParams) && cachedHealthLevel(env) >= 1) {
+        // rerank (oxjob #1521): `rerank=true` in the URL, or `"rerank": true` in a POST body (the
+        // OQL door). It adds RERANK_CREDITS to the request's price. While the search-health ladder
+        // is at YELLOW or above it is dropped instead, so rerank never adds load to a struggling
+        // cluster; the request then runs in its normal order at the normal price.
+        let rerankAsked = isRerank(url.searchParams);
+        let rewrittenPostBody: string | null = null;
+        if (req.method === "POST" && !rerankAsked) {
+            try {
+                const parsed = JSON.parse(await req.clone().text());
+                if (bodyAsksRerank(parsed)) {
+                    rerankAsked = true;
+                    if (cachedHealthLevel(env) >= 1) {
+                        delete parsed.rerank;
+                        rewrittenPostBody = JSON.stringify(parsed);
+                    }
+                }
+            } catch { /* not JSON: nothing to price */ }
+        }
+        if (rerankAsked && cachedHealthLevel(env) >= 1) {
             url.searchParams.delete('rerank');
+            rerankAsked = false;
         }
 
         // Classify endpoint and determine credit cost
         const classification = classifyEndpoint(url.pathname, url.searchParams);
-        // Grandfathered users get search at 1 credit instead of 10 (2 instead of 20 with rerank)
-        const creditCost = (isGrandfathered && classification.type === 'search')
-            ? (isRerank(url.searchParams) ? 2 : 1)
-            : classification.creditCost;
+        // Grandfathered users get search at 1 credit instead of 10; rerank adds RERANK_CREDITS for everyone
+        const creditCost = ((isGrandfathered && classification.type === 'search') ? 1 : classification.creditCost)
+            + rerankCredits(classification.type, rerankAsked);
 
         // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
         // comment at the top of the file and searchHealth.ts).
@@ -1126,7 +1141,7 @@ export default {
         const proxyReq = new Request(openalexUrl.toString(), {
             method: req.method,
             headers: proxyHeaders,
-            body: req.method === "POST" ? await req.clone().arrayBuffer() : undefined
+            body: req.method === "POST" ? (rewrittenPostBody ?? await req.clone().arrayBuffer()) : undefined
         });
 
         // Edge-cache the changefiles listing for 1h. /changefiles and
@@ -1783,7 +1798,7 @@ async function handleRateLimitEndpoint(
     const dailyRemaining = statusResult.daily?.remaining ?? statusResult.remaining;
     const onetimeRemaining = statusResult.onetime?.remaining ?? 0;
     const searchCreditCost = isGrandfathered ? 1 : 10;
-    const rerankSearchCreditCost = searchCreditCost * 2;  // rerank=true, oxjob #1521
+    const rerankSearchCreditCost = searchCreditCost + RERANK_CREDITS;  // rerank=true, oxjob #1521
 
     return json(200, {
         api_key: maskApiKey(apiKey),
@@ -1803,6 +1818,7 @@ async function handleRateLimitEndpoint(
                 list: creditsToUsd(1),
                 search: creditsToUsd(searchCreditCost),
                 search_rerank: creditsToUsd(rerankSearchCreditCost),
+                rerank_extra: creditsToUsd(RERANK_CREDITS),
                 content: creditsToUsd(100),
                 semantic: creditsToUsd(10),
                 text: creditsToUsd(100)
@@ -1819,6 +1835,7 @@ async function handleRateLimitEndpoint(
                 list: 1,
                 search: searchCreditCost,
                 search_rerank: rerankSearchCreditCost,
+                rerank_extra: RERANK_CREDITS,
                 content: 100,
                 semantic: 10,
                 text: 100

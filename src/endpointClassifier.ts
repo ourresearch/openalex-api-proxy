@@ -148,10 +148,9 @@ export function classifyEndpoint(pathname: string, searchParams?: URLSearchParam
             return { type: 'semantic', creditCost: 10 };
         }
 
-        // Check if request has search params → 10 credits; rerank=true (Jev reorders
-        // the top 100, oxjob #1521) doubles it to 20.
+        // Check if request has search params → 10 credits (rerank adds RERANK_CREDITS on top, in index.ts)
         if (searchParams && hasSearchParams(searchParams)) {
-            return { type: 'search', creditCost: isRerank(searchParams) ? 20 : 10 };
+            return { type: 'search', creditCost: 10 };
         }
 
         // List: /entity or /entity?...
@@ -207,6 +206,18 @@ function hasSemanticSearch(searchParams: URLSearchParams): boolean {
 /** rerank=true: the origin asks Jev to reorder the top 100 of a works search (oxjob #1521). */
 export function isRerank(searchParams: URLSearchParams): boolean {
     return searchParams.get('rerank') === 'true';
+}
+
+/** A POST body (the OQL door, POST /) that asks for rerank: {"rerank": true}. */
+export function bodyAsksRerank(body: unknown): boolean {
+    return !!body && typeof body === 'object' && ((body as any).rerank === true || (body as any).rerank === 'true');
+}
+
+/** What rerank adds to a request's price: 10 credits ($0.001) on any billable list or search request,
+ *  whatever its base price (a URL search 10 → 20, an OQL query on the root 1 → 11, grandfathered search 1 → 11). */
+export const RERANK_CREDITS = 10;
+export function rerankCredits(type: EndpointType, rerankAsked: boolean): number {
+    return rerankAsked && (type === 'search' || type === 'list') ? RERANK_CREDITS : 0;
 }
 
 function hasSearchParams(searchParams: URLSearchParams): boolean {
