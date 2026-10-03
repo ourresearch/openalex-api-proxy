@@ -4,8 +4,9 @@ import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
+import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER } from "./creditReconcile";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
@@ -1120,7 +1121,10 @@ export default {
             "User-Agent": "OpenAlex-Proxy/1.0",
             "Accept": req.headers.get("Accept") || "application/json",
             "Accept-Encoding": req.headers.get("Accept-Encoding") || "",
-            "X-Cost-USD": creditsToUsd(creditCost).toString()
+            "X-Cost-USD": creditsToUsd(creditCost).toString(),
+            // What the caller has left after the up-front charge, so an origin pricing a
+            // query from its plan can refuse one that won't fit before running it (oxjob #1533)
+            [CREDITS_REMAINING_HEADER]: creditsRemainingForOrigin(rateLimitResult.remaining, rateLimitResult.onetimeRemaining).toString()
         });
 
         // Only add Content-Type for POST requests
@@ -1322,29 +1326,25 @@ export default {
         // tees the body into two independent streams; user stream is unaffected.
         const sampledResponseForAnalytics = shouldSampleEsTook() ? response.clone() : null;
 
-        // Error responses are free (oxjob #863). /check already charged creditCost
-        // before the origin call; if the origin answered 4xx/5xx, give it back the
-        // same way the content path and the 504 path do, and report the refunded
-        // balance in the headers so a client watching X-RateLimit-Remaining sees
-        // it hold steady across a failed request.
-        const actualCost = billableCreditCost(response.status, creditCost);
-        let adjustedRemaining = rateLimitResult.remaining ?? 0;
-        let adjustedOnetimeRemaining = rateLimitResult.onetimeRemaining ?? 0;
-        if (actualCost < creditCost) {
-            try {
-                const refundResult = await limiter.fetch("http://internal/refund", {
-                    method: "POST",
-                    body: JSON.stringify({ dailyLimit: limit, credits: creditCost - actualCost, onetimeBalance: onetimeCreditsBalance })
-                }).then(res => res.json() as Promise<{ remaining: number; onetimeRemaining: number }>);
-                adjustedRemaining = refundResult.remaining;
-                adjustedOnetimeRemaining = refundResult.onetimeRemaining;
-            } catch (error) {
-                console.error("Failed to refund credits for error response:", error);
-            }
-        }
+        // Settle what /check charged up front against what the request actually cost,
+        // and report the settled balance in the headers so a client watching
+        // X-RateLimit-Remaining sees the real number. Error responses are free (oxjob
+        // #863): a 4xx/5xx gets the charge back, as on the content and 504 paths. A
+        // query the origin priced from its plan (X-Credits-Cost, oxjob #1530) costs that
+        // price, refunded or charged the difference either way (oxjob #1533).
+        const actualCost = actualCreditCost(response.status, creditCost, response.headers.get(ORIGIN_COST_HEADER));
+        const { remaining: adjustedRemaining, onetimeRemaining: adjustedOnetimeRemaining } = await settleCredits(limiter, {
+            charged: creditCost,
+            actual: actualCost,
+            dailyLimit: limit,
+            onetimeBalance: onetimeCreditsBalance,
+            remaining: rateLimitResult.remaining ?? 0,
+            onetimeRemaining: rateLimitResult.onetimeRemaining ?? 0
+        });
 
         // Return response with rate limit headers
         const newHeaders = new Headers(response.headers);
+        newHeaders.delete(ORIGIN_COST_HEADER); // internal: the client sees X-RateLimit-Credits-Used
         // New USD headers
         newHeaders.set("X-RateLimit-Limit-USD", creditsToUsd(limit).toString());
         newHeaders.set("X-RateLimit-Remaining-USD", creditsToUsd(adjustedRemaining).toString());
