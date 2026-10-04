@@ -227,6 +227,14 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
         expect(originRequests[0].headers.get('X-Credits-Remaining')).not.toBeNull();
     });
 
+    it('passes the CSV export filename through and lets browser JS read it (oxjob #1536)', async () => {
+        const { res } = await run(OQL + '&format=csv', {
+            status: 200, headers: { 'Content-Disposition': 'attachment; filename="openalex-results.zip"' },
+        });
+        expect(res.headers.get('Content-Disposition')).toBe('attachment; filename="openalex-results.zip"');
+        expect(res.headers.get('Access-Control-Expose-Headers')).toContain('Content-Disposition');
+    });
+
     it('/query costs nothing', async () => {
         const { res, state } = await run('/query/oql/' + encodeURIComponent('works where year > (2020)'), { status: 200 });
         expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('0');
