@@ -58,9 +58,19 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
 
 // ─── DOCX extraction via mammoth ─────────────────────────────
 
+// wrangler bundles mammoth's browser build, whose openZip only accepts
+// { arrayBuffer } ("Could not find file in options" for { buffer }). Pass
+// both so the Node build (vitest) and the Workers bundle each find theirs.
+function mammothInput(buffer: Uint8Array) {
+  const arrayBuffer = buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength
+  );
+  return { buffer, arrayBuffer } as unknown as Parameters<typeof mammoth.extractRawText>[0];
+}
+
 async function extractDocxText(buffer: Buffer): Promise<string> {
-  // mammoth accepts a Buffer directly — no filesystem needed
-  const result = await mammoth.extractRawText({ buffer });
+  const result = await mammoth.extractRawText(mammothInput(buffer));
   return result.value;
 }
 
@@ -69,7 +79,7 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
 async function extractDocText(buffer: Buffer): Promise<string> {
   // Strategy 1: Try mammoth — it handles some .doc files despite being a .docx library
   try {
-    const result = await mammoth.extractRawText({ buffer });
+    const result = await mammoth.extractRawText(mammothInput(buffer));
     if (result.value && result.value.trim().length > 50) {
       console.log('DOC extracted via mammoth fallback');
       return result.value;
