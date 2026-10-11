@@ -62,6 +62,12 @@
 		{
 			"binding": "CV_PARSER",
 			"service": "openalex-cv-parser"
+		},
+		{
+			// /query/text: plain words to OQL (oxjob #1494). The Worker has no public route; it is reachable only here,
+			// so every call is held and settled by this proxy. Built from openalex-mcp-server (wrangler.query-writer.jsonc).
+			"binding": "QUERY_WRITER",
+			"service": "openalex-query-writer"
 		}
 	]
 }

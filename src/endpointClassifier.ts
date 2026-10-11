@@ -1,6 +1,13 @@
 import { isChangefilesBrowsePath } from "./changefilesPaths";
 
-export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text';
+export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text' | 'query_text';
+
+/**
+ * Natural language to OQL (oxjob #1494): /query/text writes the query with a model, so it costs what the model cost
+ * us. The proxy holds this much up front and refunds down to the query writer's X-Credits-Cost (a typical question
+ * settles near 200 credits, $0.02; the writer stops a question before it passes the hold). 10,000 credits = $1.
+ */
+export const QUERY_TEXT_HOLD_CREDITS = 2000;
 
 export interface EndpointClassification {
     type: EndpointType;
@@ -176,6 +183,12 @@ export function classifyEndpoint(
     // The per-second limit still throttles abuse.
     if (segments[0] === 'autocomplete') {
         return { type: 'list', creditCost: 0 };
+    }
+
+    // Plain words to OQL (/query/text, /query/text/<q>; oxjob #1494): a model writes the query, so it is held at
+    // QUERY_TEXT_HOLD_CREDITS and settled to the model's cost. Decided before the free translate rule below.
+    if (segments[0] === 'query' && segments[1] === 'text') {
+        return { type: 'query_text', creditCost: QUERY_TEXT_HOLD_CREDITS };
     }
 
     // The translate resource and its free check (/query, /query/oql/<q>, /query/oqo/<q>,

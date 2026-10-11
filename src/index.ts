@@ -23,6 +23,7 @@ export interface Env {
     SEARCH_API_URL?: string;  // Optional - falls back to OPENALEX_API_URL if not set
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
     CV_PARSER?: Fetcher;
+    QUERY_WRITER?: Fetcher;   // Service binding to openalex-query-writer: /query/text, plain words to OQL (oxjob #1494)
     COLLECTION_PROXY_KEY?: string;  // Worker secret, same name and value as on users-api (oxjob #1515)
     AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
     // oxjob #338 Phase 5a — UI-provenance token (Turnstile-minted). Both optional:
@@ -601,6 +602,15 @@ export default {
         const creditCost = ((isGrandfathered && classification.type === 'search') ? 1 : classification.creditCost)
             + rerankCredits(classification.type, rerankAsked);
 
+        // /query/text runs a model on our account, so it needs the caller's own key (no shared anonymous pool),
+        // checked before anything is held (oxjob #1494).
+        if (classification.type === 'query_text' && !hasValidApiKey) {
+            return json(401, {
+                error: "API key required",
+                message: "Writing a query from plain words uses a language model and needs your own API key. Get one free at https://openalex.org/users, then send it as an \"Authorization: Bearer YOUR_KEY\" header.",
+            });
+        }
+
         // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
         // comment at the top of the file and searchHealth.ts). Website traffic is
         // carved out (fromWebsite, above).
@@ -904,6 +914,8 @@ export default {
                 // "View in API" tab opened without a key while the user's battery
                 // icon showed 95% left).
                 message = `Insufficient budget. This request has no API key, so it counts against the free daily budget shared by everyone on your network's IP address, and that budget is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Use your own key instead: add ?api_key=YOUR_KEY to the URL, or send it as an "Authorization: Bearer YOUR_KEY" header. Keys are free and have their own budget: https://help.openalex.org/api/authentication/`;
+            } else if (classification.type === 'query_text') {
+                message = `Insufficient budget. Writing a query from plain words holds $${costUsd} while the model works and refunds what it doesn't use (a typical question costs about $0.02), but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else if (onetimeCreditsBalance > 0) {
                 message = `Insufficient budget. This request costs $${costUsd} but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else {
@@ -963,8 +975,26 @@ export default {
 
         // Route content.openalex.org/* OR /content/* to content worker
         const isContentRequest = url.hostname === 'content.openalex.org' || /^\/content(\/|$)/i.test(url.pathname);
+        // /query/text goes to the query writer Worker and settles the same way: held at creditCost, refunded down to
+        // the X-Credits-Cost it reports (oxjob #1494).
+        const isQueryText = classification.type === 'query_text';
 
-        if (isContentRequest) {
+        if (isContentRequest || isQueryText) {
+            let contentResponse: Response;
+            if (isQueryText) {
+                if (!env.QUERY_WRITER) {
+                    contentResponse = new Response(JSON.stringify({ error: "Writing queries from plain words isn't available on this server yet." }),
+                        { status: 503, headers: { "Content-Type": "application/json", "X-Credits-Cost": "0" } });
+                } else {
+                    try {
+                        contentResponse = await env.QUERY_WRITER.fetch(new Request(req.url, req));
+                    } catch (error) {
+                        console.error("Query writer call failed:", error);
+                        contentResponse = new Response(JSON.stringify({ error: "The query writer failed; nothing was charged. Try again in a moment." }),
+                            { status: 502, headers: { "Content-Type": "application/json", "X-Credits-Cost": "0" } });
+                    }
+                }
+            } else {
             // Normalize path: content.openalex.org/works/X → /works/X for content worker
             // api.openalex.org/content/X → /X for content worker (strip /content prefix)
             const contentPath = url.hostname === 'content.openalex.org'
@@ -984,11 +1014,15 @@ export default {
             contentUrl.pathname = contentPath;
             const contentReq = new Request(contentUrl, req);
 
-            const contentResponse = await env.CONTENT_WORKER.fetch(contentReq);
+            contentResponse = await env.CONTENT_WORKER.fetch(contentReq);
+            }
 
-            // Check if content worker returned a different credit cost (e.g., 1 for 404)
+            // Check if the worker returned a different credit cost (e.g., 1 for 404). A query-writer answer with no
+            // cost header failed before it could price itself: charge nothing rather than the whole hold.
             const actualCostHeader = contentResponse.headers.get("X-Credits-Cost");
-            const actualCost = actualCostHeader ? parseInt(actualCostHeader, 10) : creditCost;
+            const parsedCost = actualCostHeader ? parseInt(actualCostHeader, 10) : NaN;
+            const actualCost = Number.isFinite(parsedCost) ? Math.min(Math.max(parsedCost, 0), creditCost)
+                : (isQueryText ? 0 : creditCost);
             let adjustedRemaining = rateLimitResult.remaining ?? 0;
 
             // Refund credits if actual cost < charged cost

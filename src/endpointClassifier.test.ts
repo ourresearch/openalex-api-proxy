@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_HOLD_CREDITS } from './endpointClassifier';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
 
@@ -521,6 +521,28 @@ describe('rerank=true (oxjob #1521)', () => {
     it('prices a list request with rerank at 1 + 10 (the origin 400s it, and errors are refunded)', () => {
         const r = classifyEndpoint('/works', new URLSearchParams('filter=publication_year:2020&rerank=true'));
         expect(r.creditCost + rerankCredits(r.type, true)).toBe(11);
+    });
+});
+
+describe('/query/text holds the model hold, before the free /query rule (oxjob #1494)', () => {
+    it.each([
+        '/query/text',
+        '/query/text/',
+        '/query/text/open%20access%20articles%20about%20coffee',
+        '/Query/Text/kelp',
+    ])('%s is query_text at the hold', (path) => {
+        const r = classifyEndpoint(path, new URLSearchParams());
+        expect(r.type).toBe('query_text');
+        expect(r.creditCost).toBe(QUERY_TEXT_HOLD_CREDITS);
+    });
+
+    it('holds $0.20', () => {
+        expect(QUERY_TEXT_HOLD_CREDITS).toBe(2000);
+    });
+
+    it('leaves /query/textual and the top-level /text endpoint alone', () => {
+        expect(classifyEndpoint('/query/textual', new URLSearchParams()).type).toBe('list');
+        expect(classifyEndpoint('/text', new URLSearchParams()).type).toBe('text');
     });
 });
 
