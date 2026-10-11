@@ -6,7 +6,7 @@ import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER } from "./creditReconcile";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS } from "./endpointClassifier";
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
@@ -24,6 +24,7 @@ export interface Env {
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
     CV_PARSER?: Fetcher;
     QUERY_WRITER?: Fetcher;   // Service binding to openalex-query-writer: /query/text, plain words to OQL (oxjob #1494)
+    QUERY_TEXT_ACCOUNTS?: string; // feature flag: user/org ids allowed to call /query/text (comma-separated); empty = nobody
     COLLECTION_PROXY_KEY?: string;  // Worker secret, same name and value as on users-api (oxjob #1515)
     AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
     // oxjob #338 Phase 5a — UI-provenance token (Turnstile-minted). Both optional:
@@ -327,6 +328,8 @@ export default {
         let onetimeCreditsBalance = 0;
         let onetimeCreditsExpiresAt: string | undefined;
         let userPlan: string | null = null;
+        // The key's account (a user id, or an org id for org keys); read by the /query/text feature flag (oxjob #1494).
+        let keyAccountIds: string[] = [];
         // True when the auth (and thus the prepaid balance below) came from the
         // per-isolate API_KEY_CACHE rather than a fresh DB read. Used by the
         // pay→usable race recovery on the 429 path (oxjob #409).
@@ -383,6 +386,7 @@ export default {
                 onetimeCreditsBalance = authResult.onetimeCreditsBalance ?? 0;
                 onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
                 userPlan = authResult.plan ?? null;
+                keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
                 // cacheRefreshed === true means we just read the DB; false/undefined
                 // means this balance came from the (≤60s, per-isolate) cache.
                 usedCachedAuth = authResult.cacheRefreshed !== true;
@@ -608,6 +612,14 @@ export default {
             return json(401, {
                 error: "API key required",
                 message: "Writing a query from plain words uses a language model and needs your own API key. Get one free at https://openalex.org/users, then send it as an \"Authorization: Bearer YOUR_KEY\" header.",
+            });
+        }
+        // Feature flag: /query/text answers only the accounts listed in QUERY_TEXT_ACCOUNTS (user or org ids,
+        // comma-separated); everyone else gets a free 403 while it is in testing (Jason, 2026-10-11).
+        if (classification.type === 'query_text' && !queryTextAllowed(env.QUERY_TEXT_ACCOUNTS, keyAccountIds)) {
+            return json(403, {
+                error: "Not available yet",
+                message: "Writing queries from plain words is in testing and not open yet. Nothing was charged.",
             });
         }
 

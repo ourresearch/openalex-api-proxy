@@ -11,6 +11,12 @@ export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semant
  */
 export const QUERY_TEXT_ENTRY_CREDITS = 1;
 
+/** The /query/text feature flag: is one of the key's accounts (user id, org id) in the comma-separated allowlist? */
+export function queryTextAllowed(allowlist: string | undefined, accountIds: string[]): boolean {
+    const allowed = new Set((allowlist ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+    return accountIds.some((id) => allowed.has(id));
+}
+
 export interface EndpointClassification {
     type: EndpointType;
     creditCost: number;

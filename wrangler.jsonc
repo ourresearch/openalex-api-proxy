@@ -7,6 +7,11 @@
 	"workers_dev": true,
 	"preview_urls": true,
 	"keep_vars": true,  // warning: this allows us to put plain text settings in the UI. If false it will delete them.
+	"vars": {
+		// Feature flag for /query/text (plain words to OQL, oxjob #1494): user or org ids allowed to call it, comma-separated.
+		// Jason's account only while it's in testing (2026-10-11); empty = nobody.
+		"QUERY_TEXT_ACCOUNTS": "user-TSamuHxDbnhn"
+	},
 	"observability": {
 		"enabled": true,
 		"head_sampling_rate": 0.10

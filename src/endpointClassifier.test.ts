@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_ENTRY_CREDITS } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_ENTRY_CREDITS, queryTextAllowed } from './endpointClassifier';
 import { actualCreditCost } from './creditReconcile';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
@@ -539,6 +539,15 @@ describe('/query/text enters at one credit, before the free /query rule (oxjob #
 
     it('needs only some budget: one credit to enter', () => {
         expect(QUERY_TEXT_ENTRY_CREDITS).toBe(1);
+    });
+
+    it('is behind a feature flag: only listed user or org ids get in', () => {
+        expect(queryTextAllowed('user-TSamuHxDbnhn', ['user-TSamuHxDbnhn'])).toBe(true);
+        expect(queryTextAllowed(' user-a , org-b ', ['user-x', 'org-b'])).toBe(true);
+        expect(queryTextAllowed('user-TSamuHxDbnhn', ['user-4jkBZiWYK4YX'])).toBe(false);
+        expect(queryTextAllowed('', ['user-TSamuHxDbnhn'])).toBe(false);
+        expect(queryTextAllowed(undefined, ['user-TSamuHxDbnhn'])).toBe(false);
+        expect(queryTextAllowed('user-a', [])).toBe(false);
     });
 
     it('settles to the query writer\'s price on an answer, free on an error', () => {
