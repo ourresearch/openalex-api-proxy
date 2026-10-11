@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_HOLD_CREDITS } from './endpointClassifier';
+import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_ENTRY_CREDITS } from './endpointClassifier';
+import { actualCreditCost } from './creditReconcile';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
 
@@ -524,20 +525,27 @@ describe('rerank=true (oxjob #1521)', () => {
     });
 });
 
-describe('/query/text holds the model hold, before the free /query rule (oxjob #1494)', () => {
+describe('/query/text enters at one credit, before the free /query rule (oxjob #1494)', () => {
     it.each([
         '/query/text',
         '/query/text/',
         '/query/text/open%20access%20articles%20about%20coffee',
         '/Query/Text/kelp',
-    ])('%s is query_text at the hold', (path) => {
+    ])('%s is query_text at the entry price', (path) => {
         const r = classifyEndpoint(path, new URLSearchParams());
         expect(r.type).toBe('query_text');
-        expect(r.creditCost).toBe(QUERY_TEXT_HOLD_CREDITS);
+        expect(r.creditCost).toBe(QUERY_TEXT_ENTRY_CREDITS);
     });
 
-    it('holds $0.20', () => {
-        expect(QUERY_TEXT_HOLD_CREDITS).toBe(2000);
+    it('needs only some budget: one credit to enter', () => {
+        expect(QUERY_TEXT_ENTRY_CREDITS).toBe(1);
+    });
+
+    it('settles to the query writer\'s price on an answer, free on an error', () => {
+        expect(actualCreditCost(200, QUERY_TEXT_ENTRY_CREDITS, '516')).toBe(516);
+        expect(actualCreditCost(422, QUERY_TEXT_ENTRY_CREDITS, '480')).toBe(0);
+        expect(actualCreditCost(502, QUERY_TEXT_ENTRY_CREDITS, '0')).toBe(0);
+        expect(actualCreditCost(200, QUERY_TEXT_ENTRY_CREDITS, null)).toBe(1);
     });
 
     it('leaves /query/textual and the top-level /text endpoint alone', () => {

@@ -915,7 +915,7 @@ export default {
                 // icon showed 95% left).
                 message = `Insufficient budget. This request has no API key, so it counts against the free daily budget shared by everyone on your network's IP address, and that budget is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Use your own key instead: add ?api_key=YOUR_KEY to the URL, or send it as an "Authorization: Bearer YOUR_KEY" header. Keys are free and have their own budget: https://help.openalex.org/api/authentication/`;
             } else if (classification.type === 'query_text') {
-                message = `Insufficient budget. Writing a query from plain words holds $${costUsd} while the model works and refunds what it doesn't use (a typical question costs about $0.02), but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
+                message = `Insufficient budget. Writing a query from plain words costs what the language model costs (usually $0.02-0.05) and needs some budget left; you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else if (onetimeCreditsBalance > 0) {
                 message = `Insufficient budget. This request costs $${costUsd} but you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else {
@@ -975,8 +975,8 @@ export default {
 
         // Route content.openalex.org/* OR /content/* to content worker
         const isContentRequest = url.hostname === 'content.openalex.org' || /^\/content(\/|$)/i.test(url.pathname);
-        // /query/text goes to the query writer Worker and settles the same way: held at creditCost, refunded down to
-        // the X-Credits-Cost it reports (oxjob #1494).
+        // /query/text goes to the query writer Worker, through this same block: one entry credit at /check, then
+        // settled to the X-Credits-Cost it reports (oxjob #1494).
         const isQueryText = classification.type === 'query_text';
 
         if (isContentRequest || isQueryText) {
@@ -1017,17 +1017,24 @@ export default {
             contentResponse = await env.CONTENT_WORKER.fetch(contentReq);
             }
 
-            // Check if the worker returned a different credit cost (e.g., 1 for 404). A query-writer answer with no
-            // cost header failed before it could price itself: charge nothing rather than the whole hold.
+            // Query text settles in both directions to the query writer's price (settleCredits: /charge past the entry
+            // credit, /refund below it; errors are free). An overrun past the caller's balance lands on the daily
+            // counter, never on prepaid: we absorb it (Jason, 2026-10-11, oxjob #1494).
+            // Content: check if the worker returned a different credit cost (e.g., 1 for 404) and refund.
             const actualCostHeader = contentResponse.headers.get("X-Credits-Cost");
-            const parsedCost = actualCostHeader ? parseInt(actualCostHeader, 10) : NaN;
-            const actualCost = Number.isFinite(parsedCost) ? Math.min(Math.max(parsedCost, 0), creditCost)
-                : (isQueryText ? 0 : creditCost);
+            const actualCost = isQueryText
+                ? actualCreditCost(contentResponse.status, creditCost, actualCostHeader)
+                : (actualCostHeader ? parseInt(actualCostHeader, 10) : creditCost);
             let adjustedRemaining = rateLimitResult.remaining ?? 0;
 
             // Refund credits if actual cost < charged cost
             let adjustedOnetimeRemaining = rateLimitResult.onetimeRemaining ?? 0;
-            if (actualCost < creditCost) {
+            if (isQueryText) {
+                ({ remaining: adjustedRemaining, onetimeRemaining: adjustedOnetimeRemaining } = await settleCredits(limiter, {
+                    charged: creditCost, actual: actualCost, dailyLimit: limit, onetimeBalance: onetimeCreditsBalance,
+                    remaining: adjustedRemaining, onetimeRemaining: adjustedOnetimeRemaining,
+                }));
+            } else if (actualCost < creditCost) {
                 const refundAmount = creditCost - actualCost;
                 try {
                     const refundResult = await limiter.fetch("http://internal/refund", {
