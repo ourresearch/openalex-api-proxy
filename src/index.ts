@@ -9,6 +9,7 @@ import { logAnalytics, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
+import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
@@ -469,6 +470,25 @@ export default {
                 rateLimitRemaining: 0
             });
 
+            return errorResponse;
+        }
+
+        // Keyless cursor paging past the first page needs a free key (oxjob #1682; see src/cursorGate.ts).
+        // Gated before the rate limiter, so a refused page burns no credits and never reaches ES.
+        if (isKeylessCursorPage(url, hasValidApiKey, trustedUi)) {
+            const errorResponse = json(401, KEYLESS_CURSOR_ERROR);
+            logAnalytics({
+                ctx,
+                env,
+                apiKey,
+                req,
+                url,
+                scope: 'main',
+                responseTime: Date.now() - startTime,
+                statusCode: 401,
+                rateLimit: 0,
+                rateLimitRemaining: 0,
+            });
             return errorResponse;
         }
 
