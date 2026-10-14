@@ -327,7 +327,7 @@ export default {
         // with ~2-user real-GUI collateral (oxjob #479 blast-radius read). With list=1 credit,
         // keyless users can make 1K list requests/day without an API key.
         // 2026-10-14: Cloudflare-verified AI assistants (claude.ai, ChatGPT, Mistral, Perplexity fetching for a
-        // person) get 1M a day per IP in a bucket of their own (oxjob #1686; see verifiedAssistant.ts).
+        // person) get 5M ($500) a day per IP in a bucket of their own (oxjob #1686; see verifiedAssistant.ts).
         const verifiedAssistant = isVerifiedAssistant(apiKey, req.headers.get(VERIFIED_ASSISTANT_HEADER), env.VERIFIED_ASSISTANT_TOKEN);
         let maxPerDay = verifiedAssistant ? VERIFIED_ASSISTANT_CREDITS_PER_DAY : 1000;  // Default daily rate limit for unauthenticated users
         let maxCreditsPerDay = maxPerDay;  // Default credits for unauthenticated users (1:1)
@@ -709,7 +709,7 @@ export default {
         // and throttled plans (max=0) 10/s. 2026-07-01: anon dropped 30→10/s — anon
         // is the dominant diffuse load during search-saturation incidents; the 10/s
         // per-IP cap reins in the heavy-hitter anon IPs without touching keyed clients.
-        // 2026-10-14: verified AI assistants (1M a day, oxjob #1686) land on 50/s through the same rule.
+        // 2026-10-14: verified AI assistants (5M a day, oxjob #1686) land on 50/s through the same rule.
         const perSecondLimit = maxCreditsPerDay > 10000 ? 50 : (maxCreditsPerDay > 1000 ? 30 : 10);
 
         // Check rate limit using Durable Object

@@ -126,12 +126,12 @@ describe('verified AI assistants on the API path (oxjob #1686)', () => {
         expect(rows[0].doubles[DOUBLE8_VERIFIED_ASSISTANT]).toBe(0);
     });
 
-    it('header with the right value: 1M credits a day in its own bucket, at 50/s', async () => {
+    it('header with the right value: 5M credits a day in its own bucket, at 50/s', async () => {
         const { res, checks, rows } = await run(SEARCH, { headers: ASSISTANT });
         expect(res.status).toBe(200);
-        expect(checks).toEqual([{ bucket: `credits:verified-assistant:${IP}`, dailyLimit: 1_000_000, perSecondLimit: 50 }]);
-        expect(res.headers.get('X-RateLimit-Limit')).toBe('1000000');
-        expect(res.headers.get('X-RateLimit-Remaining')).toBe('999990'); // a search costs 10
+        expect(checks).toEqual([{ bucket: `credits:verified-assistant:${IP}`, dailyLimit: 5_000_000, perSecondLimit: 50 }]);
+        expect(res.headers.get('X-RateLimit-Limit')).toBe('5000000');
+        expect(res.headers.get('X-RateLimit-Remaining')).toBe('4999990'); // a search costs 10
         expect(rows[0].doubles[DOUBLE8_VERIFIED_ASSISTANT]).toBe(1);
     });
 
