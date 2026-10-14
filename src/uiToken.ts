@@ -72,8 +72,9 @@ async function hmac(secret: string, message: string): Promise<Uint8Array> {
     return new Uint8Array(sig);
 }
 
-// Constant-time compare so signature checks don't leak via timing.
-function timingSafeEqual(a: string, b: string): boolean {
+// Constant-time compare so signature checks don't leak via timing. Also used for the
+// verified-assistant secret (verifiedAssistant.ts). Leaks only the length on a mismatch.
+export function timingSafeEqual(a: string, b: string): boolean {
     if (a.length !== b.length) return false;
     let diff = 0;
     for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);

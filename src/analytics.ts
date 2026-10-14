@@ -1,3 +1,5 @@
+import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER } from "./verifiedAssistant";
+
 function hashIpToBucket(ip: string): number {
     let hash = 0;
     for (let i = 0; i < ip.length; i++) {
@@ -51,7 +53,7 @@ async function readEsTookFromBody(resp: Response): Promise<number | null> {
 
 export function logAnalytics(params: {
     ctx: ExecutionContext;
-    env: { ANALYTICS: AnalyticsEngineDataset };
+    env: { ANALYTICS: AnalyticsEngineDataset; VERIFIED_ASSISTANT_TOKEN?: string };
     apiKey: string | null;
     req: Request;
     url: URL;
@@ -118,7 +120,12 @@ export function logAnalytics(params: {
                         params.rateLimitRemaining,  // double4: credits remaining
                         params.creditCost ?? 1,     // double5: credits consumed for this request
                         esTookMs,                   // double6: ES `meta.db_response_time_ms` (-1 = not sampled / N/A)
-                        params.trustedUi ? 1 : 0    // double7: valid UI-provenance token present (oxjob #338)
+                        params.trustedUi ? 1 : 0,   // double7: valid UI-provenance token present (oxjob #338)
+                        // double8: Cloudflare-verified AI assistant on its own keyless budget (oxjob #1686).
+                        // Derived here from the request rather than passed in, so every call site (429s,
+                        // ladder 503s, gate 401s, successes) is tagged without each one remembering to.
+                        isVerifiedAssistant(params.apiKey, params.req.headers.get(VERIFIED_ASSISTANT_HEADER),
+                            params.env.VERIFIED_ASSISTANT_TOKEN) ? 1 : 0
                     ]
                 });
             } catch (error) {
