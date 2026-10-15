@@ -31,6 +31,18 @@
 		{
 			"binding": "ANALYTICS",
 			"dataset": "openalex_requests_v2"
+		},
+		{
+			// oxjob #1692: what the private enforcement list refused or would have refused (shadow), one row per match.
+			"binding": "ENFORCE_AE",
+			"dataset": "openalex_enforcement"
+		}
+	],
+	"kv_namespaces": [
+		{
+			// oxjob #1692: the private enforcement list (key "state"; see src/enforcementList.ts).
+			"binding": "ENFORCEMENT",
+			"id": "0ae935a07fac484ba618e257f10796a8"
 		}
 	],
 	"hyperdrive": [

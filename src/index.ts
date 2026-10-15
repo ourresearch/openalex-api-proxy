@@ -18,6 +18,7 @@ import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
+import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, DEFAULT_SHARED_DAILY, ENFORCE_BLOCK_MESSAGE, ENFORCE_BUDGET_MESSAGE } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
 
 export interface Env extends SentryEnv {
@@ -56,6 +57,10 @@ export interface Env extends SentryEnv {
     // oxjob #1686: the value a Cloudflare Transform Rule puts on X-OpenAlex-Verified-Assistant for
     // Cloudflare-verified AI assistants (see verifiedAssistant.ts). Unset = feature off.
     VERIFIED_ASSISTANT_TOKEN?: string; // Worker secret
+    // oxjob #1692: the private enforcement list (KV key "state") and where its shadow/enforce decisions are counted.
+    // Unset = feature off (see enforcementList.ts).
+    ENFORCEMENT?: KVNamespace;
+    ENFORCE_AE?: AnalyticsEngineDataset;
 }
 
 // oxjob #338: minted UI-provenance tokens live 30 min; the GUI re-mints on expiry.
@@ -939,6 +944,44 @@ const handler = {
             return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage());
         }
 
+        // The private enforcement list (oxjob #1692; see enforcementList.ts): keyless traffic only. In shadow mode it
+        // records what an entry would refuse (ENFORCE_AE) and changes nothing.
+        const enforceHit = (!apiKey && !trustedUi && !verifiedAssistant)
+            ? await matchEnforcement(await loadEnforcement(env.ENFORCEMENT, Date.now()), {
+                ua: req.headers.get("User-Agent") || "",
+                mailto: url.searchParams.get("mailto"),
+                refererHost: refererHostOf(req.headers.get("Referer")),
+                ip: req.headers.get("CF-Connecting-IP"),
+                asn: typeof (req as { cf?: { asn?: unknown } }).cf?.asn === "number" ? (req as { cf?: { asn?: number } }).cf!.asn! : null,
+            }, Date.now())
+            : null;
+        let enforceSettled = false;  // logged once per request, refuse or pass
+        const enforceDecision = (refuse: boolean): Response | null => {
+            enforceSettled = true;
+            try {
+                env.ENFORCE_AE?.writeDataPoint({
+                    indexes: [enforceHit!.entry.id],
+                    blobs: [enforceHit!.entry.id, enforceHit!.entry.action, enforceHit!.mode, classification.type, refuse ? "refuse" : "pass"],
+                    doubles: [creditCost],
+                });
+            } catch { /* analytics never blocks */ }
+            if (!refuse || enforceHit!.mode !== "enforce") return null;
+            const block = enforceHit!.entry.action === "block";
+            logAnalytics({
+                ctx, env, apiKey, req, url, scope: 'enforce',
+                responseTime: Date.now() - startTime,
+                statusCode: block ? 403 : 429,
+                rateLimit: 0, rateLimitRemaining: 0, endpointType: classification.type, creditCost: 0,
+            });
+            const resp = json(block ? 403 : 429, { error: block ? "Forbidden" : "Rate limit exceeded", message: block ? ENFORCE_BLOCK_MESSAGE : ENFORCE_BUDGET_MESSAGE });
+            if (!block) resp.headers.set("Retry-After", String(getSecondsUntilMidnightUTC()));
+            return resp;
+        };
+        if (enforceHit && (enforceHit.entry.action === "block" || enforceSpent(enforceBucket(enforceHit), Date.now()))) {
+            const refusal = enforceDecision(true);
+            if (refusal) return refusal;
+        }
+
         let rateLimitResult: {
             success: boolean;
             retryAfter?: number;
@@ -1091,6 +1134,23 @@ const handler = {
                 }
             } catch (error) {
                 reportError(error, { site: "contact_budget_do" });
+            }
+        }
+
+        // An enforcement-list shared budget (shadow counts in its own bucket, so shadow numbers are real numbers).
+        if (enforceHit && !enforceSettled) {
+            const bucket = enforceBucket(enforceHit);
+            try {
+                const verdict = await env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(bucket)).fetch("http://internal/check", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit: enforceHit.entry.daily_limit ?? DEFAULT_SHARED_DAILY, perSecondLimit: 1000, credits: creditCost }),
+                }).then(r => r.json() as Promise<{ success: boolean; limitType?: string }>);
+                const refuse = !verdict.success && verdict.limitType !== 'per_second';
+                if (refuse) markEnforceSpent(bucket, Date.now());
+                const refusal = enforceDecision(refuse);
+                if (refusal) return refusal;
+            } catch (error) {
+                reportError(error, { site: "enforce_budget_do" });
             }
         }
 
@@ -1918,6 +1978,11 @@ function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | 
     }
 
     return { valid: true };
+}
+
+function refererHostOf(referer: string | null): string | null {
+    if (!referer) return null;
+    try { return new URL(referer).hostname.toLowerCase(); } catch { return null; }
 }
 
 function json(status: number, data: unknown): Response {

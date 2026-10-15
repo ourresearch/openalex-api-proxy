@@ -33,7 +33,7 @@ export interface ContactBudget {
     dailyLimit: number;
 }
 
-async function sha256Hex(s: string): Promise<string> {
+export async function sha256Hex(s: string): Promise<string> {
     const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
     return Array.from(d.slice(0, 16), b => b.toString(16).padStart(2, "0")).join("");
 }
