@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mintUiToken } from './uiToken';
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER } from './verifiedAssistant';
-import { runWorker, HARNESS_ASSISTANT_TOKEN, HARNESS_IP, HARNESS_UI_SECRET } from './testHarness';
+import { runWorker as run, today, DOUBLE7_TRUSTED_UI, HARNESS_ASSISTANT_TOKEN as TOKEN, HARNESS_IP as IP,
+    HARNESS_UI_SECRET as UI_SECRET } from './testHarness';
 
 // A keyed request looks its key up in Postgres. There is no database here, so checkApiKey fails open to a
 // valid key at 100,000 credits a day, which is all the keyed test needs.
@@ -12,11 +13,7 @@ vi.mock('pg', () => ({
     },
 }));
 
-const TOKEN = HARNESS_ASSISTANT_TOKEN;
-const UI_SECRET = HARNESS_UI_SECRET;
-const IP = HARNESS_IP;
 const PAGE2 = 'IlsnLUluZmluaXR5JywgMCwgJ2h0dHBzOi8vb3BlbmFsZXgub3JnL1cxMjMnXSI=';
-const today = () => new Date().toISOString().split('T')[0];
 
 describe('isVerifiedAssistant (oxjob #1686)', () => {
     it('is true only for the exact secret on a keyless request', () => {
@@ -41,12 +38,8 @@ describe('isVerifiedAssistant (oxjob #1686)', () => {
     });
 });
 
-// The whole API path, with one real RateLimiter per bucket name, so separate buckets really are separate.
-const run = runWorker;
-
 const SEARCH = '/works?search=coral+reefs';
 const ASSISTANT = { [VERIFIED_ASSISTANT_HEADER]: TOKEN };
-const DOUBLE7_TRUSTED_UI = 6;
 const DOUBLE8_VERIFIED_ASSISTANT = 7;
 
 describe('verified AI assistants on the API path (oxjob #1686)', () => {
