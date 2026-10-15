@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { actualCreditCost, creditsRemainingForOrigin, settleCredits, splitCharge } from './creditReconcile';
 import { RateLimiter } from './rateLimiter';
+import { mintUiToken } from './uiToken';
 import worker from './index';
+
+const UI_SECRET = 'test-ui-hmac-secret';
+const IP = '203.0.113.7';
 
 // An in-memory DurableObjectState: enough storage for RateLimiter, nothing else.
 function fakeState(initial: Record<string, unknown> = {}) {
@@ -143,6 +147,7 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
         const env = {
             OPENALEX_API_URL: 'https://origin.test',
             FORCE_HEALTH_STATE: 'GREEN',
+            UI_TOKEN_HMAC_SECRET: UI_SECRET,
             RATE_LIMITER: {
                 idFromName: (n: string) => n,
                 get: () => ({ fetch: (u: string, i?: RequestInit) => limiter.fetch(new Request(u, i)) }),
@@ -204,15 +209,19 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
     const FACET = '/works?search=coral&group_by=publication_year&per_page=200';
 
     it('prices a website facet at 1 credit and tells the origin it came from the website', async () => {
-        const { res, originRequests } = await run(FACET, { status: 200 }, { headers: { Origin: 'https://openalex.org' } });
+        const uiToken = await mintUiToken(UI_SECRET, Date.now(), 1800, IP);
+        const { res, originRequests } = await run(FACET, { status: 200 },
+            { headers: { 'X-OpenAlex-UI': uiToken, 'CF-Connecting-IP': IP } });
         expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('1');
         expect(originRequests[0].headers.get('X-Credits-Website')).toBe('1');
     });
 
-    it('prices the same group_by from anywhere else as the search (10)', async () => {
-        const { res, originRequests } = await run(FACET, { status: 200 }, { headers: { Origin: 'https://example.com' } });
-        expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('10');
-        expect(originRequests[0].headers.get('X-Credits-Website')).toBeNull();
+    it('prices the same group_by from anywhere else as the search (10), a forged openalex.org Origin included (oxjob #1691)', async () => {
+        for (const origin of ['https://example.com', 'https://openalex.org']) {
+            const { res, originRequests } = await run(FACET, { status: 200 }, { headers: { Origin: origin, Referer: `${origin}/` } });
+            expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('10');
+            expect(originRequests[0].headers.get('X-Credits-Website')).toBeNull();
+        }
     });
 
     it('never forwards a client-sent X-Credits-Website', async () => {

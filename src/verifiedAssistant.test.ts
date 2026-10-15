@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { RateLimiter } from './rateLimiter';
 import { mintUiToken } from './uiToken';
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER } from './verifiedAssistant';
-import worker from './index';
+import { runWorker, HARNESS_ASSISTANT_TOKEN, HARNESS_IP, HARNESS_UI_SECRET } from './testHarness';
 
 // A keyed request looks its key up in Postgres. There is no database here, so checkApiKey fails open to a
 // valid key at 100,000 credits a day, which is all the keyed test needs.
@@ -13,9 +12,9 @@ vi.mock('pg', () => ({
     },
 }));
 
-const TOKEN = 'test-verified-assistant-token-0123456789abcdef';
-const UI_SECRET = 'test-ui-hmac-secret';
-const IP = '203.0.113.7';
+const TOKEN = HARNESS_ASSISTANT_TOKEN;
+const UI_SECRET = HARNESS_UI_SECRET;
+const IP = HARNESS_IP;
 const PAGE2 = 'IlsnLUluZmluaXR5JywgMCwgJ2h0dHBzOi8vb3BlbmFsZXgub3JnL1cxMjMnXSI=';
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -42,67 +41,8 @@ describe('isVerifiedAssistant (oxjob #1686)', () => {
     });
 });
 
-// An in-memory DurableObjectState: enough storage for RateLimiter, nothing else.
-function fakeState(initial: Record<string, unknown> = {}) {
-    const store = new Map<string, unknown>(Object.entries(initial));
-    return {
-        storage: {
-            get: async (k: string) => store.get(k),
-            put: async (k: string | Record<string, unknown>, v?: unknown) => {
-                if (typeof k === 'string') store.set(k, v);
-                else for (const [kk, vv] of Object.entries(k)) store.set(kk, vv);
-            },
-            setAlarm: async () => {},
-        },
-        blockConcurrencyWhile: async (fn: () => Promise<void>) => fn(),
-    };
-}
-
 // The whole API path, with one real RateLimiter per bucket name, so separate buckets really are separate.
-async function run(path: string, opts: {
-    headers?: Record<string, string>;
-    env?: Record<string, unknown>;
-    buckets?: Record<string, Record<string, unknown>>;
-} = {}) {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-        new Response('{"meta":{}}', { status: 200, headers: { 'Content-Type': 'application/json' } })));
-    const limiters = new Map<string, RateLimiter>();
-    const checks: { bucket: string; dailyLimit: number; perSecondLimit: number }[] = [];
-    const rows: { doubles: number[] }[] = [];
-    const pending: Promise<unknown>[] = [];
-    async function limiterFor(name: string): Promise<RateLimiter> {
-        if (!limiters.has(name)) {
-            limiters.set(name, new RateLimiter(fakeState(opts.buckets?.[name]) as any));
-            await new Promise(r => setTimeout(r, 0)); // let loadFromStorage finish
-        }
-        return limiters.get(name)!;
-    }
-    const env = {
-        OPENALEX_API_URL: 'https://origin.test',
-        FORCE_HEALTH_STATE: 'GREEN',
-        VERIFIED_ASSISTANT_TOKEN: TOKEN,
-        UI_TOKEN_HMAC_SECRET: UI_SECRET,
-        RATE_LIMITER: {
-            idFromName: (n: string) => n,
-            get: (name: string) => ({
-                fetch: async (u: string, init?: RequestInit) => {
-                    if (u.endsWith('/check')) {
-                        const b = JSON.parse(String(init?.body));
-                        checks.push({ bucket: name, dailyLimit: b.dailyLimit, perSecondLimit: b.perSecondLimit });
-                    }
-                    return (await limiterFor(name)).fetch(new Request(u, init));
-                },
-            }),
-        },
-        ANALYTICS: { writeDataPoint: (p: { doubles: number[] }) => { rows.push(p); } },
-        ...opts.env,
-    };
-    const ctx = { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException: () => {} };
-    const req = new Request(`https://api.openalex.org${path}`, { headers: { 'CF-Connecting-IP': IP, ...opts.headers } });
-    const res = await worker.fetch(req, env as any, ctx as any);
-    await Promise.all(pending);
-    return { res, checks, rows };
-}
+const run = runWorker;
 
 const SEARCH = '/works?search=coral+reefs';
 const ASSISTANT = { [VERIFIED_ASSISTANT_HEADER]: TOKEN };
@@ -155,7 +95,7 @@ describe('verified AI assistants on the API path (oxjob #1686)', () => {
     });
 
     it('the website (trustedUi) keeps the normal keyless budget', async () => {
-        const uiToken = await mintUiToken(UI_SECRET, Date.now(), 1800);
+        const uiToken = await mintUiToken(UI_SECRET, Date.now(), 1800, IP);
         const { checks, rows } = await run(SEARCH, { headers: { 'X-OpenAlex-UI': uiToken } });
         expect(checks).toEqual([{ bucket: `credits:${IP}`, dailyLimit: 1000, perSecondLimit: 10 }]);
         expect(rows[0].doubles[DOUBLE7_TRUSTED_UI]).toBe(1);

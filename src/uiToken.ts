@@ -11,31 +11,70 @@
 // TTL HMAC token the GUI then attaches as the `X-OpenAlex-UI` header. The main
 // proxy path verifies the HMAC and tags the request `trustedUi` in analytics.
 //
-// HARD INVARIANT: this token is PROVENANCE, never AUTHORIZATION. A missing,
-// expired, or forged token must NEVER block, throttle, or downgrade an API
-// request — it only flips an analytics flag. The OpenAlex API stays wide open.
+// What the token buys (since #521, #1533, #1682): the website's perks, never
+// extra budget. Website and keyless API calls share one budget per IP. The perks
+// are a search facet at list price, exemption from the anonymous-search ladder,
+// the long-search gate and the keyless cursor gate. A missing or rejected token
+// never blocks a request; it is just priced and gated like any keyless call.
+//
+// Bound to the minting network (oxjob #1691/#1692, v2): a token minted on one
+// IP (IPv6: one /64) is refused on any other, so one headless browser can't
+// mint a token and share it across a rotating proxy pool. A refused token gets
+// `X-OpenAlex-UI-Token: refresh` on the response so the website re-mints.
 //
 // Honest limitation (see work/phase5a-turnstile-design.md in oxjobs #338):
 // Turnstile is the same defense class as the Managed Challenge that the
-// AS132203 headless fleet already defeats, so this does not hard-stop
-// sophisticated bots from minting tokens. It kills the trivial string-copy
-// spoof and yields a far cleaner analytics signal; the ES-cost lever is #340.
+// AS132203 headless fleet already defeats, so a headless browser can still
+// mint a token for its own IP. Binding makes that cost one solve per IP.
 
-const TOKEN_VERSION = 1;
+const TOKEN_VERSION = 2;
+// v1 tokens (unbound, 30-minute TTL) still verify so open tabs keep their perks
+// across the deploy; none can be minted after it. Delete after 2026-10-17.
+const LEGACY_UNBOUND_VERSION = 1;
 const TURNSTILE_SITEVERIFY_URL =
     "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+// The hostnames the website's Turnstile widget is allowed on (Cloudflare widget
+// config, read 2026-10-15). A solve from anywhere else mints nothing.
+export const UI_TOKEN_HOSTNAMES: readonly string[] = ["openalex.org", "www.openalex.org"];
 
 export interface UiTokenPayload {
     v: number;      // token version
     iat: number;    // issued-at (epoch seconds)
     exp: number;    // expiry (epoch seconds)
     nonce: string;  // random, makes each token unique (no replay value on its own)
+    net?: string;   // v2: keyed hash of the minting network (see networkOf)
 }
 
 export interface VerifyResult {
     valid: boolean;
-    reason?: "malformed" | "bad_signature" | "expired" | "bad_version" | "no_secret";
+    reason?: "malformed" | "bad_signature" | "expired" | "bad_version" | "no_secret" | "wrong_network";
     payload?: UiTokenPayload;
+}
+
+/**
+ * The network a token is bound to: an IPv4 address as is, or an IPv6 address's
+ * /64 (one household or device; privacy addresses rotate inside it). Null when
+ * there is no usable IP, which binds to nothing and so never verifies.
+ */
+export function networkOf(ip: string | null | undefined): string | null {
+    if (!ip) return null;
+    const s = ip.trim().toLowerCase();
+    if (!s.includes(":")) return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) ? s : null;
+    const v4mapped = s.match(/^::ffff:(\d{1,3}(\.\d{1,3}){3})$/);
+    if (v4mapped) return v4mapped[1];
+    const [head, tail = ""] = s.split("::");
+    if (s.split("::").length > 2) return null;
+    const h = head ? head.split(":") : [];
+    const t = s.includes("::") ? (tail ? tail.split(":") : []) : [];
+    if (s.includes("::") && h.length + t.length > 7) return null;
+    const groups = s.includes("::") ? [...h, ...Array(8 - h.length - t.length).fill("0"), ...t] : h;
+    if (groups.length !== 8 || !groups.every(g => /^[0-9a-f]{1,4}$/.test(g))) return null;
+    return groups.slice(0, 4).map(g => parseInt(g, 16).toString(16)).join(":") + "::/64";
+}
+
+async function networkTag(secret: string, ip: string | null | undefined): Promise<string | null> {
+    const net = networkOf(ip);
+    return net ? bytesToB64url(await hmac(secret, `net|${net}`)).slice(0, 16) : null;
 }
 
 // ---- base64url (no padding) over UTF-8 / bytes -----------------------------
@@ -84,30 +123,42 @@ export function timingSafeEqual(a: string, b: string): boolean {
 // ---- mint / verify ---------------------------------------------------------
 
 /**
- * Mint a signed UI-provenance token. `nonce` defaults to a fresh random value;
- * pass one only in tests for determinism.
+ * Mint a signed UI-provenance token bound to the network of `ip` (the caller's
+ * CF-Connecting-IP). `nonce` defaults to a fresh random value; pass one only in
+ * tests for determinism.
  */
 export async function mintUiToken(
     secret: string,
     nowMs: number,
     ttlSeconds: number,
+    ip: string | null,
     nonce: string = crypto.randomUUID(),
 ): Promise<string> {
     const iat = Math.floor(nowMs / 1000);
-    const payload: UiTokenPayload = { v: TOKEN_VERSION, iat, exp: iat + ttlSeconds, nonce };
+    const net = await networkTag(secret, ip);
+    const payload: UiTokenPayload = { v: TOKEN_VERSION, iat, exp: iat + ttlSeconds, nonce, ...(net ? { net } : {}) };
     const body = encodeJson(payload);
     const sig = bytesToB64url(await hmac(secret, body));
     return `${body}.${sig}`;
 }
 
+/** The pre-binding mint, kept only so tests can show v1 tokens still verify across the deploy. */
+export async function mintLegacyUnboundUiToken(secret: string, nowMs: number, ttlSeconds: number): Promise<string> {
+    const iat = Math.floor(nowMs / 1000);
+    const body = encodeJson({ v: LEGACY_UNBOUND_VERSION, iat, exp: iat + ttlSeconds, nonce: crypto.randomUUID() });
+    return `${body}.${bytesToB64url(await hmac(secret, body))}`;
+}
+
 /**
- * Verify a UI-provenance token. Never throws — returns {valid:false, reason}
- * on any problem so callers can treat every failure as simply "untrusted".
+ * Verify a UI-provenance token presented from `ip`. Never throws — returns
+ * {valid:false, reason} on any problem so callers can treat every failure as
+ * simply "untrusted".
  */
 export async function verifyUiToken(
     token: string | null | undefined,
     secret: string | undefined,
     nowMs: number,
+    ip: string | null,
 ): Promise<VerifyResult> {
     if (!secret) return { valid: false, reason: "no_secret" };
     if (!token || typeof token !== "string") return { valid: false, reason: "malformed" };
@@ -126,9 +177,13 @@ export async function verifyUiToken(
     } catch {
         return { valid: false, reason: "malformed" };
     }
-    if (payload.v !== TOKEN_VERSION) return { valid: false, reason: "bad_version" };
+    if (payload.v !== TOKEN_VERSION && payload.v !== LEGACY_UNBOUND_VERSION) return { valid: false, reason: "bad_version" };
     if (typeof payload.exp !== "number" || payload.exp * 1000 <= nowMs) {
         return { valid: false, reason: "expired" };
+    }
+    if (payload.v === TOKEN_VERSION) {
+        const here = await networkTag(secret, ip);
+        if (!payload.net || !here || !timingSafeEqual(payload.net, here)) return { valid: false, reason: "wrong_network", payload };
     }
     return { valid: true, payload };
 }
@@ -145,12 +200,15 @@ export interface TurnstileResult {
  * `fetchImpl` is injectable for tests. Fails closed (success:false) on any
  * network/parse error — a failed verify just means "no token minted", which is
  * safe (the caller still serves API traffic; it's only the provenance mint).
+ * A solve passes only if Turnstile says it was made on one of `allowedHostnames`
+ * (Cloudflare's advice: check `hostname`, oxjob #1691).
  */
 export async function verifyTurnstile(
     turnstileResponse: string | null | undefined,
     secret: string | undefined,
     remoteIp: string | null,
     fetchImpl: typeof fetch = fetch,
+    allowedHostnames: readonly string[] = UI_TOKEN_HOSTNAMES,
 ): Promise<TurnstileResult> {
     if (!secret || !turnstileResponse) return { success: false, errorCodes: ["missing-input"] };
     try {
@@ -159,7 +217,10 @@ export async function verifyTurnstile(
         form.append("response", turnstileResponse);
         if (remoteIp) form.append("remoteip", remoteIp);
         const resp = await fetchImpl(TURNSTILE_SITEVERIFY_URL, { method: "POST", body: form });
-        const data = (await resp.json()) as { success?: boolean; "error-codes"?: string[] };
+        const data = (await resp.json()) as { success?: boolean; "error-codes"?: string[]; hostname?: string };
+        if (data.success === true && !allowedHostnames.includes(String(data.hostname ?? "").toLowerCase())) {
+            return { success: false, errorCodes: ["hostname-mismatch"] };
+        }
         return { success: data.success === true, errorCodes: data["error-codes"] };
     } catch {
         return { success: false, errorCodes: ["verify-failed"] };

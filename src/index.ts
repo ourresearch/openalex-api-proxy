@@ -59,6 +59,14 @@ const UI_TOKEN_TTL_SECONDS = 1800;
 // header style). Chosen over a query param so it stays out of URL logs/cache
 // keys and isn't copy-pasteable from a shared URL the way `mailto` was.
 const UI_TOKEN_HEADER = "X-OpenAlex-UI";
+// Set to "refresh" on the response when a request carried a token we refused (expired, minted on another
+// network, or forged), so the website knows to mint a new one (oxjob #1691).
+const UI_TOKEN_STATUS_HEADER = "X-OpenAlex-UI-Token";
+// /ui-token mints per IP (oxjob #1691). A NAT'd campus shares one IP, hence the generous daily cap.
+const UI_TOKEN_MINTS_PER_IP_PER_DAY = 500;
+const UI_TOKEN_MINTS_PER_IP_PER_SECOND = 5;
+// Requests whose UI token was refused; the default export adds UI_TOKEN_STATUS_HEADER to their responses.
+const uiTokenRefused = new WeakSet<Request>();
 
 type ThrottleScope = 'user' | 'org';
 
@@ -194,15 +202,27 @@ const handler = {
                 turnstileResponse = body.turnstileResponse || body["cf-turnstile-response"] || null;
             } catch { /* fall through to the missing-token branch */ }
 
-            const ts = await verifyTurnstile(
-                turnstileResponse,
-                env.TURNSTILE_SECRET,
-                req.headers.get("CF-Connecting-IP"),
-            );
+            const mintIp = req.headers.get("CF-Connecting-IP");
+            // Mints per IP are capped (oxjob #1691): a browser mints about once per visit; a script minting
+            // hundreds is not the website. Over the cap the website just goes without a token (no perks).
+            // Checked before siteverify so a flood never reaches Cloudflare's API. Fails open on DO errors.
+            try {
+                const mintLimiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(`uimint:${mintIp || "anon"}`));
+                const mintCheck = await mintLimiter.fetch("http://internal/check", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit: UI_TOKEN_MINTS_PER_IP_PER_DAY, perSecondLimit: UI_TOKEN_MINTS_PER_IP_PER_SECOND, credits: 1 }),
+                }).then(r => r.json() as Promise<{ success: boolean; retryAfter?: number }>);
+                if (!mintCheck.success) {
+                    return json(429, { error: "Too many UI token requests from this IP" });
+                }
+            } catch (error) {
+                reportError(error, { site: "ui_token_mint_limit" });
+            }
+            const ts = await verifyTurnstile(turnstileResponse, env.TURNSTILE_SECRET, mintIp);
             if (!ts.success) {
                 return json(403, { error: "Turnstile verification failed", errorCodes: ts.errorCodes });
             }
-            const token = await mintUiToken(env.UI_TOKEN_HMAC_SECRET, Date.now(), UI_TOKEN_TTL_SECONDS);
+            const token = await mintUiToken(env.UI_TOKEN_HMAC_SECRET, Date.now(), UI_TOKEN_TTL_SECONDS, mintIp);
             return json(200, { token, expiresIn: UI_TOKEN_TTL_SECONDS });
         }
 
@@ -303,15 +323,17 @@ const handler = {
             return json(200, { authors, institutions, keywords, works });
         }
 
-        // Is this request carrying a valid UI-provenance token? Provenance only:
-        // NEVER gates the request — just tags analytics so the UI/non-UI split
-        // (relied on by #338 + #340) stops being spoofable via `mailto`.
+        // Is this request carrying a valid website token, minted on this request's network? It tags
+        // analytics (double7) and earns the website's perks (see uiToken.ts); it never blocks a request.
+        const uiTokenHeader = req.headers.get(UI_TOKEN_HEADER);
         const uiTokenVerify = await verifyUiToken(
-            req.headers.get(UI_TOKEN_HEADER),
+            uiTokenHeader,
             env.UI_TOKEN_HMAC_SECRET,
             Date.now(),
+            req.headers.get("CF-Connecting-IP"),
         );
         const trustedUi = uiTokenVerify.valid;
+        if (uiTokenHeader && !trustedUi && uiTokenVerify.reason !== "no_secret") uiTokenRefused.add(req);
 
         const apiKey = getApiKeyFromRequest(req);
         let hasValidApiKey = false;
@@ -610,24 +632,13 @@ const handler = {
             rerankAsked = false;
         }
 
-        // Did the request come from the openalex.org website? trustedUi (HMAC
-        // UI-provenance token) is the unspoofable signal, but when the UI-token mint
-        // hasn't landed the GUI's keyless search is untrusted too — that broke the
-        // frontend on 2026-07-01. So ALSO honor the browser Origin/Referer:
-        // openalex.org fetches always carry it on the request itself (the CORS
-        // preflight is an OPTIONS, already short-circuited above). Used by the
-        // anon-search ladder carve-out and the website-facet price (oxjob #1533).
-        const guiOrigin = ((): boolean => {
-            for (const h of [req.headers.get("Origin"), req.headers.get("Referer")]) {
-                if (!h) continue;
-                try {
-                    const host = new URL(h).hostname;
-                    if (host === "openalex.org" || host.endsWith(".openalex.org")) return true;
-                } catch { /* malformed header — ignore */ }
-            }
-            return false;
-        })();
-        const fromWebsite = trustedUi || guiOrigin;
+        // Did the request come from the openalex.org website? Only the website token says so. Until
+        // 2026-10-15 an openalex.org Origin or Referer also counted (added after the 2026-07-01 shed broke
+        // the website before its token landed), but any script can send that header: on 14 Oct, 67,570
+        // IPs that never held a token sent it, against 4,574 real browsers, which lose only ~2,800 cheap
+        // facets a day before their token lands (oxjob #1691/#1692 EXPLORE.md). Used by the anon-search
+        // ladder carve-out and the website-facet price (oxjob #1533).
+        const fromWebsite = trustedUi;
 
         // Classify endpoint and determine credit cost
         const classification = classifyEndpoint(url.pathname, url.searchParams, { websiteFacet: fromWebsite });
@@ -661,7 +672,7 @@ const handler = {
         // never charged. Untouched: keyed clients, the GUI, autocomplete (cheap
         // 'list'), singleton/list, semantic (already 1/s capped).
         const isWorksSearch = url.pathname.replace(/^\/+/, "").split("/")[0].toLowerCase() === "works";
-        if (isWorksSearch && !apiKey && !trustedUi && !guiOrigin && classification.type === 'search') {
+        if (isWorksSearch && !apiKey && !fromWebsite && classification.type === 'search') {
             const verdict = await checkAnonSearchBudget(env, ctx);
             if (!verdict.ok) {
                 const statusCode = verdict.statusCode ?? 503;
@@ -1527,7 +1538,13 @@ const handler = {
 export default {
     fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         return withErrorReporting({ env, waitUntil: (p) => ctx.waitUntil(p), request: req }, "fetch",
-            () => handler.fetch(req, env, ctx));
+            async () => {
+                const res = await handler.fetch(req, env, ctx);
+                if (!uiTokenRefused.has(req)) return res;
+                const out = new Response(res.body, res);  // origin responses have immutable headers
+                out.headers.set(UI_TOKEN_STATUS_HEADER, "refresh");
+                return out;
+            });
     },
 } satisfies ExportedHandler<Env>;
 
@@ -1702,7 +1719,7 @@ function getCorsHeaders(): Headers {
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, DELETE, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, Accept-Language, Accept-Encoding, Authorization, Content-Type, X-OpenAlex-UI, X-Impersonate-User");
-    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, X-RateLimit-Limit-USD, X-RateLimit-Remaining-USD, X-RateLimit-Prepaid-Remaining-USD, X-RateLimit-Cost-USD, X-RateLimit-Cost-Required-USD, Retry-After, Location, Content-Disposition");
+    headers.set("Access-Control-Expose-Headers", "Cache-Control, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Onetime-Remaining, X-RateLimit-Credits-Used, X-RateLimit-Credits-Required, X-RateLimit-Reset, X-RateLimit-Limit-USD, X-RateLimit-Remaining-USD, X-RateLimit-Prepaid-Remaining-USD, X-RateLimit-Cost-USD, X-RateLimit-Cost-Required-USD, Retry-After, Location, Content-Disposition, X-OpenAlex-UI-Token");
     return headers;
 }
 
