@@ -18,6 +18,7 @@ import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
+import { perSecondLimitFor } from "./highRps";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -31,6 +32,7 @@ export interface Env extends SentryEnv {
     CV_PARSER?: Fetcher;
     QUERY_WRITER?: Fetcher;   // Service binding to openalex-query-writer: /query/text, plain words to OQL (oxjob #1494)
     QUERY_TEXT_ACCOUNTS?: string; // feature flag: user/org ids allowed to call /query/text (comma-separated); empty = nobody
+    HIGH_RPS_ACCOUNTS?: string;   // user/org ids whose keys get a higher per-second cap, `id` or `id:rps` (oxjob #1689; highRps.ts)
     COLLECTION_PROXY_KEY?: string;  // Worker secret, same name and value as on users-api (oxjob #1515)
     AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
     // oxjob #338 Phase 5a — the website token (Turnstile-minted; see uiToken.ts). Both optional:
@@ -364,7 +366,8 @@ const handler = {
         let onetimeCreditsBalance = 0;
         let onetimeCreditsExpiresAt: string | undefined;
         let userPlan: string | null = null;
-        // The key's account (a user id, or an org id for org keys); read by the /query/text feature flag (oxjob #1494).
+        // The key's account (a user id, or an org id for org keys); read by the /query/text feature flag (oxjob #1494)
+        // and the per-second cap override (oxjob #1689).
         let keyAccountIds: string[] = [];
         // True when the auth (and thus the prepaid balance below) came from the
         // per-isolate API_KEY_CACHE rather than a fresh DB read. Used by the
@@ -738,7 +741,9 @@ const handler = {
         // is the dominant diffuse load during search-saturation incidents; the 10/s
         // per-IP cap reins in the heavy-hitter anon IPs without touching keyed clients.
         // 2026-10-14: verified AI assistants (5M a day, oxjob #1686) land on 50/s through the same rule.
-        const perSecondLimit = maxCreditsPerDay > 10000 ? 50 : (maxCreditsPerDay > 1000 ? 30 : 10);
+        // 2026-10-15: keys of accounts listed in HIGH_RPS_ACCOUNTS get their own cap instead, default 500/s: the
+        // website's server-rendering key (oxjob #1689; see highRps.ts).
+        const perSecondLimit = perSecondLimitFor(maxCreditsPerDay, keyAccountIds, env.HIGH_RPS_ACCOUNTS);
 
         // Check rate limit using Durable Object
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
