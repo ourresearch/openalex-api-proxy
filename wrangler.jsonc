@@ -15,7 +15,7 @@
 		// instead of the 50/30/10 tiers: `id` = 500/s, `id:rps` = that (at most 1000). For openalex.org's server-rendering
 		// key. Daily credits are unchanged; malformed entries are skipped. Set it here, not in the dashboard: a deploy
 		// overwrites a dashboard value with this one. Empty = nobody. See src/highRps.ts.
-		"HIGH_RPS_ACCOUNTS": ""
+		"HIGH_RPS_ACCOUNTS": "user-cqqCosHNn95S,user-PD7oDjspQaE8"
 	},
 	"observability": {
 		"enabled": true,
