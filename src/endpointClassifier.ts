@@ -34,6 +34,13 @@ const EXTERNAL_ID_PREFIXES = [
     'orcid:', 'ror:', 'wikidata:', 'issn:', 'issn_l:', 'scopus:'
 ];
 
+// The same external IDs written as URLs, which the origin's /<entity>/<path:id> routes also look up as one record
+// (oxjob #1686): /works/https://doi.org/10.7717/peerj.4375, /works/doi.org/..., /works/https://dx.doi.org/...,
+// /authors/https://orcid.org/..., /institutions/https://ror.org/..., /works/https://openalex.org/W123. Scheme
+// optional, and "//" may arrive collapsed to "/". A form the origin doesn't resolve 404s, and errors are free, so
+// matching a host here never makes a list free.
+const EXTERNAL_ID_URL = /^(?:https?:\/\/?)?(?:www\.|dx\.)?(?:doi\.org|orcid\.org|ror\.org|openalex\.org|wikidata\.org|scopus\.com)\/./;
+
 // Search-type filters in the filter= param that trigger 10-credit search pricing
 const SEARCH_FILTERS = [
     'abstract.search',
@@ -144,8 +151,9 @@ export function classifyEndpoint(
     // Entity endpoints
     if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
         // Singleton: /entity/ID or /entity/ID/subpath (e.g., /works/W123/ngrams)
-        // Matches OpenAlex IDs (W123, 123) and external ID prefixes (doi:..., pmid:..., etc.)
-        if (segments.length >= 2 && isSingletonIdentifier(segments[1])) {
+        // Matches OpenAlex IDs (W123, 123), external ID prefixes (doi:..., pmid:..., etc.) and ID URLs
+        // (https://doi.org/..., https://orcid.org/...), so it reads everything after "/entity/", not one segment.
+        if (segments.length >= 2 && isSingletonIdentifier(normalized.slice(segments[0].length + 1))) {
             return { type: 'singleton', creditCost: 0 };
         }
 
@@ -279,13 +287,19 @@ function hasSearchParams(searchParams: URLSearchParams): boolean {
 }
 
 /**
- * Check if a URL path segment is a singleton entity identifier.
- * Matches OpenAlex IDs (W123, 123) and external ID prefixes (doi:..., pmid:..., etc.)
+ * Is the path after "/entity/" a lookup of one record?
+ * Matches OpenAlex IDs (W123, 123), external ID prefixes (doi:..., pmid:..., etc.) and the same IDs as URLs
+ * (https://doi.org/...). Percent-encoded forms (https%3A%2F%2Fdoi.org%2F..., doi%3A10.1%2Fx) count too: the
+ * origin decodes the path before it routes, so they are the same lookup.
  */
-function isSingletonIdentifier(segment: string): boolean {
-    if (OPENALEX_ID_PATTERN.test(segment)) return true;
-    const lower = segment.toLowerCase();
-    return EXTERNAL_ID_PREFIXES.some(prefix => lower.startsWith(prefix));
+function isSingletonIdentifier(idPath: string): boolean {
+    let id = idPath.toLowerCase();
+    if (id.includes('%')) {
+        try { id = decodeURIComponent(id); } catch { /* malformed escape: judge it as written */ }
+    }
+    if (OPENALEX_ID_PATTERN.test(id.split('/')[0])) return true;
+    if (EXTERNAL_ID_PREFIXES.some(prefix => id.startsWith(prefix))) return true;
+    return EXTERNAL_ID_URL.test(id);
 }
 
 /**

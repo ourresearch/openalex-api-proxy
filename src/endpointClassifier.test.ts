@@ -138,6 +138,60 @@ describe('endpointClassifier', () => {
         });
     });
 
+    // oxjob #1686: the docs say lookups by DOI are free, and agents pass the DOI URL they have. Each form below
+    // returned the record at the origin (probed 2026-10-15) but was billed as a 1-credit list.
+    describe('external IDs written as URLs are singletons (oxjob #1686)', () => {
+        const free = (path: string) => expect(classifyEndpoint(path, new URLSearchParams())).toEqual({ type: 'singleton', creditCost: 0 });
+
+        it.each([
+            '/works/https://doi.org/10.7717/peerj.4375',
+            '/works/http://doi.org/10.7717/peerj.4375',
+            '/works/doi.org/10.7717/peerj.4375',
+            '/works/https://dx.doi.org/10.7717/peerj.4375',
+            '/works/http://dx.doi.org/10.7717/peerj.4375',
+            '/works/https:/doi.org/10.7717/peerj.4375',       // "//" collapsed by a client
+            '/works/HTTPS://DOI.ORG/10.7717/PEERJ.4375',
+            '/works/https://doi.org/10.7717/peerj.4375/',     // trailing slash
+        ])('a DOI URL: %s', free);
+
+        it.each([
+            '/works/https%3A%2F%2Fdoi.org%2F10.7717%2Fpeerj.4375',
+            '/works/https%3a%2f%2fdoi.org%2f10.7717%2fpeerj.4375',
+            '/works/doi.org%2F10.7717%2Fpeerj.4375',
+            '/works/doi%3A10.7717%2Fpeerj.4375',               // the prefixed form, encoded
+            '/authors/https%3A%2F%2Forcid.org%2F0000-0001-6187-6610',
+            '/works/W2741809807%2Fngrams',
+        ])('a percent-encoded ID: %s', free);
+
+        it.each([
+            '/authors/https://orcid.org/0000-0001-6187-6610',
+            '/institutions/https://ror.org/042nb2s44',
+            '/institutions/ror.org/042nb2s44',
+            '/funders/https://ror.org/021nxhr62',
+            '/publishers/https://ror.org/02scfj030',
+            '/works/https://openalex.org/W2741809807',
+            '/institutions/https://www.wikidata.org/wiki/Q49108',
+            '/authors/https://www.scopus.com/authid/detail.uri?authorId=12345678',
+        ])('the other ID URLs the prefixed forms cover: %s', free);
+
+        it('a DOI URL stays free whatever query params ride along', () => {
+            expect(classifyEndpoint('/works/https://doi.org/10.7717/peerj.4375', new URLSearchParams('select=id,title&search=x')))
+                .toEqual({ type: 'singleton', creditCost: 0 });
+        });
+
+        it.each([
+            '/works',                                       // a list
+            '/works/random',                                // a named route, not an ID
+            '/works/https://example.org/10.7717/peerj.4375', // not an ID host
+            '/works/https://doi.org.example.com/10.1/x',     // look-alike host
+            '/works/doi.org',                               // a host with no ID
+            '/works/https%3A%2F%2Fexample.org%2Fx',
+            '/works/%E0%A4%A',                              // malformed escape: judged as written, no throw
+        ])('still a list: %s', (path) => {
+            expect(classifyEndpoint(path, new URLSearchParams()).type).toBe('list');
+        });
+    });
+
     describe('list endpoints', () => {
         it('classifies /works as list (1 credit)', () => {
             const result = classifyEndpoint('/works');
