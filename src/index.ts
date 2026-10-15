@@ -17,6 +17,7 @@ import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cac
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
+import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -912,6 +913,27 @@ const handler = {
             }
         }
 
+        // A keyless contact address (mailto=) shares one budget across every IP that sends it (oxjob #1692; see
+        // contactBudget.ts). An address whose day is spent is refused here, before any DO call or IP charge.
+        const contact = await contactBudgetFor(url.searchParams, { apiKey, trustedUi, verifiedAssistant });
+        const contactRefusal = (status: number, retryAfter: number, message: string) => {
+            logAnalytics({
+                ctx, env, apiKey, req, url, scope: 'contact',
+                responseTime: Date.now() - startTime,
+                statusCode: status,
+                rateLimit: contact!.dailyLimit,
+                rateLimitRemaining: 0,
+                endpointType: classification.type,
+                creditCost: 0,
+            });
+            const resp = json(status, { error: "Rate limit exceeded", message, retryAfter });
+            resp.headers.set("Retry-After", String(Math.ceil(retryAfter)));
+            return resp;
+        };
+        if (contact && contactSpent(contact.bucket, Date.now())) {
+            return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage(contact));
+        }
+
         let rateLimitResult: {
             success: boolean;
             retryAfter?: number;
@@ -1045,6 +1067,26 @@ const handler = {
             });
 
             return errorResponse;
+        }
+
+        // The IP's budget allowed it; now the contact address's shared one (fails open, like the IP check).
+        if (contact) {
+            try {
+                const verdict = await env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(contact.bucket)).fetch("http://internal/check", {
+                    method: "POST",
+                    body: JSON.stringify({ dailyLimit: contact.dailyLimit, perSecondLimit: CONTACT_PER_SECOND, credits: creditCost }),
+                }).then(r => r.json() as Promise<{ success: boolean; retryAfter?: number; limitType?: string }>);
+                if (!verdict.success) {
+                    if (verdict.limitType === 'per_second') {
+                        return contactRefusal(429, verdict.retryAfter ?? 1,
+                            `Rate limit exceeded: keyless requests naming this mailto address share ${CONTACT_PER_SECOND} requests per second across every network that sends them. Please slow down, or use a free API key: https://help.openalex.org/api/authentication/`);
+                    }
+                    markContactSpent(contact.bucket, Date.now());
+                    return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage(contact));
+                }
+            } catch (error) {
+                reportError(error, { site: "contact_budget_do" });
+            }
         }
 
         // Route content.openalex.org/* OR /content/* to content worker

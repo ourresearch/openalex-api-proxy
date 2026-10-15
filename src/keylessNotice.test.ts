@@ -109,7 +109,7 @@ describe('wantsKeylessNotice (oxjob #1686)', () => {
         const mailto = keylessNoticeFor(new URLSearchParams('mailto=me@example.com'), 0.1);
         expect(plain).toContain('free daily budget ($0.10)');
         expect(plain).not.toContain('mailto');
-        expect(mailto).toContain('The mailto parameter is ignored.');
+        expect(mailto).toContain("The mailto parameter doesn't raise this limit.");
         for (const n of [plain, mailto]) {
             expect(n).toContain(API_ROOT.get_a_free_key);
             expect(n).toContain(API_ROOT.llms_txt);

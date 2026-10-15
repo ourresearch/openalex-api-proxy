@@ -23,7 +23,7 @@ import { API_ROOT } from "./apiRoot";
 /** The notice for a keyless caller whose shared budget is `dailyBudgetUsd` a day ($0.10 today). */
 export function keylessNoticeFor(searchParams: URLSearchParams, dailyBudgetUsd: number): string {
     return `No API key, so this request shares one free daily budget ($${dailyBudgetUsd.toFixed(2)}) with everyone on your network's IP address.`
-        + (searchParams.has("mailto") ? " The mailto parameter is ignored." : "")
+        + (searchParams.has("mailto") ? " The mailto parameter doesn't raise this limit." : "")
         // $1/day is a free key's budget, set by users-api's plans, not here.
         + ` Get a free key with its own $1/day at ${API_ROOT.get_a_free_key} and add api_key=YOUR_KEY to your requests.`
         + ` Docs for agents: ${API_ROOT.llms_txt}`;
