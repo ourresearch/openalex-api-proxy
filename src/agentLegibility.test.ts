@@ -1,9 +1,10 @@
-// The agent-legibility fixes (oxjob #1686) driven through the whole Worker: the API root served at the edge, and
-// DOI URLs priced as singletons.
+// The three agent-legibility fixes (oxjob #1686) driven through the whole Worker: the keyless meta.notice, the
+// API root served at the edge, and DOI URLs priced as singletons.
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { RateLimiter } from './rateLimiter';
 import { mintUiToken } from './uiToken';
 import { VERIFIED_ASSISTANT_HEADER } from './verifiedAssistant';
+import { keylessNoticeFor } from './keylessNotice';
 import { API_ROOT, isApiRootRequest } from './apiRoot';
 import worker from './index';
 
@@ -27,6 +28,7 @@ const today = () => new Date().toISOString().split('T')[0];
 const SPENT = { [`credits:${IP}`]: { counter: { count: 1000, date: today() } } };
 
 const LIST_BODY = '{"meta": {"count": 5, "db_response_time_ms": 12, "page": 1, "per_page": 1}, "results": [{"id": "https://openalex.org/W1"}]}';
+const KEYLESS_NOTICE = keylessNoticeFor(new URLSearchParams(), 0.1);
 const WORK_BODY = '{"id":"https://openalex.org/W2741809807","doi":"https://doi.org/10.7717/peerj.4375"}';
 
 function fakeState(initial: Record<string, unknown> = {}) {
@@ -103,6 +105,58 @@ async function run(path: string, opts: {
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe('keyless meta.notice through the Worker (oxjob #1686)', () => {
+    it('a keyless list gets the notice as meta\'s first key, and no stale Content-Length', async () => {
+        const { res, text } = await run('/works?per_page=1');
+        expect(res.status).toBe(200);
+        const body = JSON.parse(text);
+        expect(Object.keys(body.meta)).toEqual(['notice', 'count', 'db_response_time_ms', 'page', 'per_page']);
+        expect(body.meta.notice).toBe(KEYLESS_NOTICE);
+        expect(res.headers.get('Content-Length')).toBeNull();
+        expect(res.headers.get('Content-Encoding')).toBeNull();
+    });
+
+    it('names mailto only when the request sent it', async () => {
+        const { text } = await run('/works?per_page=1&mailto=me@example.com');
+        expect(JSON.parse(text).meta.notice).toBe(keylessNoticeFor(new URLSearchParams('mailto=x'), 0.1));
+    });
+
+    it('a keyless POST (OQL at the root) gets it too', async () => {
+        const { text } = await run('/', { method: 'POST', body: '{"oql": "get works where year is 2024"}', headers: { 'Content-Type': 'application/json' } });
+        expect(JSON.parse(text).meta.notice).toBe(KEYLESS_NOTICE);
+    });
+
+    it('a singleton is not touched: same bytes, Content-Length kept', async () => {
+        const { res, text } = await run('/works/W2741809807', { origin: { body: WORK_BODY } });
+        expect(text).toBe(WORK_BODY);
+        expect(res.headers.get('Content-Length')).toBe(String(WORK_BODY.length));
+    });
+
+    // What index.ts itself works out; the response-shape exclusions are table-tested in keylessNotice.test.ts.
+    const none: [string, string, Parameters<typeof run>[1]][] = [
+        ['a keyed request (Bearer)', '/works?per_page=1', { headers: { Authorization: 'Bearer test-key-123' } }],
+        ['a keyed request (?api_key=)', '/works?per_page=1&api_key=test-key-123', {}],
+        ['a verified AI assistant', '/works?per_page=1', { headers: { [VERIFIED_ASSISTANT_HEADER]: TOKEN } }],
+        ['an error', '/works?per_page=1', { origin: { status: 400 } }],
+    ];
+    it.each(none)('none for %s: body byte for byte', async (_label, path, o) => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});  // the fail-open key lookup logs
+        expect((await run(path, o)).text).toBe(LIST_BODY);
+    });
+
+    it('none for the website (a valid UI token)', async () => {
+        const uiToken = await mintUiToken(UI_SECRET, Date.now(), 1800);
+        const { text } = await run('/works?per_page=1', { headers: { 'X-OpenAlex-UI': uiToken } });
+        expect(text).toBe(LIST_BODY);
+    });
+
+    it('none for HEAD, and HEAD still drops Content-Length', async () => {
+        const { res, text } = await run('/works?per_page=1', { method: 'HEAD', origin: { body: null } });
+        expect(text).toBe('');
+        expect(res.headers.get('Content-Length')).toBeNull();
+    });
+});
 
 describe('the API root, served by the Worker (oxjob #1686)', () => {
     it('GET /: the root document, free, without the origin or the credits bucket', async () => {

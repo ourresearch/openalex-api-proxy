@@ -16,6 +16,7 @@ import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CRED
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
+import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -1498,7 +1499,18 @@ const handler = {
             newHeaders.delete("Content-Length");
         }
 
-        const finalResponse = addCorsHeaders(new Response(response.body, {
+        // A keyless 200 JSON answer carries meta.notice about keys (oxjob #1686; see keylessNotice.ts). Spliced into
+        // the stream, so the length changes: drop Content-Length.
+        let responseBody = response.body;
+        if (responseBody && wantsKeylessNotice({
+            method: req.method, endpointType: classification.type, status: response.status, headers: response.headers,
+            apiKey, trustedUi, verifiedAssistant,
+        })) {
+            responseBody = responseBody.pipeThrough(metaNoticeTransform(keylessNoticeFor(url.searchParams, creditsToUsd(limit))));
+            newHeaders.delete("Content-Length");
+        }
+
+        const finalResponse = addCorsHeaders(new Response(responseBody, {
             status: response.status,
             statusText: response.statusText,
             headers: newHeaders
