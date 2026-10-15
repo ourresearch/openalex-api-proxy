@@ -16,7 +16,7 @@ import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CRED
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
-import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, pendingKeyRefusal, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, API_KEYS_ENFORCED_MESSAGE } from "./apiKeys";
+import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, pendingKeyRefusal, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, API_KEYS_ENFORCED_MESSAGE, API_KEY_ASKS_PER_NETWORK_PER_DAY, API_KEY_ASKS_REFUSED_MESSAGE } from "./apiKeys";
 import { wantsKeylessNotice, keylessNoticeFor, wantsPendingKeyNotice, pendingKeyNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, DEFAULT_SHARED_DAILY, ENFORCE_BLOCK_MESSAGE, ENFORCE_BUDGET_MESSAGE } from "./enforcementList";
@@ -2023,7 +2023,8 @@ async function apiKeysRoute(req: Request, env: Env, ctx: ExecutionContext, start
     }
 
     // oxjob #1692's enforcement list: a client whose keyless traffic it refuses can't mint keys by API either; the
-    // website's sign-up (Turnstile) stays open to its people. Shadow mode records and lets it through.
+    // website's sign-up (Turnstile) stays open to its people. Any enforce-mode match refuses, a shared_budget entry
+    // too (on purpose: a pool sharing one keyless budget mustn't mint a key per member). Shadow records, passes.
     const hit = await matchEnforcement(await loadEnforcement(env.ENFORCEMENT, Date.now()),
         apiKeysFacts(req, body.email, refererHostOf(req.headers.get("Referer"))), Date.now());
     if (hit) {
@@ -2039,6 +2040,25 @@ async function apiKeysRoute(req: Request, env: Env, ctx: ExecutionContext, start
             log(403);
             return json(403, { error: "Forbidden", code: "enforced", message: API_KEYS_ENFORCED_MESSAGE });
         }
+    }
+
+    // Attempts per network (IPv6 by /64), before users-api's database sees them: users-api's own caps count only
+    // accounts created, so a flood of refused requests would otherwise all reach it (oxjob #1692). Fails open.
+    const ip = req.headers.get("CF-Connecting-IP");
+    try {
+        const capped = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(`apikeys:${networkOf(ip) ?? ip ?? "anon"}`));
+        const check = await capped.fetch("http://internal/check", {
+            method: "POST",
+            body: JSON.stringify({ dailyLimit: API_KEY_ASKS_PER_NETWORK_PER_DAY, perSecondLimit: 1, credits: 1 }),
+        }).then(r => r.json() as Promise<{ success: boolean; retryAfter?: number }>);
+        if (!check.success) {
+            log(429);
+            const tooMany = json(429, { error: "Too Many Requests", code: "rate_limit_network", message: API_KEY_ASKS_REFUSED_MESSAGE });
+            tooMany.headers.set("Retry-After", String(Math.ceil(check.retryAfter ?? 3600)));
+            return tooMany;
+        }
+    } catch (error) {
+        reportError(error, { site: "api_keys_ask_limit" });
     }
 
     try {

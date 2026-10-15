@@ -98,7 +98,8 @@ describe('POST /api-keys goes to users-api', () => {
         expect(c.headers.get('User-Agent')).toBe('claude-code/2.1');
         expect(c.headers.get('Idempotency-Key')).toBe('b5a0e1c2-0000-4000-8000-000000000001');
         expect(c.headers.get('Authorization')).toBeNull();
-        expect(checks).toHaveLength(0);  // no credits, no keyless budget
+        // No credits and no keyless budget: the only check is the per-network ask cap.
+        expect(checks).toEqual([{ bucket: `apikeys:${HARNESS_IP}`, dailyLimit: 10, perSecondLimit: 1 }]);
     });
 
     it('works for a caller whose keyless budget is spent', async () => {
@@ -121,6 +122,23 @@ describe('POST /api-keys goes to users-api', () => {
         const { res } = await ask({ fetch: api.fetch, body: JSON.stringify({ email: 'a@b.org', name: 'x'.repeat(5000) }) });
         expect(res.status).toBe(413);
         expect(api.calls).toHaveLength(0);
+    });
+
+    it('caps asks per network a day before users-api sees them, IPv6 by /64', async () => {
+        const api = usersApi();
+        const spentV6 = { 'apikeys:2001:db8:abcd:12::/64': { counter: { count: 10, date: today() } } };
+        const { res } = await runWorker('/api-keys', {
+            method: 'POST', body: JSON.stringify({ email: 'ana.silva@usp.br' }), ip: '2001:db8:abcd:12::99',
+            env: { COLLECTION_PROXY_KEY: PROXY_KEY }, fetch: api.fetch, buckets: spentV6,
+        });
+        expect(res.status).toBe(429);
+        expect((await res.json() as any).code).toBe('rate_limit_network');
+        expect(api.calls).toHaveLength(0);
+        const other = await runWorker('/api-keys', {
+            method: 'POST', body: JSON.stringify({ email: 'ana.silva@usp.br' }), ip: '2001:db8:abcd:13::1',
+            env: { COLLECTION_PROXY_KEY: PROXY_KEY }, fetch: api.fetch, buckets: spentV6,
+        });
+        expect(other.res.status).toBe(201);
     });
 
     it('says so when users-api is down', async () => {

@@ -64,6 +64,11 @@ export function pendingKeyRefusal(dailyCredits: number, dailyRemainingUsd: numbe
 /** The 401 for a key we don't know: placeholders like YOUR_API_KEY land here, so say how to get a real one. */
 export const UNKNOWN_KEY_MESSAGE = `API key not found. Get a free key at https://openalex.org/settings/api-key. ${ASK_FOR_A_KEY}`;
 
+/** Asks per network (IPv4 address or IPv6 /64) a day, and 1 a second: a person needs one; users-api creates at
+ *  most 3 accounts per network a day and turns the rest away, but only after they reach its database. */
+export const API_KEY_ASKS_PER_NETWORK_PER_DAY = 10;
+export const API_KEY_ASKS_REFUSED_MESSAGE = `This network has asked for keys too often today. Your user can sign up at ${SIGNUP} instead (about 30 seconds) and copy their key from https://openalex.org/settings/api-key.`;
+
 export const API_KEYS_ENFORCED_MESSAGE = `Keys can't be requested by API for this client, because its keyless requests come from many networks at once. Your user can sign up at ${SIGNUP} (about 30 seconds) and copy their key from https://openalex.org/settings/api-key (if you think this is a mistake, write to support@openalex.org).`;
 
 /** The request's body text (at most MAX_BODY_BYTES) and the email it names, if it parses. */
