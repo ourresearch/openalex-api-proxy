@@ -87,8 +87,12 @@ export function logAnalytics(params: {
                     userKey = `anon_${bucket}`;
                 }
 
-                // Include status code in index for filtering
-                const indexKey = `${userKey}_${params.statusCode}`;
+                // Include status code in index for filtering. AE drops the whole row when the index is over
+                // 96 bytes (long garbage keys on 401s lost ~36K rows/day, oxjob #1685), so shorten the key part.
+                const fullKey = `${userKey}_${params.statusCode}`;
+                const indexKey = new TextEncoder().encode(fullKey).length <= 96
+                    ? fullKey
+                    : `${userKey.slice(0, 80).replace(/[^\x20-\x7e]/g, '?')}_${params.statusCode}`;
 
                 // -1 sentinel = not sampled or extraction failed. Real ES took is always >= 0.
                 // AE queries: WHERE double6 >= 0 to filter to the sampled subset.
