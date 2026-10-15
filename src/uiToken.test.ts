@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { mintUiToken, mintLegacyUnboundUiToken, networkOf, verifyUiToken, verifyTurnstile } from './uiToken';
+import { mintUiToken, networkOf, signPayload, verifyUiToken, verifyTurnstile } from './uiToken';
 
 const SECRET = 'test-hmac-secret-do-not-use-in-prod';
 const TTL = 1800; // 30 min
 const NOW = 1_700_000_000_000; // fixed epoch ms for determinism
 const IP = '203.0.113.7';
+// A pre-binding (v1) token, as the website held before the deploy.
+const legacyV1 = (secret: string, nowMs: number, ttl: number) =>
+    signPayload(secret, { v: 1, iat: Math.floor(nowMs / 1000), exp: Math.floor(nowMs / 1000) + ttl, nonce: 'v1' });
 
 describe('uiToken mint/verify', () => {
     it('mints a token that verifies as valid within its TTL', async () => {
@@ -95,7 +98,7 @@ describe('uiToken is bound to the network that minted it', () => {
     });
 
     it('still accepts legacy unbound v1 tokens from any IP until they expire (deploy cutover)', async () => {
-        const v1 = await mintLegacyUnboundUiToken(SECRET, NOW, TTL);
+        const v1 = await legacyV1(SECRET, NOW, TTL);
         expect((await verifyUiToken(v1, SECRET, NOW + 1000, '198.51.100.9')).valid).toBe(true);
         expect((await verifyUiToken(v1, SECRET, NOW + (TTL + 1) * 1000, IP)).reason).toBe('expired');
     });
@@ -128,8 +131,10 @@ describe('verifyTurnstile', () => {
     it('refuses a solve made on another hostname, or one with no hostname (oxjob #1691)', async () => {
         expect(await verifyTurnstile('ts', 'secret', null, offSiteFetch)).toEqual({ success: false, errorCodes: ['hostname-mismatch'] });
         expect((await verifyTurnstile('ts', 'secret', null, noHostFetch)).success).toBe(false);
-        const www = (async () => new Response(JSON.stringify({ success: true, hostname: 'www.openalex.org' }))) as unknown as typeof fetch;
-        expect((await verifyTurnstile('ts', 'secret', null, www)).success).toBe(true);
+        const on = (hostname: string) => (async () => new Response(JSON.stringify({ success: true, hostname }))) as unknown as typeof fetch;
+        expect((await verifyTurnstile('ts', 'secret', null, on('www.openalex.org'))).success).toBe(true);
+        expect((await verifyTurnstile('ts', 'secret', null, on('staging.openalex.org'))).success).toBe(true);
+        expect((await verifyTurnstile('ts', 'secret', null, on('notopenalex.org'))).success).toBe(false);
     });
     const failFetch = (async () =>
         new Response(JSON.stringify({ success: false, 'error-codes': ['invalid-input-response'] }), { status: 200 })) as unknown as typeof fetch;

@@ -1,8 +1,8 @@
 // The website's perks go to its token only, and the token works only on the network that minted it
 // (oxjob #1691 drop the openalex.org challenge, #1692 keyless IP rotators).
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mintUiToken, mintLegacyUnboundUiToken, verifyUiToken } from './uiToken';
-import { runWorker, HARNESS_IP, HARNESS_UI_SECRET } from './testHarness';
+import { mintUiToken, signPayload, verifyUiToken } from './uiToken';
+import { runWorker, today, DOUBLE7_TRUSTED_UI, HARNESS_IP, HARNESS_UI_SECRET } from './testHarness';
 
 vi.mock('pg', () => ({
     Client: class {
@@ -16,8 +16,6 @@ const FACET = '/works?search=coral+reefs&group_by=publication_year';
 const SEARCH = '/works?search=coral+reefs';
 const CURSOR_PAGE2 = '/works?filter=publication_year:2020&cursor=IlsnLUluZmluaXR5JywgMCwgJ2h0dHBzOi8vb3BlbmFsZXgub3JnL1cxMjMnXSI=';
 const FORGED = { Referer: 'https://openalex.org/works?search=coral', Origin: 'https://openalex.org' };
-const DOUBLE7_TRUSTED_UI = 6;
-const today = () => new Date().toISOString().split('T')[0];
 const token = (ip: string = HARNESS_IP) => mintUiToken(HARNESS_UI_SECRET, Date.now(), 1800, ip);
 
 describe('website perks need the website token, not an openalex.org Referer', () => {
@@ -80,7 +78,8 @@ describe('a website token only works on the network that minted it', () => {
     });
 
     it('open tabs keep their perks across the deploy: an unbound v1 token still counts until it expires', async () => {
-        const v1 = await mintLegacyUnboundUiToken(HARNESS_UI_SECRET, Date.now(), 1800);
+        const iat = Math.floor(Date.now() / 1000);
+        const v1 = await signPayload(HARNESS_UI_SECRET, { v: 1, iat, exp: iat + 1800, nonce: 'v1' });
         const { res } = await runWorker(FACET, { headers: { 'X-OpenAlex-UI': v1 }, ip: OTHER_IP });
         expect(res.headers.get('X-RateLimit-Remaining')).toBe('999');
         expect(res.headers.get('X-OpenAlex-UI-Token')).toBeNull();

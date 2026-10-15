@@ -8,11 +8,14 @@ import worker from './index';
 export const HARNESS_IP = '203.0.113.7';
 export const HARNESS_UI_SECRET = 'test-ui-hmac-secret';
 export const HARNESS_ASSISTANT_TOKEN = 'test-verified-assistant-token-0123456789abcdef';
+export const DOUBLE7_TRUSTED_UI = 6;  // analytics.ts doubles[6]
+export const today = () => new Date().toISOString().split('T')[0];
 
 // An in-memory DurableObjectState: enough storage for RateLimiter, nothing else.
 export function fakeState(initial: Record<string, unknown> = {}) {
     const store = new Map<string, unknown>(Object.entries(initial));
     return {
+        store,
         storage: {
             get: async (k: string) => store.get(k),
             put: async (k: string | Record<string, unknown>, v?: unknown) => {

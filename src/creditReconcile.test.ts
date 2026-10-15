@@ -3,26 +3,7 @@ import { actualCreditCost, creditsRemainingForOrigin, settleCredits, splitCharge
 import { RateLimiter } from './rateLimiter';
 import { mintUiToken } from './uiToken';
 import worker from './index';
-
-const UI_SECRET = 'test-ui-hmac-secret';
-const IP = '203.0.113.7';
-
-// An in-memory DurableObjectState: enough storage for RateLimiter, nothing else.
-function fakeState(initial: Record<string, unknown> = {}) {
-    const store = new Map<string, unknown>(Object.entries(initial));
-    return {
-        store,
-        storage: {
-            get: async (k: string) => store.get(k),
-            put: async (k: string | Record<string, unknown>, v?: unknown) => {
-                if (typeof k === 'string') store.set(k, v);
-                else for (const [kk, vv] of Object.entries(k)) store.set(kk, vv);
-            },
-            setAlarm: async () => {},
-        },
-        blockConcurrencyWhile: async (fn: () => Promise<void>) => fn(),
-    };
-}
+import { fakeState, today, HARNESS_IP as IP, HARNESS_UI_SECRET as UI_SECRET } from './testHarness';
 
 async function newLimiter(initial: Record<string, unknown> = {}) {
     const state = fakeState(initial);
@@ -33,7 +14,6 @@ async function newLimiter(initial: Record<string, unknown> = {}) {
     return { state, limiter, call };
 }
 
-const today = () => new Date().toISOString().split('T')[0];
 
 describe('actualCreditCost (oxjob #1533)', () => {
     it('is the origin plan price on a success', () => {

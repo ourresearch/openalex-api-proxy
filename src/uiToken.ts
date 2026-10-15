@@ -1,4 +1,4 @@
-// UI-provenance token (oxjob #338, Phase 5a / "P-A").
+// The website token (oxjob #338 Phase 5a "UI provenance"; perks and binding below).
 //
 // Purpose: give the openalex.org GUI an *unforgeable* "this request came from
 // the real web UI" signal, replacing the trivially-spoofable
@@ -33,9 +33,12 @@ const TOKEN_VERSION = 2;
 const LEGACY_UNBOUND_VERSION = 1;
 const TURNSTILE_SITEVERIFY_URL =
     "https://challenges.cloudflare.com/turnstile/v0/siteverify";
-// The hostnames the website's Turnstile widget is allowed on (Cloudflare widget
-// config, read 2026-10-15). A solve from anywhere else mints nothing.
-export const UI_TOKEN_HOSTNAMES: readonly string[] = ["openalex.org", "www.openalex.org"];
+// The website's Turnstile widget is configured for openalex.org (Cloudflare widget config, read 2026-10-15),
+// which covers its subdomains. A solve from anywhere else mints nothing.
+export function isOpenAlexHostname(hostname: string | null | undefined): boolean {
+    const h = String(hostname ?? "").toLowerCase();
+    return h === "openalex.org" || h.endsWith(".openalex.org");
+}
 
 export interface UiTokenPayload {
     v: number;      // token version
@@ -62,12 +65,13 @@ export function networkOf(ip: string | null | undefined): string | null {
     if (!s.includes(":")) return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) ? s : null;
     const v4mapped = s.match(/^::ffff:(\d{1,3}(\.\d{1,3}){3})$/);
     if (v4mapped) return v4mapped[1];
-    const [head, tail = ""] = s.split("::");
-    if (s.split("::").length > 2) return null;
-    const h = head ? head.split(":") : [];
-    const t = s.includes("::") ? (tail ? tail.split(":") : []) : [];
-    if (s.includes("::") && h.length + t.length > 7) return null;
-    const groups = s.includes("::") ? [...h, ...Array(8 - h.length - t.length).fill("0"), ...t] : h;
+    const parts = s.split("::");
+    if (parts.length > 2) return null;
+    const h = parts[0] ? parts[0].split(":") : [];
+    const t = parts[1] ? parts[1].split(":") : [];
+    const fill = parts.length === 2 ? 8 - h.length - t.length : 0;
+    if (parts.length === 2 && fill < 1) return null;
+    const groups = [...h, ...Array(fill).fill("0"), ...t];
     if (groups.length !== 8 || !groups.every(g => /^[0-9a-f]{1,4}$/.test(g))) return null;
     return groups.slice(0, 4).map(g => parseInt(g, 16).toString(16)).join(":") + "::/64";
 }
@@ -123,7 +127,7 @@ export function timingSafeEqual(a: string, b: string): boolean {
 // ---- mint / verify ---------------------------------------------------------
 
 /**
- * Mint a signed UI-provenance token bound to the network of `ip` (the caller's
+ * Mint a signed website token bound to the network of `ip` (the caller's
  * CF-Connecting-IP). `nonce` defaults to a fresh random value; pass one only in
  * tests for determinism.
  */
@@ -136,21 +140,17 @@ export async function mintUiToken(
 ): Promise<string> {
     const iat = Math.floor(nowMs / 1000);
     const net = await networkTag(secret, ip);
-    const payload: UiTokenPayload = { v: TOKEN_VERSION, iat, exp: iat + ttlSeconds, nonce, ...(net ? { net } : {}) };
-    const body = encodeJson(payload);
-    const sig = bytesToB64url(await hmac(secret, body));
-    return `${body}.${sig}`;
+    return signPayload(secret, { v: TOKEN_VERSION, iat, exp: iat + ttlSeconds, nonce, ...(net ? { net } : {}) });
 }
 
-/** The pre-binding mint, kept only so tests can show v1 tokens still verify across the deploy. */
-export async function mintLegacyUnboundUiToken(secret: string, nowMs: number, ttlSeconds: number): Promise<string> {
-    const iat = Math.floor(nowMs / 1000);
-    const body = encodeJson({ v: LEGACY_UNBOUND_VERSION, iat, exp: iat + ttlSeconds, nonce: crypto.randomUUID() });
+/** `<base64url payload>.<base64url HMAC>`: the token format every version shares. */
+export async function signPayload(secret: string, payload: UiTokenPayload): Promise<string> {
+    const body = encodeJson(payload);
     return `${body}.${bytesToB64url(await hmac(secret, body))}`;
 }
 
 /**
- * Verify a UI-provenance token presented from `ip`. Never throws — returns
+ * Verify a website token presented from `ip`. Never throws — returns
  * {valid:false, reason} on any problem so callers can treat every failure as
  * simply "untrusted".
  */
@@ -182,7 +182,7 @@ export async function verifyUiToken(
         return { valid: false, reason: "expired" };
     }
     if (payload.v === TOKEN_VERSION) {
-        const here = await networkTag(secret, ip);
+        const here = payload.net ? await networkTag(secret, ip) : null;
         if (!payload.net || !here || !timingSafeEqual(payload.net, here)) return { valid: false, reason: "wrong_network", payload };
     }
     return { valid: true, payload };
@@ -200,7 +200,7 @@ export interface TurnstileResult {
  * `fetchImpl` is injectable for tests. Fails closed (success:false) on any
  * network/parse error — a failed verify just means "no token minted", which is
  * safe (the caller still serves API traffic; it's only the provenance mint).
- * A solve passes only if Turnstile says it was made on one of `allowedHostnames`
+ * A solve passes only if Turnstile says it was made on openalex.org or a subdomain
  * (Cloudflare's advice: check `hostname`, oxjob #1691).
  */
 export async function verifyTurnstile(
@@ -208,7 +208,6 @@ export async function verifyTurnstile(
     secret: string | undefined,
     remoteIp: string | null,
     fetchImpl: typeof fetch = fetch,
-    allowedHostnames: readonly string[] = UI_TOKEN_HOSTNAMES,
 ): Promise<TurnstileResult> {
     if (!secret || !turnstileResponse) return { success: false, errorCodes: ["missing-input"] };
     try {
@@ -218,7 +217,7 @@ export async function verifyTurnstile(
         if (remoteIp) form.append("remoteip", remoteIp);
         const resp = await fetchImpl(TURNSTILE_SITEVERIFY_URL, { method: "POST", body: form });
         const data = (await resp.json()) as { success?: boolean; "error-codes"?: string[]; hostname?: string };
-        if (data.success === true && !allowedHostnames.includes(String(data.hostname ?? "").toLowerCase())) {
+        if (data.success === true && !isOpenAlexHostname(data.hostname)) {
             return { success: false, errorCodes: ["hostname-mismatch"] };
         }
         return { success: data.success === true, errorCodes: data["error-codes"] };

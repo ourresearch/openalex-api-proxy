@@ -32,9 +32,9 @@ export interface Env extends SentryEnv {
     QUERY_TEXT_ACCOUNTS?: string; // feature flag: user/org ids allowed to call /query/text (comma-separated); empty = nobody
     COLLECTION_PROXY_KEY?: string;  // Worker secret, same name and value as on users-api (oxjob #1515)
     AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
-    // oxjob #338 Phase 5a — UI-provenance token (Turnstile-minted). Both optional:
-    // if either is unset the feature is inert (no mint; every request just tags
-    // trustedUi=false). It can NEVER block traffic. Set as Worker secrets.
+    // oxjob #338 Phase 5a — the website token (Turnstile-minted; see uiToken.ts). Both optional:
+    // if either is unset the feature is inert (no mint; every request is trustedUi=false,
+    // priced and gated like any keyless call). Set as Worker secrets.
     TURNSTILE_SECRET?: string;       // Cloudflare Turnstile secret (siteverify)
     UI_TOKEN_HMAC_SECRET?: string;   // HMAC signing secret for the minted token
     // oxjob #521 WS-3: access key for GET /search-health. The ladder RULES are
@@ -215,7 +215,9 @@ const handler = {
                     body: JSON.stringify({ dailyLimit: UI_TOKEN_MINTS_PER_IP_PER_DAY, perSecondLimit: UI_TOKEN_MINTS_PER_IP_PER_SECOND, credits: 1 }),
                 }).then(r => r.json() as Promise<{ success: boolean; retryAfter?: number }>);
                 if (!mintCheck.success) {
-                    return json(429, { error: "Too many UI token requests from this IP" });
+                    const tooMany = json(429, { error: "Too many UI token requests from this IP" });
+                    tooMany.headers.set("Retry-After", String(Math.ceil(mintCheck.retryAfter ?? 3600)));
+                    return tooMany;
                 }
             } catch (error) {
                 reportError(error, { site: "ui_token_mint_limit" });
@@ -646,16 +648,10 @@ const handler = {
             rerankAsked = false;
         }
 
-        // Did the request come from the openalex.org website? Only the website token says so. Until
-        // 2026-10-15 an openalex.org Origin or Referer also counted (added after the 2026-07-01 shed broke
-        // the website before its token landed), but any script can send that header: on 14 Oct, 67,570
-        // IPs that never held a token sent it, against 4,574 real browsers, which lose only ~2,800 cheap
-        // facets a day before their token lands (oxjob #1691/#1692 EXPLORE.md). Used by the anon-search
-        // ladder carve-out and the website-facet price (oxjob #1533).
-        const fromWebsite = trustedUi;
-
+        // Only the website token says a request came from openalex.org; an Origin or Referer is forgeable
+        // and stopped counting on 2026-10-15 (oxjobs #1691, #1692).
         // Classify endpoint and determine credit cost
-        const classification = classifyEndpoint(url.pathname, url.searchParams, { websiteFacet: fromWebsite });
+        const classification = classifyEndpoint(url.pathname, url.searchParams, { websiteFacet: trustedUi });
         // Grandfathered users get search at 1 credit instead of 10; rerank adds RERANK_CREDITS for everyone
         const creditCost = ((isGrandfathered && classification.type === 'search') ? 1 : classification.creditCost)
             + rerankCredits(classification.type, rerankAsked);
@@ -678,15 +674,15 @@ const handler = {
         }
 
         // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
-        // comment at the top of the file and searchHealth.ts). Website traffic is
-        // carved out (fromWebsite, above).
+        // comment at the top of the file and searchHealth.ts). Website traffic (trustedUi)
+        // is carved out.
         // Scope: /works search only — the recurring saturation driver. Search on
         // other entities (/authors, /sources, …) is not gated by the ladder.
         // Runs BEFORE the credits DO, so rejected requests are edge-cheap and
         // never charged. Untouched: keyed clients, the GUI, autocomplete (cheap
         // 'list'), singleton/list, semantic (already 1/s capped).
         const isWorksSearch = url.pathname.replace(/^\/+/, "").split("/")[0].toLowerCase() === "works";
-        if (isWorksSearch && !apiKey && !fromWebsite && classification.type === 'search') {
+        if (isWorksSearch && !apiKey && !trustedUi && classification.type === 'search') {
             const verdict = await checkAnonSearchBudget(env, ctx);
             if (!verdict.ok) {
                 const statusCode = verdict.statusCode ?? 503;
@@ -1249,7 +1245,7 @@ const handler = {
             [CREDITS_REMAINING_HEADER]: creditsRemainingForOrigin(rateLimitResult.remaining, rateLimitResult.onetimeRemaining).toString()
         });
         if (isGrandfathered) proxyHeaders.set(GRANDFATHERED_HEADER, "1");
-        if (fromWebsite) proxyHeaders.set(WEBSITE_HEADER, "1");
+        if (trustedUi) proxyHeaders.set(WEBSITE_HEADER, "1");
 
         // Only add Content-Type for POST requests
         if (req.method === "POST") {
