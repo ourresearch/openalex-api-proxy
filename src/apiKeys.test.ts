@@ -4,15 +4,15 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { runWorker, HARNESS_IP, today } from './testHarness';
 import { _resetEnforcementForTests } from './enforcementList';
 import { sha256Hex } from './contactBudget';
-import { ASK_FOR_A_KEY, API_KEYS_ENFORCED_MESSAGE, pendingKeyRefusal } from './apiKeys';
-import { keylessNoticeFor, pendingKeyNoticeFor } from './keylessNotice';
+import { ASK_FOR_A_KEY, API_KEYS_ENFORCED_MESSAGE, KEY_NOT_ACTIVATED_MESSAGE } from './apiKeys';
+import { keylessNoticeFor } from './keylessNotice';
 import { API_ROOT } from './apiRoot';
 
-// api_keys_view rows by key. 'PENDING*' keys are pending (1,000 credits); 'EXPIRED1' is pending past its week (0).
+// api_keys_view rows by key. 'PENDING*' and 'EXPIRED1' are agent keys not yet activated (two key states: 0 credits).
 // SELECT * returns activation_pending only once users-api migration 106 is applied: 'OLDVIEW1' is a row without it.
 const ROWS: Record<string, Record<string, unknown>> = {
-    PENDING1: { max_per_day: 1000, max_credits_per_day: 1000, activation_pending: true, user_id: 'user-p1' },
-    PENDING2: { max_per_day: 1000, max_credits_per_day: 1000, activation_pending: true, user_id: 'user-p2' },
+    PENDING1: { max_per_day: 0, max_credits_per_day: 0, activation_pending: true, user_id: 'user-p1' },
+    PENDING2: { max_per_day: 0, max_credits_per_day: 0, activation_pending: true, user_id: 'user-p2' },
     EXPIRED1: { max_per_day: 0, max_credits_per_day: 0, activation_pending: true, user_id: 'user-e1' },
     ACTIVE01: { max_per_day: 10000, max_credits_per_day: 10000, activation_pending: false, user_id: 'user-a1' },
     OLDVIEW1: { max_per_day: 10000, max_credits_per_day: 10000, user_id: 'user-o1' },
@@ -185,27 +185,40 @@ describe("oxjob #1692's enforcement list runs first", () => {
     });
 });
 
-describe('a pending key hears how to activate', () => {
-    it('200s carry meta.notice; the key gets 1,000 credits and the keyless 10/s', async () => {
+describe('two key states: a key an agent asked for works only once its person clicks (Jason 2026-10-15)', () => {
+    it('an unactivated key gets a 403 with the way out, before any budget or origin call', async () => {
+        let originCalls = 0;
         const { res, checks } = await runWorker('/works?api_key=PENDING1', {
             env: HD,
-            fetch: async () => new Response(LIST, { status: 200, headers: { 'Content-Type': 'application/json' } }),
+            fetch: async () => { originCalls++; return new Response(LIST, { status: 200, headers: { 'Content-Type': 'application/json' } }); },
         });
-        expect(res.status).toBe(200);
-        expect((await res.json() as any).meta.notice).toBe(pendingKeyNoticeFor(0.1));
-        expect(checks[0]).toMatchObject({ dailyLimit: 1000, perSecondLimit: 10 });
+        expect(res.status).toBe(403);
+        const body = await res.json() as any;
+        expect(body.code).toBe('key_not_activated');
+        expect(body.message).toBe(KEY_NOT_ACTIVATED_MESSAGE);
+        expect(body.message).toContain('Activate your OpenAlex API key');
+        expect(body.message).toContain('call without a key');
+        expect(checks).toHaveLength(0);
+        expect(originCalls).toBe(0);
         expect(queries[0]).toBe('SELECT * FROM api_keys_view WHERE api_key = $1');
     });
 
-    it('an active key gets no notice', async () => {
+    it('so does one whose link has long expired', async () => {
+        const { res } = await runWorker('/works?api_key=EXPIRED1', { env: HD });
+        expect(res.status).toBe(403);
+        expect((await res.json() as any).code).toBe('key_not_activated');
+    });
+
+    it('an activated key works, with no notice', async () => {
         const { res } = await runWorker('/works?api_key=ACTIVE01', {
             env: HD,
             fetch: async () => new Response(LIST, { status: 200, headers: { 'Content-Type': 'application/json' } }),
         });
+        expect(res.status).toBe(200);
         expect((await res.json() as any).meta.notice).toBeUndefined();
     });
 
-    it("a view without migration 106's column reads as not pending", async () => {
+    it("a view without migration 106's column reads as activated", async () => {
         const { res, checks } = await runWorker('/works?api_key=OLDVIEW1', {
             env: HD,
             fetch: async () => new Response(LIST, { status: 200, headers: { 'Content-Type': 'application/json' } }),
@@ -213,24 +226,6 @@ describe('a pending key hears how to activate', () => {
         expect(res.status).toBe(200);
         expect((await res.json() as any).meta.notice).toBeUndefined();
         expect(checks[0]).toMatchObject({ dailyLimit: 10000, perSecondLimit: 30 });
-    });
-
-    it('its 429 says to click the emailed link, not to pay', async () => {
-        const { res } = await runWorker('/works?api_key=PENDING2', {
-            env: HD,
-            buckets: { 'credits:PENDING2': { counter: { count: 1000, date: today() } } },
-        });
-        expect(res.status).toBe(429);
-        const msg = (await res.json() as any).message;
-        expect(msg).toBe(pendingKeyRefusal(1000, 0));
-        expect(msg).toContain('Activate your OpenAlex API key');
-        expect(msg).not.toContain('pricing');
-    });
-
-    it('a pending key past its week is told to ask for the email again', async () => {
-        const { res } = await runWorker('/works?api_key=EXPIRED1', { env: HD });
-        expect(res.status).toBe(429);
-        expect((await res.json() as any).message).toContain('never activated');
     });
 });
 

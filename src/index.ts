@@ -16,8 +16,8 @@ import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CRED
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
-import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, pendingKeyRefusal, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, API_KEYS_ENFORCED_MESSAGE, API_KEY_ASKS_PER_NETWORK_PER_DAY, API_KEY_ASKS_REFUSED_MESSAGE } from "./apiKeys";
-import { wantsKeylessNotice, keylessNoticeFor, wantsPendingKeyNotice, pendingKeyNoticeFor, metaNoticeTransform } from "./keylessNotice";
+import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, KEY_NOT_ACTIVATED_MESSAGE, API_KEYS_ENFORCED_MESSAGE, API_KEY_ASKS_PER_NETWORK_PER_DAY, API_KEY_ASKS_REFUSED_MESSAGE } from "./apiKeys";
+import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, DEFAULT_SHARED_DAILY, ENFORCE_BLOCK_MESSAGE, ENFORCE_BUDGET_MESSAGE } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
@@ -518,6 +518,17 @@ const handler = {
                 endpointType: 'list', creditCost: 0, trustedUi,
             });
             return addCorsHeaders(apiRootResponse(req.method));
+        }
+
+        // Two key states (oxjob #1697, Jason 2026-10-15): a key an AI agent asked for works only once its person has
+        // clicked the emailed activation link. Until then it is refused here, with the way out, before any budget.
+        if (activationPending) {
+            logAnalytics({
+                ctx, env, apiKey, req, url, scope: 'not_activated',
+                responseTime: Date.now() - startTime,
+                statusCode: 403, rateLimit: 0, rateLimitRemaining: 0, creditCost: 0,
+            });
+            return json(403, { error: "Forbidden", code: "key_not_activated", message: KEY_NOT_ACTIVATED_MESSAGE });
         }
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey, userPlan);
@@ -1074,8 +1085,6 @@ const handler = {
                 // "View in API" tab opened without a key while the user's battery
                 // icon showed 95% left).
                 message = `Insufficient budget. This request has no API key, so it counts against the free daily budget shared by everyone on your network's IP address, and that budget is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Use your own key instead: add ?api_key=YOUR_KEY to the URL, or send it as an "Authorization: Bearer YOUR_KEY" header. Keys are free and have their own budget: https://help.openalex.org/api/authentication/ ${ASK_FOR_A_KEY}`;
-            } else if (activationPending) {
-                message = pendingKeyRefusal(maxCreditsPerDay, dailyRemainingUsd);
             } else if (classification.type === 'query_text') {
                 message = `Insufficient budget. Writing a query from plain words costs what the language model costs (usually $0.02-0.05) and needs some budget left; you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else if (onetimeCreditsBalance > 0) {
@@ -1643,12 +1652,6 @@ const handler = {
             apiKey, trustedUi, verifiedAssistant,
         })) {
             responseBody = responseBody.pipeThrough(metaNoticeTransform(keylessNoticeFor(url.searchParams, creditsToUsd(limit))));
-            newHeaders.delete("Content-Length");
-        } else if (responseBody && wantsPendingKeyNotice({
-            method: req.method, endpointType: classification.type, status: response.status, headers: response.headers,
-            apiKey, trustedUi, verifiedAssistant, activationPending,
-        })) {
-            responseBody = responseBody.pipeThrough(metaNoticeTransform(pendingKeyNoticeFor(creditsToUsd(limit))));
             newHeaders.delete("Content-Length");
         }
 

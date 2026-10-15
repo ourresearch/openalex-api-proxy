@@ -1,7 +1,8 @@
 // Keys an AI agent asks for on its user's behalf (oxjob #1697): https://api.openalex.org/api-keys.
 //
-// POST {"email": ...} gets a working key at once ($0.10 a day, the keyless 10/s); the person clicks the link we email
-// and the same key gets a free account's $1 a day. users-api does the work (views.request_api_key, its own caps and
+// POST {"email": ...} gets a key at once; the person clicks the link we email, and from then on the key works, with a
+// free account's $1 a day. Until the click it is refused (two key states: none, or a verified one; Jason 2026-10-15).
+// users-api does the work (views.request_api_key, its own caps and
 // checks, served under /api like collections.ts): this Worker forwards the call with the caller's IP, in a header
 // users-api trusts only with the shared secret, after oxjob #1692's enforcement list has had its say. GET answers
 // itself, free: an agent that can only fetch URLs reads how to ask.
@@ -21,7 +22,7 @@ export function isApiKeysPath(pathname: string): boolean {
 }
 
 /** One sentence the keyless notice, the keyless 429 and the root share, so they never drift apart. */
-export const ASK_FOR_A_KEY = `An AI agent can get one for its user in one call: POST ${API_KEYS_URL} with {"email": "<your user's email>"}; it works at once, and we email them a link to activate it.`;
+export const ASK_FOR_A_KEY = `An AI agent can get one for its user in one call: POST ${API_KEYS_URL} with {"email": "<your user's email>"}; we email them a link, and the key works once they click it.`;
 
 const HOW = {
     name: "Ask for a free OpenAlex API key for your user",
@@ -29,7 +30,7 @@ const HOW = {
     url: API_KEYS_URL,
     headers: { "Content-Type": "application/json", "Idempotency-Key": "<optional: a UUID, so a retry returns the same key>" },
     body: { email: "<your user's email address: ask them, don't invent one>", name: "<optional>", agent: "<optional: what is asking, e.g. Claude Code>" },
-    returns: "201 with api_key. The key works at once with $0.10 of free usage a day. We email the address a link; once they click it, the same key gets $1 a day.",
+    returns: "201 with api_key. We email the address a link; the key starts working when they click it, with $1 of free usage a day. Until then, requests with it are refused (403 key_not_activated): call without a key meanwhile.",
     use_the_key: "Send it as api_key=KEY on any request, or an \"Authorization: Bearer KEY\" header. Keep it in an environment variable (OPENALEX_API_KEY), not in code you share. It is for API calls only: it can't sign in to openalex.org, and your user can revoke it there.",
     errors: {
         "400": "the address is missing, malformed, or a placeholder like you@example.com: ask your user for their real address",
@@ -53,13 +54,8 @@ export function apiKeysHowResponse(method: string): Response {
     });
 }
 
-/** The 429 for a key that is waiting for activation: the way out is the person's click, not a payment. */
-export function pendingKeyRefusal(dailyCredits: number, dailyRemainingUsd: number): string {
-    if (dailyCredits <= 0) {
-        return `This key was never activated, so it has stopped working (an unactivated key works for 7 days). Ask for the activation email again: POST ${API_KEYS_URL} with the same {"email": ...}. Once your user clicks the link, this same key gets $1 a day.`;
-    }
-    return `Insufficient budget. This key isn't activated yet, so it has $${(dailyCredits / 10000).toFixed(2)} of free usage a day, and today's is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Ask your user to click the link in the email titled "Activate your OpenAlex API key": the same key then gets $1 a day.`;
-}
+/** The 403 for a key an agent asked for whose person hasn't clicked the activation link yet. */
+export const KEY_NOT_ACTIVATED_MESSAGE = `This API key isn't activated yet. Ask your user to click the button in the email titled "Activate your OpenAlex API key"; then this same key works, with $1 a day of free usage. Until then, call without a key. No email? POST ${API_KEYS_URL} with the same {"email": ...} to send it again (at most once a day).`;
 
 /** The 401 for a key we don't know: placeholders like YOUR_API_KEY land here, so say how to get a real one. */
 export const UNKNOWN_KEY_MESSAGE = `API key not found. Get a free key at https://openalex.org/settings/api-key. ${ASK_FOR_A_KEY}`;

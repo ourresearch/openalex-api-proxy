@@ -19,7 +19,7 @@ export const API_ROOT = {
         method: "POST",
         url: "https://api.openalex.org/api-keys",
         body: { email: "<your user's email address>" },
-        note: "Works at once ($0.10 a day); we email your user a link that raises it to $1 a day. GET the URL for details.",
+        note: "We email your user a link; the key works once they click it ($1 a day). GET the URL for details.",
     },
     pricing: "https://openalex.org/pricing",
     examples: {
