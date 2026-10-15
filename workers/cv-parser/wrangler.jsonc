@@ -7,6 +7,12 @@
   "placement": {
     "mode": "smart"
   },
+  // oxjob #1685: every log line goes to Better Stack (source cf-cv-parser) via the account's OTLP destination
+  // betterstack-cv-parser; persist: false keeps it out of Workers Logs storage (nothing reads it there).
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true, "persist": false, "destinations": ["betterstack-cv-parser"] }
+  },
   // Use api.openalex.org by default. If sub-requests loop through the
   // proxy and get blocked, set this to the direct upstream URL in the
   // Cloudflare dashboard (Settings > Variables > Environment Variables).

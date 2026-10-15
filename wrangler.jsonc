@@ -14,7 +14,11 @@
 	},
 	"observability": {
 		"enabled": true,
-		"head_sampling_rate": 0.10
+		"head_sampling_rate": 0.10,
+		// oxjob #1685: every sampled log line also goes to Better Stack (source cf-api-proxy) through the account's
+		// OTLP destination betterstack-api-proxy. persist stays true (Workers Logs) until ox-logs reads Better Stack;
+		// raising the sampling rate raises Workers Logs and export together, so change both bills' estimates first.
+		"logs": { "enabled": true, "head_sampling_rate": 0.10, "invocation_logs": true, "destinations": ["betterstack-api-proxy"] }
 	},
 	// Sentry release = this deploy's version id (oxjob #1685; SENTRY_DSN is a Worker secret).
 	"version_metadata": { "binding": "CF_VERSION_METADATA" },
