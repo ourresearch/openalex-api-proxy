@@ -17,6 +17,8 @@
 		"wrangler": "^4.42.0"
 	},
 	"dependencies": {
+		"@sentry/cloudflare": "10.76.2",
+		"@sentry/core": "10.76.2",
 		"pg": "^8.17.1"
 	}
 }

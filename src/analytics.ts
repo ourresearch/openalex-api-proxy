@@ -1,4 +1,5 @@
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER } from "./verifiedAssistant";
+import { errorText, reportError } from './sentry';
 
 function hashIpToBucket(ip: string): number {
     let hash = 0;
@@ -129,7 +130,22 @@ export function logAnalytics(params: {
                     ]
                 });
             } catch (error) {
-                console.error('Analytics write failed:', error);
+                // ~36K a day (oxjob #1685); the logged stack carried no message, so log the message text, and send
+                // 1 in 100 to Sentry with the byte sizes Analytics Engine limits (index 96 B, blobs 16 KB in total).
+                console.error('Analytics write failed:', errorText(error), error);
+                const bytes = (s: string) => new TextEncoder().encode(s).length;
+                reportError(error, {
+                    site: 'analytics_write',
+                    sampleRate: 0.01,
+                    extra: {
+                        index_bytes: bytes(`${params.apiKey || 'anon_0'}_${params.statusCode}`),
+                        url_bytes: bytes(params.url.pathname + params.url.search),
+                        user_agent_bytes: bytes(params.req.headers.get('User-Agent') || ''),
+                        referer_bytes: bytes(params.req.headers.get('Referer') || ''),
+                        status: params.statusCode,
+                        endpoint_type: params.endpointType,
+                    },
+                });
             }
         })()
     );

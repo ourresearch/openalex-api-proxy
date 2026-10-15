@@ -14,8 +14,9 @@ import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefiles
 import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
+import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 
-export interface Env {
+export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
     RATE_LIMITER: DurableObjectNamespace;
     SEARCH_HEALTH: DurableObjectNamespace;
@@ -112,7 +113,7 @@ function creditsToUsd(credits: number): number {
 export { RateLimiter };
 export { SearchHealthController };
 
-export default {
+const handler = {
     async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const startTime = Date.now();
 
@@ -443,6 +444,7 @@ export default {
                         // Fail-open: if the throttle DO call errors, let the request through
                         // and rely on the credits bucket. Avoids breaking traffic on infra hiccups.
                         console.error("Rate-throttle DO error:", error);
+                        reportError(error, { site: "rate_throttle_do" });
                     }
                 }
 
@@ -754,6 +756,7 @@ export default {
             } catch (error) {
                 // Fail-open: if DO call fails, allow the request through
                 console.error("Semantic rate limit check error:", error);
+                reportError(error, { site: "semantic_rate_limit_do" });
             }
         }
 
@@ -822,6 +825,7 @@ export default {
             } catch (error) {
                 // Fail-open: if DO call fails, allow the request through
                 console.error("Boolean rate limit check error:", error);
+                reportError(error, { site: "boolean_rate_limit_do" });
             }
         }
 
@@ -879,6 +883,7 @@ export default {
             } catch (error) {
                 // Fail-open: if DO call fails, allow the request through
                 console.error("Wide OR rate limit check error:", error);
+                reportError(error, { site: "wide_or_rate_limit_do" });
             }
         }
 
@@ -901,6 +906,7 @@ export default {
         } catch (error) {
             // If DO fails, allow the request through but log the error
             console.error("Rate limiter DO error:", error);
+            reportError(error, { site: "rate_limiter_do" });
             rateLimitResult = { success: true, remaining: limit, creditsUsed: creditCost, onetimeRemaining: onetimeCreditsBalance };
         }
 
@@ -933,6 +939,7 @@ export default {
                         }).then(res => res.json());
                     } catch (error) {
                         console.error("Rate limiter DO error (post-topup recheck):", error);
+                        reportError(error, { site: "rate_limiter_do_topup_recheck" });
                     }
                 }
             }
@@ -1032,6 +1039,7 @@ export default {
                         contentResponse = await env.QUERY_WRITER.fetch(new Request(req.url, req));
                     } catch (error) {
                         console.error("Query writer call failed:", error);
+                        reportError(error, { site: "query_writer" });
                         contentResponse = new Response(JSON.stringify({ error: "The query writer failed; nothing was charged. Try again in a moment." }),
                             { status: 502, headers: { "Content-Type": "application/json", "X-Credits-Cost": "0" } });
                     }
@@ -1087,6 +1095,7 @@ export default {
                     adjustedOnetimeRemaining = refundResult.onetimeRemaining;
                 } catch (error) {
                     console.error("Failed to refund credits:", error);
+                    reportError(error, { site: "refund_credits" });
                 }
             }
 
@@ -1378,6 +1387,7 @@ export default {
                     });
                 } catch (refundError) {
                     console.error("Failed to refund credits after gateway timeout:", refundError);
+                    reportError(refundError, { site: "refund_credits_gateway_timeout" });
                 }
                 logAnalytics({
                     ctx, env, apiKey, req, url, scope,
@@ -1513,6 +1523,14 @@ export default {
     }
 } satisfies ExportedHandler<Env>;
 
+// Sentry (oxjob #1685): reports an exception that escapes the handler, then rethrows it unchanged.
+export default {
+    fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+        return withErrorReporting({ env, waitUntil: (p) => ctx.waitUntil(p), request: req }, "fetch",
+            () => handler.fetch(req, env, ctx));
+    },
+} satisfies ExportedHandler<Env>;
+
 
 function getApiKeyFromRequest(req: Request): string | null {
     const authHeader = req.headers.get("Authorization");
@@ -1603,6 +1621,7 @@ async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
     } catch (error) {
         // Fail-open: on DB errors, allow request with default rate limit
         console.error("Error checking API key via Hyperdrive:", error);
+        reportError(error, { site: "api_key_check_hyperdrive" });
         if (client) {
             try { await client.end(); } catch { /* ignore */ }
         }
@@ -1654,8 +1673,11 @@ async function writebackOnetimeCredits(
                     method: "POST",
                     body: JSON.stringify({ dailyLimit, consumedWriteback: consumed, onetimeBalance })
                 });
-            } catch { /* best effort */ }
-            throw dbError;
+            } catch (restoreError) {
+                // Best effort, but if it fails those credits are never billed.
+                reportError(restoreError, { site: "onetime_writeback_restore", extra: { consumed } });
+            }
+            throw dbError; // reported by the catch below
         }
 
         await client.end();
@@ -1671,6 +1693,7 @@ async function writebackOnetimeCredits(
         console.log(`Writeback: ${consumed} onetime credits for key ${maskApiKey(apiKey)}`);
     } catch (error) {
         console.error("Onetime credits writeback error:", error);
+        reportError(error, { site: "onetime_writeback" });
     }
 }
 
@@ -1876,6 +1899,7 @@ async function handleRateLimitEndpoint(
         }).then(res => res.json());
     } catch (error) {
         console.error("Rate limiter status error:", error);
+        reportError(error, { site: "rate_limiter_status" });
         statusResult = {
             daily: { used: 0, remaining: maxCreditsPerDay },
             onetime: { consumed: 0, remaining: onetimeCreditsBalance, balance: onetimeCreditsBalance },

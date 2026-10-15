@@ -1,4 +1,5 @@
 import { splitCharge } from "./creditReconcile";
+import { reportError, withErrorReporting, Invocation, SentryEnv } from './sentry';
 
 interface TokenBucket {
     tokens: number;
@@ -29,7 +30,7 @@ export class RateLimiter implements DurableObject {
     private lastBooleanTime: number = 0; // oxjob #521/#677: rate limit for >5-operator boolean searches
     private lastWideOrTime: number = 0; // oxjob #876: rate limit for >10-term OR lists on wide filter fields
 
-    constructor(private readonly state: DurableObjectState) {
+    constructor(private readonly state: DurableObjectState, private readonly env: SentryEnv = {}) {
         this.state.blockConcurrencyWhile(async () => {
             await this.loadFromStorage();
         });
@@ -45,7 +46,8 @@ export class RateLimiter implements DurableObject {
                 lastPersisted: Date.now(),
                 dirty: false
             };
-        } catch {
+        } catch (error) {
+            reportError(error, { site: 'rate_limiter_load_counter', inv: this.sentryInvocation() });
             this.dailyCounter = { count: 0, date: today, lastPersisted: Date.now(), dirty: false };
         }
 
@@ -56,7 +58,8 @@ export class RateLimiter implements DurableObject {
                 lastPersisted: Date.now(),
                 dirty: false
             };
-        } catch {
+        } catch (error) {
+            reportError(error, { site: 'rate_limiter_load_onetime', inv: this.sentryInvocation() });
             this.onetimeCounter = { consumed: 0, lastPersisted: Date.now(), dirty: false };
         }
     }
@@ -414,6 +417,10 @@ export class RateLimiter implements DurableObject {
     }
 
     async alarm(): Promise<void> {
-        await this.persist();
+        return withErrorReporting(this.sentryInvocation(), 'rate_limiter_alarm', () => this.persist());
+    }
+
+    private sentryInvocation(): Invocation {
+        return { env: this.env, waitUntil: (p) => this.state.waitUntil(p) };
     }
 }

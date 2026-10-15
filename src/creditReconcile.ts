@@ -5,6 +5,7 @@
 // /refund when the plan cost less than the up-front charge, /charge when it cost more.
 
 import { billableCreditCost } from "./endpointClassifier";
+import { reportError } from "./sentry";
 
 /** The origin's actual price for a request, in credits; internal, never sent to clients. */
 export const ORIGIN_COST_HEADER = "X-Credits-Cost";
@@ -76,6 +77,7 @@ export async function settleCredits(
         return { remaining: result.remaining, onetimeRemaining: result.onetimeRemaining };
     } catch (error) {
         console.error(`Failed to settle credits (${path}):`, error);
+        reportError(error, { site: "settle_credits", extra: { path } });
         return unchanged;
     }
 }

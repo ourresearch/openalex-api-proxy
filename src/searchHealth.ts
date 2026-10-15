@@ -26,6 +26,8 @@
 // entity — because the signal is cluster health, not anon behavior. Only the
 // ENFORCEMENT is scoped to keyless, non-GUI /works search.
 
+import { reportError, withErrorReporting, Invocation, SentryEnv } from './sentry';
+
 export type HealthLevel = 0 | 1 | 2 | 3;
 export const LEVEL_NAMES = ['GREEN', 'YELLOW', 'ORANGE', 'RED'] as const;
 
@@ -282,7 +284,7 @@ export class SearchHealthController implements DurableObject {
 
     constructor(
         private readonly state: DurableObjectState,
-        private readonly env: { ANALYTICS?: AnalyticsEngineDataset; SLACK_WEBHOOK_URL?: string },
+        private readonly env: { ANALYTICS?: AnalyticsEngineDataset; SLACK_WEBHOOK_URL?: string } & SentryEnv,
     ) {
         this.state.blockConcurrencyWhile(async () => {
             try {
@@ -406,7 +408,11 @@ export class SearchHealthController implements DurableObject {
     // Alarm keeps the ladder moving when traffic goes quiet (e.g. RED with the
     // flood gone: silent buckets read GREEN and walk the state back down).
     async alarm(): Promise<void> {
-        await this.rollBuckets(Date.now());
+        return withErrorReporting(this.sentryInvocation(), 'search_health_alarm', () => this.rollBuckets(Date.now()));
+    }
+
+    private sentryInvocation(): Invocation {
+        return { env: this.env, waitUntil: (p) => this.state.waitUntil(p) };
     }
 
     // v3.5: fire-and-forget Slack ping. Inert when SLACK_WEBHOOK_URL is unset;
@@ -420,7 +426,10 @@ export class SearchHealthController implements DurableObject {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text }),
                 signal: AbortSignal.timeout(5000),
-            }).catch((e) => console.error('search-health Slack ping failed:', e)),
+            }).catch((e) => {
+                console.error('search-health Slack ping failed:', e);
+                reportError(e, { site: 'search_health_slack', inv: this.sentryInvocation() });
+            }),
         );
     }
 
@@ -580,6 +589,7 @@ export class SearchHealthController implements DurableObject {
             });
         } catch (error) {
             console.error('search_health AE write failed:', error);
+            reportError(error, { site: 'search_health_ae_write', inv: this.sentryInvocation() });
         }
     }
 }
@@ -707,7 +717,7 @@ export async function checkAnonSearchBudget(
             retryAfter: j.retryAfter ?? 30,
             statusCode: j.state === 'RED' ? 503 : 429,
         };
-    } catch {
+    } catch (error) {
         if (forceParam) {
             // The operator pinned a rationing level; without the DO we can't
             // count tokens, and silently unlimited would betray the pin.
@@ -717,6 +727,7 @@ export async function checkAnonSearchBudget(
             return { ok: false, state: 'unknown (DO error, last-known unhealthy)', statusCode: 503, retryAfter: 30 };
         }
         console.error('search-health budget check failed with no fresh unhealthy state — allowing (availability-first)');
+        reportError(error, { site: 'search_health_budget_check' });
         return { ok: true, state: 'unknown (DO error)' };
     }
 }
