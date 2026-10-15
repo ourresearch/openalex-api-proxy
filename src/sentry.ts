@@ -116,6 +116,10 @@ export function reportError(error: unknown, opts: ReportOptions): void {
 
         const scope = new Scope();
         scope.setTag("site", opts.site);
+        // Workers runtime errors carry no JS stack and read "internal error; reference = <id>", so Sentry's default
+        // grouping (by message) would open a new issue for each one: group those by site and message minus the id.
+        const text = errorText(error);
+        if (/reference = \S+/.test(text)) scope.setFingerprint([opts.site, text.replace(/reference = \S+/g, "reference = <id>")]);
         if (sampleRate < 1) scope.setTag("sample_rate", String(sampleRate));
         const req = inv.request;
         if (req) {
@@ -127,7 +131,7 @@ export function reportError(error: unknown, opts: ReportOptions): void {
             if (typeof colo === "string") scope.setTag("colo", colo);
         }
         // Some runtime errors arrive with an empty message (#1685: "Analytics write failed" logged only a stack).
-        scope.setExtra("error_text", errorText(error));
+        scope.setExtra("error_text", text);
         if (opts.extra) scope.setExtras(opts.extra);
 
         client.captureException(error, { mechanism: { type: "generic", handled: opts.handled ?? true } }, scope);

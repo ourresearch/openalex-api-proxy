@@ -27,6 +27,23 @@ describe('sentry reporting', () => {
         expect(bodies.join('')).not.toContain('sampled out');
     });
 
+    it('groups runtime errors by site and message without their reference id', async () => {
+        const bodies: string[] = [];
+        vi.stubGlobal('fetch', async (_u: string, init: RequestInit) => {
+            bodies.push(String(init.body));
+            return new Response('{}', { status: 200 });
+        });
+        const pending: Promise<unknown>[] = [];
+        // a later minute, past the throttle window of the first test
+        vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+        reportError(new Error('internal error; reference = abc123'), {
+            site: 'rate_limiter_do', inv: { env: { SENTRY_DSN: 'https://abc@o1.ingest.us.sentry.io/2' }, waitUntil: (p) => pending.push(p) },
+        });
+        await Promise.all(pending);
+        vi.restoreAllMocks();
+        expect(bodies[0]).toContain('"fingerprint":["rate_limiter_do","Error: internal error; reference = <id>"]');
+    });
+
     it('is a no-op without a DSN and never throws', () => {
         vi.stubGlobal('fetch', () => { throw new Error('should not be called'); });
         expect(() => reportError(new Error('x'), { site: 'test', inv: { env: {}, waitUntil: () => {} } })).not.toThrow();
