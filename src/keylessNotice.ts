@@ -18,7 +18,12 @@
 // the origin moves to compact JSON (orjson, separators=(",", ":")), the notice stops silently; match `{"meta":`
 // plus optional whitespace then, or have the origin add meta.notice itself on a header from this Worker.
 
+//
+// A key an AI agent asked for that its person hasn't activated yet (oxjob #1697) gets a notice too, saying how to
+// activate it, so the agent can tell its user.
+
 import { API_ROOT } from "./apiRoot";
+import { ASK_FOR_A_KEY } from "./apiKeys";
 
 /** The notice for a keyless caller whose shared budget is `dailyBudgetUsd` a day ($0.10 today). */
 export function keylessNoticeFor(searchParams: URLSearchParams, dailyBudgetUsd: number): string {
@@ -26,10 +31,17 @@ export function keylessNoticeFor(searchParams: URLSearchParams, dailyBudgetUsd: 
         + (searchParams.has("mailto") ? " The mailto parameter doesn't raise this limit." : "")
         // $1/day is a free key's budget, set by users-api's plans, not here.
         + ` Get a free key with its own $1/day at ${API_ROOT.get_a_free_key} and add api_key=YOUR_KEY to your requests.`
+        + ` ${ASK_FOR_A_KEY}`
         + ` Docs for agents: ${API_ROOT.llms_txt}`;
 }
 
-export function wantsKeylessNotice(p: {
+/** The notice for a key that is waiting for its person to click the activation link ($0.10 a day until then). */
+export function pendingKeyNoticeFor(dailyBudgetUsd: number): string {
+    return `This API key isn't activated yet, so it has $${dailyBudgetUsd.toFixed(2)} of free usage a day.`
+        + ` Ask your user to click the link in the email titled "Activate your OpenAlex API key"; the same key then gets $1 a day, with nothing to change in your code.`;
+}
+
+export interface NoticeFacts {
     method: string;
     endpointType: string;
     status: number;
@@ -37,8 +49,18 @@ export function wantsKeylessNotice(p: {
     apiKey: string | null;
     trustedUi: boolean;
     verifiedAssistant: boolean;
-}): boolean {
+}
+
+export function wantsKeylessNotice(p: NoticeFacts): boolean {
     if (p.apiKey || p.trustedUi || p.verifiedAssistant) return false;
+    return noticeFits(p);
+}
+
+export function wantsPendingKeyNotice(p: NoticeFacts & { activationPending: boolean }): boolean {
+    return Boolean(p.apiKey) && p.activationPending && !p.trustedUi && noticeFits(p);
+}
+
+function noticeFits(p: NoticeFacts): boolean {
     if (p.status !== 200 || p.endpointType === "singleton" || (p.method !== "GET" && p.method !== "POST")) return false;
     if (!(p.headers.get("Content-Type") || "").toLowerCase().includes("application/json")) return false;
     // The origin sends identity today. An encoded body is left alone rather than re-encoded: if the origin ever

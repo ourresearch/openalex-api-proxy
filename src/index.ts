@@ -16,7 +16,8 @@ import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CRED
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
-import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
+import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, pendingKeyRefusal, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, API_KEYS_ENFORCED_MESSAGE } from "./apiKeys";
+import { wantsKeylessNotice, keylessNoticeFor, wantsPendingKeyNotice, pendingKeyNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, DEFAULT_SHARED_DAILY, ENFORCE_BLOCK_MESSAGE, ENFORCE_BUDGET_MESSAGE } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
@@ -93,6 +94,8 @@ interface ApiKeyAuth {
     throttleScope?: ThrottleScope | null;
     userId?: string | null;
     orgId?: string | null;
+    // A key an AI agent asked for, not yet activated by its person (oxjob #1697; api_keys_view.activation_pending).
+    activationPending?: boolean;
     cacheRefreshed?: boolean;
 }
 
@@ -158,6 +161,11 @@ const handler = {
             } catch {
                 return json(502, { error: "Bad Gateway", code: "unavailable", message: "Collections are unavailable right now. Try again in a minute." });
             }
+        }
+
+        // Keys an AI agent asks for (oxjob #1697; see apiKeys.ts): free, before every budget gate.
+        if (isApiKeysPath(new URL(req.url).pathname)) {
+            return addCorsHeaders(await apiKeysRoute(req, env, ctx, startTime));
         }
 
         if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "POST") {
@@ -378,6 +386,7 @@ const handler = {
         // per-isolate API_KEY_CACHE rather than a fresh DB read. Used by the
         // pay→usable race recovery on the 429 path (oxjob #409).
         let usedCachedAuth = false;
+        let activationPending = false;  // oxjob #1697
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -431,6 +440,7 @@ const handler = {
                 onetimeCreditsExpiresAt = authResult.onetimeCreditsExpiresAt;
                 userPlan = authResult.plan ?? null;
                 keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
+                activationPending = authResult.activationPending === true;
                 // cacheRefreshed === true means we just read the DB; false/undefined
                 // means this balance came from the (≤60s, per-isolate) cache.
                 usedCachedAuth = authResult.cacheRefreshed !== true;
@@ -1057,7 +1067,9 @@ const handler = {
                 // already have one and just didn't send it (oxjob #1245: a GUI
                 // "View in API" tab opened without a key while the user's battery
                 // icon showed 95% left).
-                message = `Insufficient budget. This request has no API key, so it counts against the free daily budget shared by everyone on your network's IP address, and that budget is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Use your own key instead: add ?api_key=YOUR_KEY to the URL, or send it as an "Authorization: Bearer YOUR_KEY" header. Keys are free and have their own budget: https://help.openalex.org/api/authentication/`;
+                message = `Insufficient budget. This request has no API key, so it counts against the free daily budget shared by everyone on your network's IP address, and that budget is used up ($${dailyRemainingUsd} remaining; resets at midnight UTC). Use your own key instead: add ?api_key=YOUR_KEY to the URL, or send it as an "Authorization: Bearer YOUR_KEY" header. Keys are free and have their own budget: https://help.openalex.org/api/authentication/ ${ASK_FOR_A_KEY}`;
+            } else if (activationPending) {
+                message = pendingKeyRefusal(maxCreditsPerDay, dailyRemainingUsd);
             } else if (classification.type === 'query_text') {
                 message = `Insufficient budget. Writing a query from plain words costs what the language model costs (usually $0.02-0.05) and needs some budget left; you have $${dailyRemainingUsd} daily budget and $${prepaidRemainingUsd} prepaid balance remaining. Daily budget resets at midnight UTC. Add funds at https://openalex.org/pricing`;
             } else if (onetimeCreditsBalance > 0) {
@@ -1626,6 +1638,12 @@ const handler = {
         })) {
             responseBody = responseBody.pipeThrough(metaNoticeTransform(keylessNoticeFor(url.searchParams, creditsToUsd(limit))));
             newHeaders.delete("Content-Length");
+        } else if (responseBody && wantsPendingKeyNotice({
+            method: req.method, endpointType: classification.type, status: response.status, headers: response.headers,
+            apiKey, trustedUi, verifiedAssistant, activationPending,
+        })) {
+            responseBody = responseBody.pipeThrough(metaNoticeTransform(pendingKeyNoticeFor(creditsToUsd(limit))));
+            newHeaders.delete("Content-Length");
         }
 
         const finalResponse = addCorsHeaders(new Response(responseBody, {
@@ -1722,6 +1740,7 @@ async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
             throttleScope: cached.throttleScope,
             userId: cached.userId,
             orgId: cached.orgId,
+            activationPending: cached.activationPending,
             cacheRefreshed: false
         };
     }
@@ -1733,14 +1752,14 @@ async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
         client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
         await client.connect();
 
-        const queryResult = await client.query(
-            "SELECT max_per_day, max_credits_per_day, is_grandfathered, onetime_credits_balance, onetime_credits_expires_at, plan, rate_throttled, throttle_scope, user_id, org_id FROM api_keys_view WHERE api_key = $1",
-            [apiKey]
-        );
+        // SELECT *, not a column list: activation_pending (oxjob #1697, users-api migration 106) is read when the view
+        // has it, and a Worker deployed before the migration keeps working (a named missing column would throw, and
+        // this lookup fails open).
+        const queryResult = await client.query("SELECT * FROM api_keys_view WHERE api_key = $1", [apiKey]);
 
         if (queryResult.rows.length === 0) {
             await client.end();
-            const result = { valid: false, error: "API key not found" };
+            const result = { valid: false, error: UNKNOWN_KEY_MESSAGE };
             API_KEY_CACHE.set(apiKey, { ...result, cachedAt: now });
             return result;
         }
@@ -1760,6 +1779,7 @@ async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
             throttleScope: (row.throttle_scope as ThrottleScope | null) ?? null,
             userId: (row.user_id as string) ?? null,
             orgId: (row.org_id as string) ?? null,
+            activationPending: row.activation_pending === true,
             cacheRefreshed: true
         };
 
@@ -1978,6 +1998,59 @@ function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | 
     }
 
     return { valid: true };
+}
+
+/** api.openalex.org/api-keys (oxjob #1697): GET explains, POST asks users-api for a key after the enforcement list. */
+async function apiKeysRoute(req: Request, env: Env, ctx: ExecutionContext, startTime: number): Promise<Response> {
+    const url = new URL(req.url);
+    const log = (statusCode: number) => logAnalytics({
+        ctx, env, apiKey: null, req, url, scope: 'api_keys',
+        responseTime: Date.now() - startTime, statusCode, rateLimit: 0, rateLimitRemaining: 0, creditCost: 0,
+    });
+    if (req.method === "GET" || req.method === "HEAD") {
+        log(200);
+        return apiKeysHowResponse(req.method);
+    }
+    if (req.method !== "POST") {
+        const resp = json(405, { error: "Method Not Allowed", code: "method_not_allowed", message: "POST a JSON body {\"email\": ...} to ask for a key; GET this URL for how." });
+        resp.headers.set("Allow", "GET, HEAD, POST");
+        return resp;
+    }
+    const body = await readApiKeysBody(req);
+    if (!body) {
+        log(413);
+        return json(413, { error: "Payload Too Large", code: "body_too_large", message: "Send a small JSON body: {\"email\": \"your user's email address\"}." });
+    }
+
+    // oxjob #1692's enforcement list: a client whose keyless traffic it refuses can't mint keys by API either; the
+    // website's sign-up (Turnstile) stays open to its people. Shadow mode records and lets it through.
+    const hit = await matchEnforcement(await loadEnforcement(env.ENFORCEMENT, Date.now()),
+        apiKeysFacts(req, body.email, refererHostOf(req.headers.get("Referer"))), Date.now());
+    if (hit) {
+        const refuse = hit.mode === "enforce";
+        try {
+            env.ENFORCE_AE?.writeDataPoint({
+                indexes: [hit.entry.id],
+                blobs: [hit.entry.id, hit.entry.action, hit.mode, "api_keys", refuse ? "refuse" : "pass"],
+                doubles: [0],
+            });
+        } catch { /* analytics never blocks */ }
+        if (refuse) {
+            log(403);
+            return json(403, { error: "Forbidden", code: "enforced", message: API_KEYS_ENFORCED_MESSAGE });
+        }
+    }
+
+    try {
+        const r = await fetch(await apiKeysRequest(req, body.text, env.COLLECTION_PROXY_KEY));
+        log(r.status);
+        const headers = new Headers(r.headers);
+        headers.set("Cache-Control", "no-store");  // the answer carries a key
+        return new Response(r.body, { status: r.status, headers });
+    } catch {
+        log(502);
+        return json(502, { error: "Bad Gateway", code: "unavailable", message: "Keys can't be requested right now. Try again in a minute, or sign up at https://openalex.org/signup." });
+    }
 }
 
 function refererHostOf(referer: string | null): string | null {

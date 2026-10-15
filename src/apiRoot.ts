@@ -14,6 +14,13 @@ export const API_ROOT = {
     quick_reference: "https://help.openalex.org/api/llm-quick-reference/",
     authentication: "https://help.openalex.org/api/authentication/",
     get_a_free_key: "https://openalex.org/settings/api",
+    // oxjob #1697: a coding agent gets one for its user in one call (apiKeys.ts); GET that URL for the details.
+    get_a_free_key_by_api: {
+        method: "POST",
+        url: "https://api.openalex.org/api-keys",
+        body: { email: "<your user's email address>" },
+        note: "Works at once ($0.10 a day); we email your user a link that raises it to $1 a day. GET the URL for details.",
+    },
     pricing: "https://openalex.org/pricing",
     examples: {
         search: "https://api.openalex.org/works?search=coral%20reef%20bleaching",
