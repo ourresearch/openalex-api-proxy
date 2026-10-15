@@ -11,7 +11,7 @@ import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
-import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
+import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
@@ -703,9 +703,13 @@ const handler = {
 
         // Use unified credits-based rate limiting
         const scope = "credits";
-        const identifier = apiKey || req.headers.get("CF-Connecting-IP") || "anon";
+        const ip = req.headers.get("CF-Connecting-IP");
         // A verified assistant's budget is its own (oxjob #1686): it never spends, or is blocked by, the
         // ordinary keyless budget of the IP it shares.
+        // Ordinary keyless budgets are per network, not per address (oxjob #1692): an IPv6 /64 belongs to
+        // one household or device and holds 2^64 addresses, so per address it bought a fresh budget per
+        // request (14 Oct: 1,123 /64s took 3.33M credits over 39K addresses). IPv4 stays per address.
+        const identifier = apiKey || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
         const rateLimitKey = verifiedAssistant ? `${scope}:verified-assistant:${identifier}` : `${scope}:${identifier}`;
         const limit = maxCreditsPerDay;
 
