@@ -14,15 +14,23 @@
 // reaches the DO. The DO name holds a hash, never the address.
 
 export const CONTACT_DAILY_CREDITS = 10_000;          // a free key's day
-export const PLACEHOLDER_DAILY_CREDITS = 1_000;       // one keyless IP's day
 export const CONTACT_PER_SECOND = 50;
 
-const PLACEHOLDER = /@example\.(org|com|net)$|^(you|your|user|test|email|name|me)@/;
+// Placeholder addresses name nobody: AI assistants write mailto=you@example.com into code by default, so thousands
+// of unrelated people send the same one (14-15 Oct: @example.com from 100K+ IPs, ~11 requests each). They get no
+// shared budget, just their IP's, as if they sent no mailto. (7d3e36f pooled them at 1,000 credits; reverted the
+// same morning, oxjob #1692, after #1686 showed the agent-code population.)
+const PLACEHOLDER_DOMAIN = /(^|\.)(example|test|invalid|localhost)(\.[a-z]+)?$|^(your-?domain|domain|email|mail|company|university|institution|organization|org)\.[a-z.]+$/;
+const PLACEHOLDER_LOCAL = /^(you|your|yours|me|my|user|username|test|email|e-?mail|name|someone|somebody|foo|bar|john\.?doe|jane\.?doe|researcher|contact|admin|noreply|no-reply|your[._-]?(email|e-?mail|mail|name|address))$/;
+
+export function isPlaceholderAddress(addr: string): boolean {
+    const at = addr.lastIndexOf("@");
+    return PLACEHOLDER_LOCAL.test(addr.slice(0, at)) || PLACEHOLDER_DOMAIN.test(addr.slice(at + 1));
+}
 
 export interface ContactBudget {
     bucket: string;       // RateLimiter DO name
     dailyLimit: number;
-    placeholder: boolean;
 }
 
 async function sha256Hex(s: string): Promise<string> {
@@ -40,13 +48,8 @@ export async function contactBudgetFor(searchParams: URLSearchParams, who: {
     const addr = (searchParams.get("mailto") || "").trim().toLowerCase();
     const at = addr.lastIndexOf("@");
     if (at < 1 || at === addr.length - 1) return null;  // not an address: nothing to share
-    if (addr.endsWith("@openalex.org")) return null;
-    const placeholder = PLACEHOLDER.test(addr);
-    return {
-        bucket: `credits:contact:${await sha256Hex(addr)}`,
-        dailyLimit: placeholder ? PLACEHOLDER_DAILY_CREDITS : CONTACT_DAILY_CREDITS,
-        placeholder,
-    };
+    if (addr.endsWith("@openalex.org") || isPlaceholderAddress(addr)) return null;
+    return { bucket: `credits:contact:${await sha256Hex(addr)}`, dailyLimit: CONTACT_DAILY_CREDITS };
 }
 
 // Addresses whose day is spent, per isolate: bucket -> epoch ms of the next midnight UTC.
@@ -69,8 +72,6 @@ export function markContactSpent(bucket: string, nowMs: number): void {
 /** Test hook. */
 export function _resetContactSpent(): void { spent.clear(); }
 
-export function contactBudgetMessage(c: ContactBudget): string {
-    return c.placeholder
-        ? "Insufficient budget. This request has no API key and its mailto is a placeholder address, which requests from many networks share; together they have used that address's free daily budget (resets at midnight UTC). Get a free key with its own $1/day: https://help.openalex.org/api/authentication/ then add api_key=YOUR_KEY to your requests."
-        : "Insufficient budget. This request has no API key, and keyless requests naming this mailto address, from every network that sends it, have used its free daily budget ($1.00, the same as a free key; resets at midnight UTC). Get a free key with its own budget: https://help.openalex.org/api/authentication/ then add api_key=YOUR_KEY to your requests.";
+export function contactBudgetMessage(): string {
+    return "Insufficient budget. This request has no API key, and keyless requests naming this mailto address, from every network that sends it, have used its free daily budget ($1.00, the same as a free key; resets at midnight UTC). Get a free key with its own budget: https://help.openalex.org/api/authentication/ then add api_key=YOUR_KEY to your requests.";
 }

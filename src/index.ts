@@ -931,7 +931,7 @@ const handler = {
             return resp;
         };
         if (contact && contactSpent(contact.bucket, Date.now())) {
-            return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage(contact));
+            return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage());
         }
 
         let rateLimitResult: {
@@ -1082,7 +1082,7 @@ const handler = {
                             `Rate limit exceeded: keyless requests naming this mailto address share ${CONTACT_PER_SECOND} requests per second across every network that sends them. Please slow down, or use a free API key: https://help.openalex.org/api/authentication/`);
                     }
                     markContactSpent(contact.bucket, Date.now());
-                    return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage(contact));
+                    return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage());
                 }
             } catch (error) {
                 reportError(error, { site: "contact_budget_do" });

@@ -18,14 +18,19 @@ const p = (mailto: string) => new URLSearchParams({ search: 'x', mailto });
 describe('contactBudgetFor', () => {
     it('a real-looking address gets a free key day, shared; the bucket name holds a hash, not the address', async () => {
         const c = await contactBudgetFor(p('Ana.Silva@Uni-Example.edu '), keyless);
-        expect(c).toMatchObject({ dailyLimit: 10_000, placeholder: false });
+        expect(c).toMatchObject({ dailyLimit: 10_000 });
         expect(c!.bucket).toMatch(/^credits:contact:[0-9a-f]{32}$/);
         expect((await contactBudgetFor(p('ana.silva@uni-example.edu'), keyless))!.bucket).toBe(c!.bucket);
     });
 
-    it('placeholders get one keyless budget', async () => {
-        for (const m of ['someone@example.org', 'x@example.com', 'you@gmail.com', 'test@lab.org']) {
-            expect(await contactBudgetFor(p(m), keyless)).toMatchObject({ dailyLimit: 1_000, placeholder: true });
+    it('placeholders name nobody: no shared budget, just the IP\'s (AI-written code sends you@example.com by default)', async () => {
+        for (const m of ['you@example.com', 'your_email@example.com', 'someone@example.org', 'x@example.com', 'a@test.com',
+                         'you@gmail.com', 'test@lab.org', 'your.email@university.edu', 'john.doe@company.com', 'me@domain.com',
+                         'name@yourdomain.com', 'user@mail.example.net']) {
+            expect(await contactBudgetFor(p(m), keyless)).toBeNull();
+        }
+        for (const m of ['ana.silva@lab.edu', 'jdoe@mit.edu', 'research-team@tomesphere.com']) {
+            expect(await contactBudgetFor(p(m), keyless)).not.toBeNull();
         }
     });
 
@@ -70,10 +75,10 @@ describe('contact budget on the API path', () => {
         expect(second.rows[0].blobs[4]).toBe('contact');
     });
 
-    it('a placeholder address is spent after one keyless budget', async () => {
-        const c = await contactBudgetFor(p('bot@example.org'), keyless);
-        const spentDay = { [c!.bucket]: { counter: { count: 1_000, date: today() } } };
-        expect((await runWorker('/works?search=coral&mailto=bot@example.org', { buckets: spentDay })).res.status).toBe(429);
+    it('a placeholder address is never pooled: only the IP budget is checked', async () => {
+        const { res, checks } = await runWorker('/works?search=coral&mailto=you@example.com');
+        expect(res.status).toBe(200);
+        expect(checks.map(c => c.bucket)).toEqual([`credits:${HARNESS_IP}`]);
     });
 
     it('keys, the website and verified assistants are never charged to an address', async () => {
