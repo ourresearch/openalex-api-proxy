@@ -146,7 +146,9 @@ describe('keyless meta.notice through the Worker (oxjob #1686)', () => {
     });
 
     it('none for the website (a valid UI token)', async () => {
-        const uiToken = await mintUiToken(UI_SECRET, Date.now(), 1800);
+        // The 4th argument (the minting IP) is what oxjob #1692's branch binds the token to; main ignores it.
+        const mint = mintUiToken as (...args: unknown[]) => Promise<string>;
+        const uiToken = await mint(UI_SECRET, Date.now(), 1800, IP);
         const { text } = await run('/works?per_page=1', { headers: { 'X-OpenAlex-UI': uiToken } });
         expect(text).toBe(LIST_BODY);
     });
