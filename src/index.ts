@@ -15,6 +15,7 @@ import { mintUiToken, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
 import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
+import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -456,6 +457,18 @@ const handler = {
                     );
                 }
             }
+        }
+
+        // The API root, served here: free, never refused for budget (oxjob #1686; see apiRoot.ts). After the key
+        // check, so a bad key on "/" still gets its 401 (people test their key there); before every gate and charge.
+        if (isApiRootRequest(url, req.method)) {
+            logAnalytics({
+                ctx, env, apiKey, req, url, scope: 'root',
+                responseTime: Date.now() - startTime,
+                statusCode: 200, rateLimit: 0, rateLimitRemaining: 0,
+                endpointType: 'list', creditCost: 0, trustedUi,
+            });
+            return addCorsHeaders(apiRootResponse(req.method));
         }
 
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey, userPlan);
