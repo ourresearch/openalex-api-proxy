@@ -30,7 +30,7 @@ const HOW = {
     headers: { "Content-Type": "application/json", "Idempotency-Key": "<optional: a UUID, so a retry returns the same key>" },
     body: { email: "<your user's email address: ask them, don't invent one>", name: "<optional>", agent: "<optional: what is asking, e.g. Claude Code>" },
     returns: "201 with api_key. The key works at once with $0.10 of free usage a day. We email the address a link; once they click it, the same key gets $1 a day.",
-    use_the_key: "Send it as api_key=KEY on any request, or an \"Authorization: Bearer KEY\" header. Keep it in an environment variable (OPENALEX_API_KEY), not in code you share.",
+    use_the_key: "Send it as api_key=KEY on any request, or an \"Authorization: Bearer KEY\" header. Keep it in an environment variable (OPENALEX_API_KEY), not in code you share. It is for API calls only: it can't sign in to openalex.org, and your user can revoke it there.",
     errors: {
         "400": "the address is missing, malformed, or a placeholder like you@example.com: ask your user for their real address",
         "409 account_exists": "the address already has an account and a key: your user copies it from https://openalex.org/settings/api-key",

@@ -96,6 +96,9 @@ interface ApiKeyAuth {
     orgId?: string | null;
     // A key an AI agent asked for, not yet activated by its person (oxjob #1697; api_keys_view.activation_pending).
     activationPending?: boolean;
+    // The key whose daily bucket this key spends from, when not its own: an agent's key shares its account key's
+    // day, so one person gets one free day (oxjob #1697/#1692; api_keys_view.budget_key).
+    budgetKey?: string | null;
     cacheRefreshed?: boolean;
 }
 
@@ -387,6 +390,7 @@ const handler = {
         // pay→usable race recovery on the 429 path (oxjob #409).
         let usedCachedAuth = false;
         let activationPending = false;  // oxjob #1697
+        let budgetKey: string | null = null;  // oxjob #1697: the key whose daily bucket this one spends from
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -441,6 +445,7 @@ const handler = {
                 userPlan = authResult.plan ?? null;
                 keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
                 activationPending = authResult.activationPending === true;
+                budgetKey = authResult.budgetKey ?? null;
                 // cacheRefreshed === true means we just read the DB; false/undefined
                 // means this balance came from the (≤60s, per-isolate) cache.
                 usedCachedAuth = authResult.cacheRefreshed !== true;
@@ -641,7 +646,7 @@ const handler = {
                     onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
                 }
             }
-            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt);
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt, budgetKey);
         }
 
         // rerank (oxjob #1521): `rerank=true` in the URL, or `"rerank": true` in a POST body (the
@@ -742,7 +747,8 @@ const handler = {
         // Ordinary keyless budgets are per network, not per address (oxjob #1692): an IPv6 /64 belongs to
         // one household or device and holds 2^64 addresses, so per address it bought a fresh budget per
         // request (14 Oct: 1,123 /64s took 3.33M credits over 39K addresses). IPv4 stays per address.
-        const identifier = apiKey || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
+        // An agent's key spends from its account key's bucket (budgetKey; oxjob #1697): one free day per person.
+        const identifier = (apiKey && (budgetKey || apiKey)) || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
         const rateLimitKey = verifiedAssistant ? `${scope}:verified-assistant:${identifier}` : `${scope}:${identifier}`;
         const limit = maxCreditsPerDay;
 
@@ -1741,6 +1747,7 @@ async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
             userId: cached.userId,
             orgId: cached.orgId,
             activationPending: cached.activationPending,
+            budgetKey: cached.budgetKey,
             cacheRefreshed: false
         };
     }
@@ -1780,6 +1787,7 @@ async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
             userId: (row.user_id as string) ?? null,
             orgId: (row.org_id as string) ?? null,
             activationPending: row.activation_pending === true,
+            budgetKey: typeof row.budget_key === "string" && row.budget_key ? row.budget_key : null,
             cacheRefreshed: true
         };
 
@@ -2118,7 +2126,8 @@ async function handleRateLimitEndpoint(
     maxCreditsPerDay: number,
     isGrandfathered: boolean = false,
     onetimeCreditsBalance: number = 0,
-    onetimeCreditsExpiresAt?: string
+    onetimeCreditsExpiresAt?: string,
+    budgetKey: string | null = null
 ): Promise<Response> {
     // Require a valid API key
     if (!hasValidApiKey || !apiKey) {
@@ -2128,8 +2137,9 @@ async function handleRateLimitEndpoint(
         });
     }
 
-    // Query the rate limiter DO for current status (without incrementing)
-    const rateLimitKey = `credits:${apiKey}`;
+    // Query the rate limiter DO for current status (without incrementing). An agent's key reports its account
+    // key's bucket, which it spends from (oxjob #1697).
+    const rateLimitKey = `credits:${budgetKey || apiKey}`;
     const id = env.RATE_LIMITER.idFromName(rateLimitKey);
     const limiter = env.RATE_LIMITER.get(id);
 

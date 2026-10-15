@@ -16,6 +16,7 @@ const ROWS: Record<string, Record<string, unknown>> = {
     EXPIRED1: { max_per_day: 0, max_credits_per_day: 0, activation_pending: true, user_id: 'user-e1' },
     ACTIVE01: { max_per_day: 10000, max_credits_per_day: 10000, activation_pending: false, user_id: 'user-a1' },
     OLDVIEW1: { max_per_day: 10000, max_credits_per_day: 10000, user_id: 'user-o1' },
+    AGENTKEY: { max_per_day: 10000, max_credits_per_day: 10000, activation_pending: false, user_id: 'user-g1', budget_key: 'ACCOUNTK' },
 };
 const queries: string[] = [];
 vi.mock('pg', () => ({
@@ -230,6 +231,23 @@ describe('a pending key hears how to activate', () => {
         const { res } = await runWorker('/works?api_key=EXPIRED1', { env: HD });
         expect(res.status).toBe(429);
         expect((await res.json() as any).message).toContain('never activated');
+    });
+});
+
+describe("one free day per person: an agent's key spends from its account key's bucket", () => {
+    it('counts in the account bucket', async () => {
+        const { res, checks } = await runWorker('/works?api_key=AGENTKEY', {
+            env: HD, fetch: async () => new Response(LIST, { status: 200, headers: { 'Content-Type': 'application/json' } }),
+        });
+        expect(res.status).toBe(200);
+        expect(checks[0]).toMatchObject({ bucket: 'credits:ACCOUNTK', dailyLimit: 10000 });
+    });
+
+    it('is refused when the account spent its day on its own key', async () => {
+        const { res } = await runWorker('/works?api_key=AGENTKEY', {
+            env: HD, buckets: { 'credits:ACCOUNTK': { counter: { count: 10000, date: today() } } },
+        });
+        expect(res.status).toBe(429);
     });
 });
 
