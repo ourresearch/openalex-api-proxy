@@ -161,7 +161,7 @@ describe('the per-second cap on the API path (oxjob #1689)', () => {
     });
 
     it('keyless traffic from the website (Referer, Origin, UI token) keeps 10/s', async () => {
-        const uiToken = await mintUiToken('test-ui-hmac-secret', 1_760_000_000_000, 1800);
+        const uiToken = await mintUiToken('test-ui-hmac-secret', 1_760_000_000_000, 1800, '203.0.113.9');
         const { checks, count } = await burst(RECORD, 15, { headers: {
             Referer: 'https://openalex.org/works/W2741809807', Origin: 'https://openalex.org', 'X-OpenAlex-UI': uiToken,
         } });
