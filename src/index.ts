@@ -10,6 +10,7 @@ import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
+import { syncFieldInParams, requestOqlText, mightNameSyncField, readXQuery, syncFieldInXQuery, oqlSyncMessage } from "./syncGate";
 import { semanticSearchKey } from "./semanticGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
@@ -667,22 +668,29 @@ const handler = {
         // cluster; the request then runs in its normal order at the normal price.
         let rerankAsked = isRerank(url.searchParams);
         let rewrittenPostBody: string | null = null;
-        if (req.method === "POST" && !rerankAsked) {
-            try {
-                const parsed = JSON.parse(await req.clone().text());
-                if (bodyAsksRerank(parsed)) {
-                    rerankAsked = true;
-                    if (cachedHealthLevel(env) >= 1) {
-                        delete parsed.rerank;
-                        rewrittenPostBody = JSON.stringify(parsed);
-                    }
-                }
-            } catch { /* not JSON: nothing to price */ }
+        // The POST body, parsed once: for rerank here and for the sync-field gate (oxjob #1689) below.
+        let postBody: unknown = null;
+        if (req.method === "POST") {
+            try { postBody = JSON.parse(await req.clone().text()); } catch { /* not JSON: nothing to price or gate */ }
+        }
+        if (!rerankAsked && bodyAsksRerank(postBody)) {
+            rerankAsked = true;
+            if (cachedHealthLevel(env) >= 1) {
+                const parsed = postBody as Record<string, unknown>;
+                delete parsed.rerank;
+                rewrittenPostBody = JSON.stringify(parsed);
+            }
         }
         if (rerankAsked && cachedHealthLevel(env) >= 1) {
             url.searchParams.delete('rerank');
             rerankAsked = false;
         }
+
+        // Sync filters through OQL/OQO (oxjob #1689; see syncGate.ts): armed for a caller without a paid plan whose
+        // OQL/OQO could name one, and checked once the origin answers, against the engine's own translation.
+        const oqlText = requestOqlText(url.searchParams, postBody);
+        const syncGateArmed = oqlText !== null && mightNameSyncField(oqlText)
+            && !(userPlan !== null && ENTERPRISE_PLANS.has(userPlan));
 
         // Only the website token says a request came from openalex.org; an Origin or Referer is forgeable
         // and stopped counting on 2026-10-15 (oxjobs #1691, #1692).
@@ -1581,6 +1589,30 @@ const handler = {
             throw error;
         }
 
+        // Sync filters through OQL/OQO are a paid feature too (oxjob #1689; see syncGate.ts). checkProtectedParams
+        // refuses them in a classic URL before any charge; OQL's date axes (#407, June 2026) assumed the engine enforced
+        // the plan, which it didn't. So an armed request's answer is read as far as meta.x_query (the engine's own
+        // translation: its classic URL and OQO) and refused with the same 429 when that names a sync field. The origin
+        // has run the query by then, so the up-front charge is refunded: refusals are free, like every error (#863).
+        if (syncGateArmed && response.status === 200 && response.body
+            && (response.headers.get("Content-Type") || "").includes("application/json")) {
+            const syncField = syncFieldInXQuery(await readXQuery(response.clone().body!));
+            if (syncField) {
+                response.body?.cancel().catch(() => {});
+                await settleCredits(limiter, {
+                    charged: creditCost, actual: 0, dailyLimit: limit, onetimeBalance: onetimeCreditsBalance,
+                    remaining: rateLimitResult.remaining ?? 0, onetimeRemaining: rateLimitResult.onetimeRemaining ?? 0,
+                });
+                logAnalytics({
+                    ctx, env, apiKey, req, url, scope: 'main',
+                    responseTime: Date.now() - startTime,
+                    statusCode: 429, rateLimit: 0, rateLimitRemaining: 0,
+                    endpointType: classification.type, creditCost: 0, trustedUi,
+                });
+                return json(429, { error: "Plan upgrade required", message: oqlSyncMessage(syncField) });
+            }
+        }
+
         // Sampled clone for analytics body-read (oxjob #194). Must be taken
         // BEFORE response.body is consumed by the streamed `new Response(...)`
         // below — once a body stream is used, it can't be cloned. The clone
@@ -1981,36 +2013,17 @@ const ENTERPRISE_PLANS = new Set([
     'partner',
 ]);
 
+// Sync filters (filter or sort by updated/created date) are paid; the rule is shared with the OQL/OQO gate (syncGate.ts).
 function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | null): { valid: boolean; error?: string } {
-    const hasPlanAccess = plan !== null && ENTERPRISE_PLANS.has(plan);
-
-    // Use getAll() to check ALL values — duplicate params (e.g., ?filter=safe&filter=date_filter)
-    // could bypass the check if we only inspect the first value.
-    const filterParams = url.searchParams.getAll('filter');
-    for (const filterParam of filterParams) {
-        const filterPattern = /(?:from_|to_)?(?:updated|created)_date:[><]?\d{4}-\d{2}-\d{2}/;
-        const matches = filterParam.match(filterPattern);
-        if (matches && !hasPlanAccess) {
-            return {
-                valid: false,
-                error: `The "${matches[0]}" filter requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
-            };
-        }
-    }
-
-    const sortParams = url.searchParams.getAll('sort');
-    for (const sortParam of sortParams) {
-        const sortPattern = /(?:from_|to_)?(?:updated|created)_date(?::(?:asc|desc))?/;
-        const matches = sortParam.match(sortPattern);
-        if (matches && !hasPlanAccess) {
-            return {
-                valid: false,
-                error: `Sorting by "${matches[0]}" requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
-            };
-        }
-    }
-
-    return { valid: true };
+    if (plan !== null && ENTERPRISE_PLANS.has(plan)) return { valid: true };
+    const hit = syncFieldInParams(url.searchParams);
+    if (!hit) return { valid: true };
+    return {
+        valid: false,
+        error: hit.kind === 'filter'
+            ? `The "${hit.clause}" filter requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
+            : `Sorting by "${hit.clause}" requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
+    };
 }
 
 /** api.openalex.org/api-keys (oxjob #1697): GET explains, POST asks users-api for a key after the enforcement list. */
