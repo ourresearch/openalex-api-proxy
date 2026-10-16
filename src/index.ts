@@ -10,7 +10,7 @@ import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
-import { syncFieldInParams, requestOqlText, mightNameSyncField, readXQuery, syncFieldInXQuery, oqlSyncMessage } from "./syncGate";
+import { syncFieldInParams, requestOqlText, mightNameSyncField, readXQuery, syncFieldInXQuery, oqlSyncMessage, DAILY_SYNC_PLANS } from "./syncGate";
 import { semanticSearchKey } from "./semanticGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
@@ -613,36 +613,36 @@ const handler = {
             }
         }
 
-        // Changefiles downloads require a valid API key on a Premium, Institutional, or Partner plan.
+        // Changefile downloads are daily sync: a valid API key on a plan in ENTERPRISE_PLANS.
         // Gated here (before the rate limiter) so rejected requests don't consume credits.
         if (isChangefileDownloadPath(url.pathname)) {
             if (!hasValidApiKey) {
                 return json(401, {
                     error: "API key required",
-                    message: "Changefile downloads require an API key. Get one at https://openalex.org/pricing"
+                    message: `Changefile downloads need an API key; they are ${DAILY_SYNC_PLANS}`
                 });
             }
             if (!userPlan || !ENTERPRISE_PLANS.has(userPlan)) {
                 return json(403, {
                     error: "Plan upgrade required",
-                    message: "Changefile downloads require a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details."
+                    message: `Changefile downloads are ${DAILY_SYNC_PLANS}`
                 });
             }
         }
 
-        // Snapshot credentials vending requires a valid API key on a Premium, Institutional, or Partner plan.
+        // Daily-snapshot credentials are daily sync: a valid API key on a plan in ENTERPRISE_PLANS.
         // Gated here (before the rate limiter) so rejected requests don't consume credits.
         if (/^\/snapshots\/credentials\/?$/i.test(url.pathname)) {
             if (!hasValidApiKey) {
                 return json(401, {
                     error: "API key required",
-                    message: "Snapshot credentials require an API key. Get one at https://openalex.org/pricing"
+                    message: `Daily snapshot credentials need an API key; they are ${DAILY_SYNC_PLANS}`
                 });
             }
             if (!userPlan || !ENTERPRISE_PLANS.has(userPlan)) {
                 return json(403, {
                     error: "Plan upgrade required",
-                    message: "Snapshot access requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details."
+                    message: `Daily snapshot access is ${DAILY_SYNC_PLANS}`
                 });
             }
         }
@@ -2021,8 +2021,8 @@ function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | 
     return {
         valid: false,
         error: hit.kind === 'filter'
-            ? `The "${hit.clause}" filter requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
-            : `Sorting by "${hit.clause}" requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.`
+            ? `The "${hit.clause}" filter is ${DAILY_SYNC_PLANS}`
+            : `Sorting by "${hit.clause}" is ${DAILY_SYNC_PLANS}`
     };
 }
 

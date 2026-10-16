@@ -22,7 +22,7 @@ export function isChangefilesBrowsePath(pathname: string): boolean {
 }
 
 // An actual changefile *download*: /changefiles/{date}/{filename}. These stay
-// metered and plan-gated (Premium/Institutional/Partner) in index.ts.
+// metered and plan-gated (daily sync: Member+, Partner and legacy plans) in index.ts.
 export function isChangefileDownloadPath(pathname: string): boolean {
     return /^changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/.test(normalizePath(pathname));
 }

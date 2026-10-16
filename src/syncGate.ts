@@ -104,9 +104,14 @@ export function mightNameSyncField(text: string): boolean {
     return /updated|created|added|_date/i.test(text);
 }
 
+/** How every sync refusal ends: the current plans that include daily sync, and a page agents can read
+ * (openalex.org itself challenges scripts). Legacy Premium/Institutional plans still pass the gate, so
+ * nobody who holds one ever sees this. */
+export const DAILY_SYNC_PLANS = 'part of daily sync, which comes with the Member+ and Partner plans. See https://help.openalex.org/access/sync/ for details.';
+
 /** The 429 message for an OQL/OQO query refused here (the classic URL's messages live in index.ts). */
 export function oqlSyncMessage(field: string): string {
-    return `OQL that filters or sorts by "${field}" requires a Member+, Partner, Premium or Institutional plan. See https://openalex.org/pricing for details.`;
+    return `OQL that filters or sorts by "${field}" is ${DAILY_SYNC_PLANS}`;
 }
 
 /**

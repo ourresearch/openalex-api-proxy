@@ -136,7 +136,7 @@ describe('requestOqlText and the prefilter', () => {
         expect(mightNameSyncField('works where title has "coral reefs" and year is 2024')).toBe(false);
     });
     it('names the field in a message like the classic one', () => {
-        expect(oqlSyncMessage('from_updated_date')).toBe('OQL that filters or sorts by "from_updated_date" requires a Member+, Partner, Premium or Institutional plan. See https://openalex.org/pricing for details.');
+        expect(oqlSyncMessage('from_updated_date')).toBe('OQL that filters or sorts by "from_updated_date" is part of daily sync, which comes with the Member+ and Partner plans. See https://help.openalex.org/access/sync/ for details.');
     });
 });
 
@@ -338,7 +338,7 @@ describe('the OQL/OQO sync gate, through the Worker (oxjob #1689)', () => {
         const origin = originAnswering(undefined);
         const { res } = await runWorker('/works?filter=from-updated-date:2026-10-15', { fetch: origin.fetch });
         expect(res.status).toBe(429);
-        expect((await res.json() as any).message).toBe('The "from-updated-date:2026-10-15" filter requires a Premium, Institutional, or Partner plan. See https://openalex.org/pricing for details.');
+        expect((await res.json() as any).message).toBe('The "from-updated-date:2026-10-15" filter is part of daily sync, which comes with the Member+ and Partner plans. See https://help.openalex.org/access/sync/ for details.');
         expect(origin.calls).toHaveLength(0);
     });
 });
