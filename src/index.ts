@@ -10,6 +10,7 @@ import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
+import { semanticSearchKey } from "./semanticGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
@@ -781,19 +782,20 @@ const handler = {
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
-        // Temporary: enforce 1 req/s per user for semantic search
+        // One semantic search a second per client; a refetch of the same search
+        // (another page size or page) within that second passes (semanticGate.ts).
         if (classification.type === 'semantic') {
             try {
                 const semanticCheck = await limiter.fetch("http://internal/check-semantic", {
                     method: "POST",
-                    body: JSON.stringify({ dailyLimit: limit })
+                    body: JSON.stringify({ dailyLimit: limit, search: semanticSearchKey(url) })
                 }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
 
                 if (!semanticCheck.success) {
                     const retryAfter = Math.ceil(semanticCheck.retryAfter || 1);
                     const errorResponse = new Response(JSON.stringify({
                         error: "Rate limit exceeded",
-                        message: `Semantic search is limited to 1 request per second. Please wait and try again.`,
+                        message: `Semantic search is limited to 1 search per second. Please wait and try again.`,
                         retryAfter
                     }), {
                         status: 429,

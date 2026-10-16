@@ -1,5 +1,6 @@
 import { splitCharge } from "./creditReconcile";
 import { reportError, withErrorReporting, Invocation, SentryEnv } from './sentry';
+import { checkSemanticGate, newSemanticGateState } from "./semanticGate";
 
 interface TokenBucket {
     tokens: number;
@@ -25,7 +26,7 @@ export class RateLimiter implements DurableObject {
     private perSecondBucket: TokenBucket | null = null;
     private dailyCounter: DailyCounter | null = null;
     private onetimeCounter: OnetimeCounter | null = null;
-    private lastSemanticTime: number = 0; // Temporary: 1 req/s limit for semantic search
+    private semanticGate = newSemanticGateState(); // one semantic search a second (semanticGate.ts)
     private lastThrottleTime: number = 0; // oxjob #166: admin rate-throttle
     private lastBooleanTime: number = 0; // oxjob #521/#677: rate limit for >5-operator boolean searches
     private lastWideOrTime: number = 0; // oxjob #876: rate limit for >10-term OR lists on wide filter fields
@@ -133,6 +134,7 @@ export class RateLimiter implements DurableObject {
             onetimeBalance?: number;
             consumedWriteback?: number;
             intervalMs?: number;
+            search?: string;
         }>();
         const { dailyLimit, perSecondLimit, credits = 1, onetimeBalance = 0 } = body;
 
@@ -152,16 +154,10 @@ export class RateLimiter implements DurableObject {
             };
         }
 
-        // Temporary: per-user 1 req/s limit for semantic search (in-memory only)
+        // One semantic search a second per client (in-memory only). Counts searches,
+        // not requests: a refetch of the same search within the second passes.
         if (url.pathname === '/check-semantic') {
-            const SEMANTIC_INTERVAL_MS = 1000;
-            const elapsed = now - this.lastSemanticTime;
-            if (this.lastSemanticTime > 0 && elapsed < SEMANTIC_INTERVAL_MS) {
-                const retryAfter = (SEMANTIC_INTERVAL_MS - elapsed) / 1000;
-                return Response.json({ success: false, retryAfter });
-            }
-            this.lastSemanticTime = now;
-            return Response.json({ success: true });
+            return Response.json(checkSemanticGate(this.semanticGate, now, body.search ?? ''));
         }
 
         // Mirrors /check-semantic: in-memory 1 req/s gate, no daily side-effects.
