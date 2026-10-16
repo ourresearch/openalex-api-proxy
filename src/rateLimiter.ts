@@ -391,12 +391,11 @@ export class RateLimiter implements DurableObject {
         // Onetime counter is now persisted immediately in the consumption path above.
         // No alarm scheduling needed for onetime.
 
-        // Write-behind: If it's been a while, save now
-        const oldestPersist = Math.min(
-            this.dailyCounter!.lastPersisted,
-            this.onetimeCounter!.lastPersisted
-        );
-        if (now - oldestPersist >= PERSIST_INTERVAL_MS) {
+        // Write-behind: if the daily counter hasn't been saved this window, save now. Only the
+        // daily counter is written behind (onetime persists immediately above); taking the min
+        // with onetime.lastPersisted, which never moves for keys without prepaid credits, made
+        // every request write storage once the object was 10 s old (oxjob #1698).
+        if (now - this.dailyCounter!.lastPersisted >= PERSIST_INTERVAL_MS) {
             this.persist();
         }
 
