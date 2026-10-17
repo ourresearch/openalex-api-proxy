@@ -15,12 +15,12 @@ import { semanticSearchKey } from "./semanticGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
-import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
+import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, checkSemanticBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, KEY_NOT_ACTIVATED_MESSAGE, API_KEYS_ENFORCED_MESSAGE, API_KEY_ASKS_PER_NETWORK_PER_DAY, API_KEY_ASKS_REFUSED_MESSAGE } from "./apiKeys";
 import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
-import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND } from "./contactBudget";
+import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND, CONTACT_DAILY_CREDITS } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, DEFAULT_SHARED_DAILY, ENFORCE_BLOCK_MESSAGE, ENFORCE_BUDGET_MESSAGE } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
 
@@ -54,6 +54,8 @@ export interface Env extends SentryEnv {
     // (health-driven). Replaces the retired SHED_ANON_SEARCH code flag —
     // FORCE_HEALTH_STATE=RED is the old armed shed, without a deploy.
     FORCE_HEALTH_STATE?: string;     // plain env var (keep_vars)
+    // oxjob #1433: the same override for the semantic ladder (free and anonymous semantic searches).
+    FORCE_SEMANTIC_HEALTH_STATE?: string;  // plain env var (keep_vars)
     // oxjob #521 WS-3 v3.5: Slack incoming-webhook URL for episode alerts
     // (ORANGE/RED engaged, RED escalation, recovered). Unset = alerts inert.
     SLACK_WEBHOOK_URL?: string;      // Worker secret
@@ -789,6 +791,42 @@ const handler = {
         // Check rate limit using Durable Object
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
+
+        // SEMANTIC LADDER (oxjob #1433, Jason's yes 2026-10-17; searchHealth.ts). While semantic search is unhealthy,
+        // free and anonymous semantic searches share one small budget, so a burst of free traffic can't take the vector
+        // cluster down for everyone (13 and 15 Oct: one client on 8 free accounts, ≈ 80% timeouts for 4 h each).
+        // Paid keys (a plan, prepaid credit, grandfathered, or more than a free key's day) and the website are never
+        // rationed. At GREEN this costs nothing (cached state, no DO call). Runs before the per-key gate and the credits
+        // check, so a refusal is edge-cheap and never charged.
+        if (classification.type === 'semantic' && !trustedUi && isFreeSemanticCaller(hasValidApiKey, userPlan,
+                onetimeCreditsBalance, isGrandfathered, maxCreditsPerDay)) {
+            const verdict = await checkSemanticBudget(env, ctx);
+            if (!verdict.ok) {
+                const statusCode = verdict.statusCode ?? 503;
+                const retryAfter = verdict.retryAfter ?? 30;
+                logAnalytics({
+                    ctx, env, apiKey, req, url,
+                    scope: 'semantic-ladder',
+                    responseTime: Date.now() - startTime,
+                    statusCode,
+                    rateLimit: limit,
+                    rateLimitRemaining: 0,
+                    endpointType: classification.type,
+                    creditCost: 0,
+                    trustedUi
+                });
+                const resp = json(statusCode, {
+                    error: statusCode === 503 ? "Semantic search temporarily unavailable" : "Rate limit exceeded",
+                    message: "Semantic search is under heavy load, so free and anonymous semantic searches are " +
+                        `${statusCode === 503 ? "paused" : "rationed"} while it recovers. Please retry in ${retryAfter}s. ` +
+                        "Nothing was charged. Paid plans are not rationed: https://openalex.org/pricing",
+                    retryAfter,
+                });
+                const headers = new Headers(resp.headers);
+                headers.set("Retry-After", String(retryAfter));
+                return new Response(resp.body, { status: statusCode, headers });
+            }
+        }
 
         // One semantic search a second per client; a refetch of the same search
         // (another page size or page) within that second passes (semanticGate.ts).
@@ -2012,6 +2050,16 @@ const ENTERPRISE_PLANS = new Set([
     'member-plus',
     'partner',
 ]);
+
+// Who the semantic ladder rations (oxjob #1433): anonymous callers and free keys. A key is paid when it has a plan
+// (other than 'throttled'), prepaid credit, a grandfathered allowance, or more than a free key's daily credits.
+export function isFreeSemanticCaller(hasValidApiKey: boolean, plan: string | null, onetimeCreditsBalance: number,
+                                     isGrandfathered: boolean, maxCreditsPerDay: number): boolean {
+    if (!hasValidApiKey) return true;
+    if (plan && plan !== 'throttled') return false;
+    if (onetimeCreditsBalance > 0 || isGrandfathered) return false;
+    return maxCreditsPerDay <= CONTACT_DAILY_CREDITS;
+}
 
 // Sync filters (filter or sort by updated/created date) are paid; the rule is shared with the OQL/OQO gate (syncGate.ts).
 function checkProtectedParams(url: URL, hasValidApiKey: boolean, plan: string | null): { valid: boolean; error?: string } {

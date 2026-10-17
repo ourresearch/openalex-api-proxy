@@ -114,13 +114,13 @@ export function newBucket(start: number): BucketStats {
     return { start, n: 0, sumMs: 0, errN: 0, slowN: 0, anonN: 0, otherN: 0, otherSumMs: 0, otherErrN: 0 };
 }
 
-export function bucketSeverity(b: BucketStats): HealthLevel {
+export function bucketSeverity(b: BucketStats, bounds: ReadonlyArray<{ avgMs: number; errRate: number }> = LEVEL_BOUNDS): HealthLevel {
     if (b.n < MIN_BUCKET_SAMPLES) return 0;
     const avg = b.sumMs / b.n;
     const err = b.errN >= MIN_ERR_SAMPLES ? b.errN / b.n : 0;
     let level: HealthLevel = 0;
-    for (let i = 0; i < LEVEL_BOUNDS.length; i++) {
-        if (avg > LEVEL_BOUNDS[i].avgMs || err > LEVEL_BOUNDS[i].errRate) {
+    for (let i = 0; i < bounds.length; i++) {
+        if (avg > bounds[i].avgMs || err > bounds[i].errRate) {
             level = (i + 1) as HealthLevel;
         }
     }
@@ -194,12 +194,15 @@ export interface AnonBucket {
 // rateLimiter.ts. Deliberately NOT unified in this change — touching the
 // per-key limiter in the same deploy as new enforcement couples two risks.
 // Follow-up: extract this tested pure helper and have RateLimiter use it.
-export function checkBudget(level: HealthLevel, b: AnonBucket, now: number): { ok: boolean; retryAfter?: number } {
-    const rate = BUCKET_REFILL[level];
+export function checkBudget(
+    level: HealthLevel, b: AnonBucket, now: number, refill: Record<HealthLevel, number> = BUCKET_REFILL,
+): { ok: boolean; retryAfter?: number } {
+    const rate = refill[level];
     if (rate === Infinity) return { ok: true };
     if (rate === 0) return { ok: false, retryAfter: 60 };
     const elapsedSec = Math.max(0, (now - b.lastRefill) / 1000);
-    b.tokens = Math.min(rate, b.tokens + elapsedSec * rate);
+    // Capacity is one second of rate, but at least one token: a sub-1/s rate (the semantic ladder) must still pass a request.
+    b.tokens = Math.min(Math.max(1, rate), b.tokens + elapsedSec * rate);
     b.lastRefill = now;
     if (b.tokens >= 1) {
         b.tokens -= 1;
@@ -208,10 +211,50 @@ export function checkBudget(level: HealthLevel, b: AnonBucket, now: number): { o
     return { ok: false, retryAfter: Math.max(1, Math.ceil((1 - b.tokens) / rate)) };
 }
 
-function summarize(b: BucketStats) {
+// ---- The semantic ladder (oxjob #1433, Jason's yes 2026-10-17) -----------
+// Semantic search runs on its own small vector cluster. One client on 8 free accounts (each at the 1/s per-key cap)
+// sent ≈ 1.5 searches/s for 4-5 h on 13 and 15 Oct; the cluster went to ≈ 80% timeouts for every caller and stayed
+// there until the client left (timeouts are refunded and retried, and the cluster keeps working on searches the proxy
+// already gave up on). The same ladder, a second controller instance (SEMANTIC_HEALTH_DO_NAME), its own bounds: healthy
+// semantic search runs ≈ 1 s median end to end, p95 2-3 s, and the collapse is 9 s aborts. While it isn't GREEN, free
+// and anonymous semantic searches share one budget; paid keys and the website are never rationed.
+export interface HealthProfile {
+    name: 'search' | 'semantic';
+    bounds: ReadonlyArray<{ avgMs: number; errRate: number }>;
+    refill: Record<HealthLevel, number>;
+    slowMs: number;
+    rationed: string;      // who the ladder rations, for logs and Slack
+    unaffected: string;
+}
+export const SEARCH_PROFILE: HealthProfile = {
+    name: 'search', bounds: LEVEL_BOUNDS, refill: BUCKET_REFILL, slowMs: 3000,
+    rationed: 'anonymous works search', unaffected: 'Keyed clients and the GUI are unaffected.',
+};
+export const SEMANTIC_BOUNDS: ReadonlyArray<{ avgMs: number; errRate: number }> = [
+    { avgMs: 2500, errRate: 0.05 },  // YELLOW
+    { avgMs: 4000, errRate: 0.15 },  // ORANGE
+    { avgMs: 6500, errRate: 0.40 },  // RED
+];
+// Free + anonymous semantic searches per second, all callers together. Their normal demand is ≈ 0.2-0.4/s, so YELLOW
+// sheds only a surge; ORANGE is real rationing; RED pauses them while the cluster drains.
+export const SEMANTIC_REFILL: Record<HealthLevel, number> = { 0: Infinity, 1: 1, 2: 0.3, 3: 0 };
+export const SEMANTIC_PROFILE: HealthProfile = {
+    name: 'semantic', bounds: SEMANTIC_BOUNDS, refill: SEMANTIC_REFILL, slowMs: 5000,
+    rationed: 'free and anonymous semantic search', unaffected: 'Paid keys and the website are unaffected.',
+};
+export const SEMANTIC_HEALTH_DO_NAME = 'global:semantic-health-v1';
+// Every Worker call to the semantic instance carries this header; the instance remembers its profile in storage.
+export const PROFILE_HEADER = 'x-health-profile';
+
+function ladderText(refill: Record<HealthLevel, number>): Record<string, string> {
+    const r = (x: number) => (x === Infinity ? 'no limit' : x === 0 ? 'off (503)' : `${x}/s`);
+    return { GREEN: r(refill[0]), YELLOW: r(refill[1]), ORANGE: r(refill[2]), RED: r(refill[3]) };
+}
+
+function summarize(b: BucketStats, bounds: HealthProfile['bounds'] = LEVEL_BOUNDS) {
     return {
         start: new Date(b.start).toISOString(),
-        severity: LEVEL_NAMES[bucketSeverity(b)],
+        severity: LEVEL_NAMES[bucketSeverity(b, bounds)],
         search: {
             n: b.n,
             avgMs: b.n ? Math.round(b.sumMs / b.n) : null,
@@ -281,6 +324,8 @@ export class SearchHealthController implements DurableObject {
     private episodeStartedAt = 0;
     private episodePeak: HealthLevel = 0;
     private redStartedAt = 0;
+    // Which ladder this instance runs (oxjob #1433): the works-search one unless a Worker call said semantic.
+    private profile: HealthProfile = SEARCH_PROFILE;
 
     constructor(
         private readonly state: DurableObjectState,
@@ -302,6 +347,7 @@ export class SearchHealthController implements DurableObject {
                 }
                 const storedTransitions = await this.state.storage.get<TransitionRecord[]>('transitions');
                 if (storedTransitions) this.transitions = storedTransitions;
+                if ((await this.state.storage.get<string>('profile')) === 'semantic') this.profile = SEMANTIC_PROFILE;
             } catch { /* fresh start on storage error — observe-only, no harm */ }
         });
     }
@@ -309,6 +355,10 @@ export class SearchHealthController implements DurableObject {
     async fetch(request: Request): Promise<Response> {
         const url = new URL(request.url);
         const now = Date.now();
+        if (request.headers.get(PROFILE_HEADER) === 'semantic' && this.profile !== SEMANTIC_PROFILE) {
+            this.profile = SEMANTIC_PROFILE;
+            try { await this.state.storage.put('profile', 'semantic'); } catch { /* re-learned on the next call */ }
+        }
 
         if (url.pathname === '/observe' && request.method === 'POST') {
             let obs: HealthObservation;
@@ -328,7 +378,7 @@ export class SearchHealthController implements DurableObject {
                 b.n += 1;
                 b.sumMs += obs.ms;
                 if (isOverloadErr) b.errN += 1;
-                if (obs.ms > 3000) b.slowN += 1;
+                if (obs.ms > this.profile.slowMs) b.slowN += 1;
                 if (obs.anon) b.anonN += 1;
             } else {
                 b.otherN += 1;
@@ -353,7 +403,7 @@ export class SearchHealthController implements DurableObject {
             } catch { /* no body → no force */ }
             await this.rollBuckets(now);
             const level = force ?? this.level;
-            const verdict = checkBudget(level, this.anonBucket, now);
+            const verdict = checkBudget(level, this.anonBucket, now, this.profile.refill);
             // Shape Retry-After for denials (review finding: the raw bucket math
             // yields 1s for any rate ≥ 1, which synchronizes the whole denied
             // class into 1-second retry waves against this single DO). Jittered,
@@ -388,16 +438,18 @@ export class SearchHealthController implements DurableObject {
             await this.rollBuckets(now);
             return Response.json({
                 phase: 'phase-1',
+                profile: this.profile.name,
+                rationed: this.profile.rationed,
                 state: LEVEL_NAMES[this.level],
                 since: new Date(this.since).toISOString(),
                 enforcing: true,
-                ladder: { GREEN: 'no limit', YELLOW: '60/s', ORANGE: '20/s', RED: 'off (503)' },
+                ladder: ladderText(this.profile.refill),
                 backoff: {
                     reclampStreak: this.reclampStreak,
                     nextHoldMin: { ORANGE: effectiveDwellMs(this.reclampStreak, 2) / 60000, RED: effectiveDwellMs(this.reclampStreak, 3) / 60000 },
                 },
-                window: this.ring.map(summarize),
-                currentBucket: this.current ? summarize(this.current) : null,
+                window: this.ring.map((b) => summarize(b, this.profile.bounds)),
+                currentBucket: this.current ? summarize(this.current, this.profile.bounds) : null,
                 recentTransitions: [...this.transitions].reverse(), // newest first
             });
         }
@@ -448,9 +500,11 @@ export class SearchHealthController implements DurableObject {
         if (this.episodeOpen && this.level === 0 && now - this.since >= RECLAMP_WINDOW_MS) {
             const mins = Math.round((now - this.episodeStartedAt) / 60000);
             if (this.episodePeak === 3) {
-                this.sendSlack(
-                    `✅ *OpenAlex search-health: recovered* — GREEN and quiet for 10 min. ` +
-                    `Episode lasted ~${mins} min, peaked RED. Anonymous search fully open.`,
+                this.sendSlack(this.profile === SEMANTIC_PROFILE
+                    ? `✅ *OpenAlex semantic-health: recovered* — GREEN and quiet for 10 min. ` +
+                      `Episode lasted ~${mins} min, peaked RED. Free and anonymous semantic search fully open.`
+                    : `✅ *OpenAlex search-health: recovered* — GREEN and quiet for 10 min. ` +
+                      `Episode lasted ~${mins} min, peaked RED. Anonymous search fully open.`,
                 );
             }
             this.episodeOpen = false;
@@ -480,7 +534,7 @@ export class SearchHealthController implements DurableObject {
     }
 
     private async evaluate(): Promise<void> {
-        const severities = this.ring.map(bucketSeverity);
+        const severities = this.ring.map((b) => bucketSeverity(b, this.profile.bounds));
         const now = Date.now();
         const next = nextLevel(this.level, severities, now - this.since, effectiveDwellMs(this.reclampStreak, this.level));
         if (next === this.level) return;
@@ -499,10 +553,11 @@ export class SearchHealthController implements DurableObject {
         }
         if (from === 3 && next < 3) {
             const pausedMin = this.redStartedAt ? Math.max(1, Math.round((now - this.redStartedAt) / 60000)) : 0;
+            const tag = this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health';
             this.sendSlack(
-                `🟠 *OpenAlex search-health: RED lifted* — anonymous works search paused for ~${pausedMin} min, ` +
-                `now restored at 20/s rationing (ORANGE). Full speed returns automatically as health clears; ` +
-                `a final ✅ posts when fully GREEN.`,
+                `🟠 *OpenAlex ${tag}: RED lifted* — ${this.profile.rationed} paused for ~${pausedMin} min, ` +
+                `now restored at ${ladderText(this.profile.refill).ORANGE} rationing (ORANGE). Full speed returns ` +
+                `automatically as health clears; a final ✅ posts when fully GREEN.`,
             );
             this.episodeRedAlerted = false; // a re-RED in this episode is news again
         }
@@ -531,10 +586,11 @@ export class SearchHealthController implements DurableObject {
                 this.episodeRedAlerted = true;
                 const last2 = this.ring[this.ring.length - 1];
                 const avg2 = last2 && last2.n ? Math.round(last2.sumMs / last2.n) : 0;
+                const tag = this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health';
                 this.sendSlack(
-                    `🔴 *OpenAlex search-health: RED* — anonymous works search paused (503) while the cluster drains. ` +
+                    `🔴 *OpenAlex ${tag}: RED* — ${this.profile.rationed} paused (503) while the cluster drains. ` +
                     `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak, 3) / 60000} min. ` +
-                    `Keyed clients and the GUI are unaffected.`,
+                    this.profile.unaffected,
                 );
             }
         }
@@ -568,6 +624,7 @@ export class SearchHealthController implements DurableObject {
         } catch { /* observe-only: a lost persist just means amnesia on restart */ }
         console.log(JSON.stringify({
             event: 'search_health_transition',
+            profile: this.profile.name,
             phase: 'phase-1',
             enforcing: true,
             from: LEVEL_NAMES[from],
@@ -584,7 +641,8 @@ export class SearchHealthController implements DurableObject {
             // double4=to-level, double5=from-level.
             this.env.ANALYTICS?.writeDataPoint({
                 indexes: ['health_transition'],
-                blobs: ['', '', `${LEVEL_NAMES[from]}->${LEVEL_NAMES[next]}`, '', 'search-health', '', '', 'health_transition'],
+                blobs: ['', '', `${LEVEL_NAMES[from]}->${LEVEL_NAMES[next]}`, '',
+                        this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health', '', '', 'health_transition'],
                 doubles: [avg, errPct, last?.n ?? 0, next, from, -1, 0],
             });
         } catch (error) {
@@ -597,39 +655,56 @@ export class SearchHealthController implements DurableObject {
 // ---- Worker-side: isolate state cache ----------------------------------
 // Every /observe and /check-anon-budget response piggybacks the current state;
 // isolates cache it so the healthy fast path never calls the DO at all.
+// Two ladders, each with its own controller instance and cache (oxjob #1433): works search and semantic search.
 const STATE_CACHE_TTL_MS = 5000;
-let lastKnownState: { level: HealthLevel; at: number } = { level: 0, at: 0 };
+interface Track {
+    doName: string;
+    headers: Record<string, string>;
+    forceVar: 'FORCE_HEALTH_STATE' | 'FORCE_SEMANTIC_HEALTH_STATE';
+    last: { level: HealthLevel; at: number };
+}
+const SEARCH_TRACK: Track = { doName: GLOBAL_HEALTH_DO_NAME, headers: {}, forceVar: 'FORCE_HEALTH_STATE', last: { level: 0, at: 0 } };
+const SEMANTIC_TRACK: Track = {
+    doName: SEMANTIC_HEALTH_DO_NAME, headers: { [PROFILE_HEADER]: 'semantic' }, forceVar: 'FORCE_SEMANTIC_HEALTH_STATE',
+    last: { level: 0, at: 0 },
+};
+// Semantic searches are few (≈ 0.3-2/s), so every one is observed: a 30 s bucket needs MIN_BUCKET_SAMPLES.
+export const SEMANTIC_OBSERVE_RATE = 1;
 
-function noteState(name: string | undefined): void {
+function noteState(track: Track, name: string | undefined): void {
     if (!name) return;
     const idx = LEVEL_NAMES.indexOf(name as (typeof LEVEL_NAMES)[number]);
-    if (idx >= 0) lastKnownState = { level: idx as HealthLevel, at: Date.now() };
+    if (idx >= 0) track.last = { level: idx as HealthLevel, at: Date.now() };
 }
 
 // Worker-side hook. Fire-and-forget on ctx.waitUntil: the observation happens
 // after the response is already streaming and a DO failure can never affect a
 // request (hard invariant: observations change no request outcomes).
+// Semantic responses feed the semantic ladder (oxjob #1433), all of them.
 export function observeSearchHealth(
     env: { SEARCH_HEALTH: DurableObjectNamespace },
     ctx: ExecutionContext,
     obs: { endpointType: string | undefined; ms: number; status: number; anon: boolean },
 ): void {
+    const semantic = obs.endpointType === 'semantic';
     const kind: HealthObservation['kind'] | null =
-        obs.endpointType === 'search' ? 'search'
+        obs.endpointType === 'search' || semantic ? 'search'
         : (obs.endpointType === 'singleton' || obs.endpointType === 'list') ? 'other'
         : null;
     if (kind === null) return;
-    const rate = kind === 'search' ? SEARCH_OBSERVE_RATE : COLLATERAL_OBSERVE_RATE;
+    const rate = semantic ? SEMANTIC_OBSERVE_RATE : kind === 'search' ? SEARCH_OBSERVE_RATE : COLLATERAL_OBSERVE_RATE;
     if (Math.random() >= rate) return;
+    const track = semantic ? SEMANTIC_TRACK : SEARCH_TRACK;
     ctx.waitUntil((async () => {
         try {
-            const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+            const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(track.doName));
             const resp = await stub.fetch('http://internal/observe', {
                 method: 'POST',
+                headers: track.headers,
                 body: JSON.stringify({ ms: obs.ms, status: obs.status, kind, anon: obs.anon } satisfies HealthObservation),
             });
             const j = await resp.json<{ state?: string }>();
-            noteState(j.state);
+            noteState(track, j.state);
         } catch { /* observation only: swallow everything */ }
     })());
 }
@@ -665,6 +740,8 @@ function parseForceState(raw: string | undefined): HealthLevel | null {
     return 3;
 }
 
+type HealthEnv = { SEARCH_HEALTH: DurableObjectNamespace; FORCE_HEALTH_STATE?: string; FORCE_SEMANTIC_HEALTH_STATE?: string };
+
 // The Phase-1 enforcement check for keyless non-GUI works search.
 // - FORCE_HEALTH_STATE pins the level manually (GREEN/RED short-circuit here;
 //   YELLOW/ORANGE still hit the DO so token accounting stays global).
@@ -679,37 +756,45 @@ function parseForceState(raw: string | undefined): HealthLevel | null {
 //   pinned YELLOW/ORANGE → deny (honor the operator's protective intent);
 //   fresh ORANGE/RED → 503 (fail closed exactly when it matters);
 //   unknown/stale/healthy → allow + console.error (availability, visibly).
-export async function checkAnonSearchBudget(
-    env: { SEARCH_HEALTH: DurableObjectNamespace; FORCE_HEALTH_STATE?: string },
-    ctx: ExecutionContext,
-): Promise<BudgetVerdict> {
-    const forced = parseForceState(env.FORCE_HEALTH_STATE);
+export async function checkAnonSearchBudget(env: HealthEnv, ctx: ExecutionContext): Promise<BudgetVerdict> {
+    return checkTrackBudget(SEARCH_TRACK, env, ctx);
+}
+
+// The same check on the semantic ladder (oxjob #1433), for free and anonymous semantic searches only; the caller
+// decides who is free. FORCE_SEMANTIC_HEALTH_STATE pins it like FORCE_HEALTH_STATE pins the works-search ladder.
+export async function checkSemanticBudget(env: HealthEnv, ctx: ExecutionContext): Promise<BudgetVerdict> {
+    return checkTrackBudget(SEMANTIC_TRACK, env, ctx);
+}
+
+async function checkTrackBudget(track: Track, env: HealthEnv, ctx: ExecutionContext): Promise<BudgetVerdict> {
+    const forced = parseForceState(env[track.forceVar]);
     if (forced === 0) return { ok: true, state: 'GREEN (forced)' };
     if (forced === 3) return { ok: false, state: 'RED (forced)', statusCode: 503, retryAfter: 60 };
     const forceParam = forced !== null ? LEVEL_NAMES[forced] : undefined;
 
     const now = Date.now();
-    const age = now - lastKnownState.at;
-    if (!forceParam && lastKnownState.level === 0) {
+    const age = now - track.last.at;
+    if (!forceParam && track.last.level === 0) {
         if (age >= STATE_CACHE_TTL_MS) {
             // Stale GREEN: allow now, refresh off the latency path. At GREEN the
             // DO consumes no token for this, so the refresh is free.
-            ctx.waitUntil(refreshStateInBackground(env));
+            ctx.waitUntil(refreshStateInBackground(track, env));
         }
         return { ok: true, state: 'GREEN' };
     }
-    if (!forceParam && lastKnownState.level === 3 && age < STATE_CACHE_TTL_MS) {
+    if (!forceParam && track.last.level === 3 && age < STATE_CACHE_TTL_MS) {
         return { ok: false, state: 'RED (cached)', statusCode: 503, retryAfter: 60 };
     }
     try {
-        const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+        const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(track.doName));
         const resp = await stub.fetch('http://internal/check-anon-budget', {
             method: 'POST',
+            headers: track.headers,
             body: JSON.stringify(forceParam ? { force: forceParam } : {}),
             signal: AbortSignal.timeout(BUDGET_FETCH_TIMEOUT_MS),
         });
         const j = await resp.json<{ ok: boolean; retryAfter?: number; state: string }>();
-        if (!forceParam) noteState(j.state);
+        if (!forceParam) noteState(track, j.state);
         if (j.ok) return { ok: true, state: j.state };
         return {
             ok: false,
@@ -723,10 +808,10 @@ export async function checkAnonSearchBudget(
             // count tokens, and silently unlimited would betray the pin.
             return { ok: false, state: `${forceParam} (forced, DO error)`, statusCode: 429, retryAfter: 15 };
         }
-        if (lastKnownState.level >= 2 && age < FAIL_CLOSED_MAX_STALENESS_MS) {
+        if (track.last.level >= 2 && age < FAIL_CLOSED_MAX_STALENESS_MS) {
             return { ok: false, state: 'unknown (DO error, last-known unhealthy)', statusCode: 503, retryAfter: 30 };
         }
-        console.error('search-health budget check failed with no fresh unhealthy state — allowing (availability-first)');
+        console.error(`${track.doName} budget check failed with no fresh unhealthy state — allowing (availability-first)`);
         reportError(error, { site: 'search_health_budget_check' });
         return { ok: true, state: 'unknown (DO error)' };
     }
@@ -738,19 +823,26 @@ export async function checkAnonSearchBudget(
 export function cachedHealthLevel(env: { FORCE_HEALTH_STATE?: string }): HealthLevel {
     const forced = parseForceState(env.FORCE_HEALTH_STATE);
     if (forced !== null) return forced;
-    if (Date.now() - lastKnownState.at >= FAIL_CLOSED_MAX_STALENESS_MS) return 0;
-    return lastKnownState.level;
+    if (Date.now() - SEARCH_TRACK.last.at >= FAIL_CLOSED_MAX_STALENESS_MS) return 0;
+    return SEARCH_TRACK.last.level;
 }
 
-async function refreshStateInBackground(env: { SEARCH_HEALTH: DurableObjectNamespace }): Promise<void> {
+async function refreshStateInBackground(track: Track, env: { SEARCH_HEALTH: DurableObjectNamespace }): Promise<void> {
     try {
-        const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+        const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(track.doName));
         const resp = await stub.fetch('http://internal/check-anon-budget', {
             method: 'POST',
+            headers: track.headers,
             body: '{}',
             signal: AbortSignal.timeout(BUDGET_FETCH_TIMEOUT_MS),
         });
         const j = await resp.json<{ state?: string }>();
-        noteState(j.state);
+        noteState(track, j.state);
     } catch { /* background refresh only — next request or observe will retry */ }
+}
+
+// Test-only: forget what this isolate has seen of either ladder.
+export function resetHealthCachesForTests(): void {
+    SEARCH_TRACK.last = { level: 0, at: 0 };
+    SEMANTIC_TRACK.last = { level: 0, at: 0 };
 }
