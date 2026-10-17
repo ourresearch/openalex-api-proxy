@@ -1,6 +1,6 @@
 // The semantic ladder (oxjob #1433): the #521 health ladder run a second time for semantic search, rationing free and
 // anonymous semantic searches while the vector cluster struggles. Paid keys and the website are never rationed.
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
     bucketSeverity, checkBudget, newBucket, SEMANTIC_BOUNDS, SEMANTIC_REFILL, BUCKET_REFILL, SearchHealthController,
     PROFILE_HEADER, MIN_BUCKET_SAMPLES, resetHealthCachesForTests, observeSearchHealth,
@@ -98,7 +98,8 @@ describe('isFreeSemanticCaller', () => {
 });
 
 describe('the semantic controller instance', () => {
-    const call = (dobj: SearchHealthController, path: string, body: unknown, semantic = true) =>
+    beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(1_760_000_000_000); });   // no refill between calls
+    const call =(dobj: SearchHealthController, path: string, body: unknown, semantic = true) =>
         dobj.fetch(new Request(`http://internal${path}`, {
             method: body === undefined ? 'GET' : 'POST',
             headers: semantic ? { [PROFILE_HEADER]: 'semantic' } : {},

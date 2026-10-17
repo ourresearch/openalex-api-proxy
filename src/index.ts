@@ -15,7 +15,10 @@ import { semanticSearchKey } from "./semanticGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
-import { SearchHealthController, observeSearchHealth, checkAnonSearchBudget, checkSemanticBudget, cachedHealthLevel, GLOBAL_HEALTH_DO_NAME } from "./searchHealth";
+import {
+    SearchHealthController, observeSearchHealth, checkAnonSearchBudget, checkSemanticBudget, cachedHealthLevel,
+    GLOBAL_HEALTH_DO_NAME, SEMANTIC_HEALTH_DO_NAME, PROFILE_HEADER,
+} from "./searchHealth";
 import { reportError, withErrorReporting, SentryEnv } from "./sentry";
 import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, KEY_NOT_ACTIVATED_MESSAGE, API_KEYS_ENFORCED_MESSAGE, API_KEY_ASKS_PER_NETWORK_PER_DAY, API_KEY_ASKS_REFUSED_MESSAGE } from "./apiKeys";
@@ -265,12 +268,16 @@ const handler = {
                 return json(404, { error: "Not found" });
             }
             try {
-                const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(GLOBAL_HEALTH_DO_NAME));
+                // ?ladder=semantic shows the semantic ladder (oxjob #1433); the default is the works-search one.
+                const semanticLadder = url.searchParams.get('ladder') === 'semantic';
+                const stub = env.SEARCH_HEALTH.get(env.SEARCH_HEALTH.idFromName(
+                    semanticLadder ? SEMANTIC_HEALTH_DO_NAME : GLOBAL_HEALTH_DO_NAME));
+                const profileHeaders: Record<string, string> = semanticLadder ? { [PROFILE_HEADER]: 'semantic' } : {};
                 if (url.searchParams.has('test-slack')) {
-                    const testResp = await stub.fetch('http://internal/test-slack', { method: 'POST' });
+                    const testResp = await stub.fetch('http://internal/test-slack', { method: 'POST', headers: profileHeaders });
                     return json(testResp.status, await testResp.json());
                 }
-                const stateResp = await stub.fetch('http://internal/state');
+                const stateResp = await stub.fetch('http://internal/state', { headers: profileHeaders });
                 return json(stateResp.status, await stateResp.json());
             } catch {
                 return json(503, { error: "search-health monitor unavailable" });
