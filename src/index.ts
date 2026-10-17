@@ -24,7 +24,7 @@ import { isApiRootRequest, apiRootResponse } from "./apiRoot";
 import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKeysRequest, ASK_FOR_A_KEY, UNKNOWN_KEY_MESSAGE, KEY_NOT_ACTIVATED_MESSAGE, API_KEYS_ENFORCED_MESSAGE, API_KEY_ASKS_PER_NETWORK_PER_DAY, API_KEY_ASKS_REFUSED_MESSAGE } from "./apiKeys";
 import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND, CONTACT_DAILY_CREDITS } from "./contactBudget";
-import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, DEFAULT_SHARED_DAILY, ENFORCE_BLOCK_MESSAGE, ENFORCE_BUDGET_MESSAGE } from "./enforcementList";
+import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, enforceDailyLimit, enforceMessage } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
 
 export interface Env extends SentryEnv {
@@ -402,6 +402,7 @@ const handler = {
         let usedCachedAuth = false;
         let activationPending = false;  // oxjob #1697
         let budgetKey: string | null = null;  // oxjob #1697: the key whose daily bucket this one spends from
+        let keyUserId: string | null = null;  // the key's person (null for org keys, and when the lookup failed open)
 
         if (apiKey) {
             const authResult = await checkApiKey(req, env);
@@ -457,6 +458,7 @@ const handler = {
                 keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
                 activationPending = authResult.activationPending === true;
                 budgetKey = authResult.budgetKey ?? null;
+                keyUserId = authResult.userId ?? null;
                 // cacheRefreshed === true means we just read the DB; false/undefined
                 // means this balance came from the (≤60s, per-isolate) cache.
                 usedCachedAuth = authResult.cacheRefreshed !== true;
@@ -799,6 +801,63 @@ const handler = {
         const id = env.RATE_LIMITER.idFromName(rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
+        // The private enforcement list (oxjob #1692; see enforcementList.ts). Keyless entries match keyless traffic;
+        // free_keys entries (oxjob #1725) match free keys by account, so free accounts run as one client share one
+        // free day and one semantic search a second. Paid plans, prepaid balances, org keys, the website and verified
+        // assistants are never matched. In shadow it records what an entry would refuse (ENFORCE_AE), changing nothing.
+        const freeAccount = keyUserId && !trustedUi && !verifiedAssistant
+            && isFreeSemanticCaller(hasValidApiKey, userPlan, onetimeCreditsBalance, isGrandfathered, maxCreditsPerDay) ? keyUserId : null;
+        const enforceHit = ((!apiKey && !trustedUi && !verifiedAssistant) || freeAccount)
+            ? await matchEnforcement(await loadEnforcement(env.ENFORCEMENT, Date.now()),
+                apiKeysFacts(req, url.searchParams.get("mailto"), refererHostOf(req.headers.get("Referer"))), Date.now(), freeAccount)
+            : null;
+        let enforceSettled = false;  // logged once per request, refuse or pass
+        const enforceDecision = (refuse: boolean, semanticRetryAfter?: number): Response | null => {
+            enforceSettled = true;
+            const why = !refuse ? null : semanticRetryAfter !== undefined ? "semantic" : enforceHit!.entry.action === "block" ? "block" : "budget";
+            try {
+                env.ENFORCE_AE?.writeDataPoint({
+                    indexes: [enforceHit!.entry.id],
+                    blobs: [enforceHit!.entry.id, enforceHit!.entry.action, enforceHit!.mode, classification.type,
+                            why === "semantic" ? "refuse_semantic" : why ? "refuse" : "pass"],
+                    doubles: [creditCost],
+                });
+            } catch { /* analytics never blocks */ }
+            if (!why || enforceHit!.mode !== "enforce") return null;
+            const status = why === "block" ? 403 : 429;
+            logAnalytics({
+                ctx, env, apiKey, req, url, scope: 'enforce',
+                responseTime: Date.now() - startTime,
+                statusCode: status,
+                rateLimit: 0, rateLimitRemaining: 0, endpointType: classification.type, creditCost: 0,
+            });
+            const resp = json(status, { error: status === 403 ? "Forbidden" : "Rate limit exceeded", message: enforceMessage(enforceHit!.entry, why) });
+            if (status === 429) resp.headers.set("Retry-After", String(semanticRetryAfter ?? getSecondsUntilMidnightUTC()));
+            return resp;
+        };
+        // A block, or a shared budget already spent today, refuses here: before the semantic ladder and every other gate,
+        // so a client the list refuses takes no one else's token (#1433's note, 17 Oct).
+        if (enforceHit && (enforceHit.entry.action === "block" || enforceSpent(enforceBucket(enforceHit), Date.now()))) {
+            const refusal = enforceDecision(true);
+            if (refusal) return refusal;
+        }
+        // A free-key group shares one semantic search a second (not asked once its keys are refused anyway).
+        if (enforceHit?.entry.applies_to === "free_keys" && enforceHit.entry.action === "shared_budget"
+            && classification.type === 'semantic' && !enforceSpent(enforceBucket(enforceHit), Date.now())) {
+            try {
+                const verdict = await env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(enforceBucket(enforceHit))).fetch("http://internal/check-semantic", {
+                    method: "POST",
+                    body: JSON.stringify({ search: semanticSearchKey(url) }),
+                }).then(r => r.json() as Promise<{ success: boolean; retryAfter?: number }>);
+                if (!verdict.success) {
+                    const refusal = enforceDecision(true, Math.ceil(verdict.retryAfter || 1));
+                    if (refusal) return refusal;
+                }
+            } catch (error) {
+                reportError(error, { site: "enforce_semantic_do" });
+            }
+        }
+
         // SEMANTIC LADDER (oxjob #1433, Jason's yes 2026-10-17; searchHealth.ts). While semantic search is unhealthy,
         // free and anonymous semantic searches share one small budget, so a burst of free traffic can't take the vector
         // cluster down for everyone (13 and 15 Oct: one client on 8 free accounts, ≈ 80% timeouts for 4 h each).
@@ -1026,44 +1085,6 @@ const handler = {
             return contactRefusal(429, getSecondsUntilMidnightUTC(), contactBudgetMessage());
         }
 
-        // The private enforcement list (oxjob #1692; see enforcementList.ts): keyless traffic only. In shadow mode it
-        // records what an entry would refuse (ENFORCE_AE) and changes nothing.
-        const enforceHit = (!apiKey && !trustedUi && !verifiedAssistant)
-            ? await matchEnforcement(await loadEnforcement(env.ENFORCEMENT, Date.now()), {
-                ua: req.headers.get("User-Agent") || "",
-                mailto: url.searchParams.get("mailto"),
-                refererHost: refererHostOf(req.headers.get("Referer")),
-                ip: req.headers.get("CF-Connecting-IP"),
-                asn: typeof (req as { cf?: { asn?: unknown } }).cf?.asn === "number" ? (req as { cf?: { asn?: number } }).cf!.asn! : null,
-            }, Date.now())
-            : null;
-        let enforceSettled = false;  // logged once per request, refuse or pass
-        const enforceDecision = (refuse: boolean): Response | null => {
-            enforceSettled = true;
-            try {
-                env.ENFORCE_AE?.writeDataPoint({
-                    indexes: [enforceHit!.entry.id],
-                    blobs: [enforceHit!.entry.id, enforceHit!.entry.action, enforceHit!.mode, classification.type, refuse ? "refuse" : "pass"],
-                    doubles: [creditCost],
-                });
-            } catch { /* analytics never blocks */ }
-            if (!refuse || enforceHit!.mode !== "enforce") return null;
-            const block = enforceHit!.entry.action === "block";
-            logAnalytics({
-                ctx, env, apiKey, req, url, scope: 'enforce',
-                responseTime: Date.now() - startTime,
-                statusCode: block ? 403 : 429,
-                rateLimit: 0, rateLimitRemaining: 0, endpointType: classification.type, creditCost: 0,
-            });
-            const resp = json(block ? 403 : 429, { error: block ? "Forbidden" : "Rate limit exceeded", message: block ? ENFORCE_BLOCK_MESSAGE : ENFORCE_BUDGET_MESSAGE });
-            if (!block) resp.headers.set("Retry-After", String(getSecondsUntilMidnightUTC()));
-            return resp;
-        };
-        if (enforceHit && (enforceHit.entry.action === "block" || enforceSpent(enforceBucket(enforceHit), Date.now()))) {
-            const refusal = enforceDecision(true);
-            if (refusal) return refusal;
-        }
-
         let rateLimitResult: {
             success: boolean;
             retryAfter?: number;
@@ -1225,7 +1246,7 @@ const handler = {
             try {
                 const verdict = await env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(bucket)).fetch("http://internal/check", {
                     method: "POST",
-                    body: JSON.stringify({ dailyLimit: enforceHit.entry.daily_limit ?? DEFAULT_SHARED_DAILY, perSecondLimit: 1000, credits: creditCost }),
+                    body: JSON.stringify({ dailyLimit: enforceDailyLimit(enforceHit.entry), perSecondLimit: 1000, credits: creditCost }),
                 }).then(r => r.json() as Promise<{ success: boolean; limitType?: string }>);
                 const refuse = !verdict.success && verdict.limitType !== 'per_second';
                 if (refuse) markEnforceSpent(bucket, Date.now());

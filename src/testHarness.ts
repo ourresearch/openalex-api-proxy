@@ -37,12 +37,14 @@ export interface RunOptions {
     body?: string;
     // Answers every outbound fetch (origin, siteverify). Default: a 200 `{"meta":{}}` origin.
     fetch?: (url: string, init?: RequestInit) => Promise<Response>;
+    // Pass the same map to several runs to keep the RateLimiters (and their in-memory gates) between requests.
+    limiters?: Map<string, RateLimiter>;
 }
 
 export async function runWorker(path: string, opts: RunOptions = {}) {
     vi.stubGlobal('fetch', vi.fn(opts.fetch ?? (async () =>
         new Response('{"meta":{}}', { status: 200, headers: { 'Content-Type': 'application/json' } }))));
-    const limiters = new Map<string, RateLimiter>();
+    const limiters = opts.limiters ?? new Map<string, RateLimiter>();
     const checks: { bucket: string; dailyLimit: number; perSecondLimit: number }[] = [];
     const rows: { blobs: string[]; doubles: number[] }[] = [];
     const pending: Promise<unknown>[] = [];
