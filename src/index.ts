@@ -38,7 +38,7 @@ export interface Env extends SentryEnv {
     CONTENT_WORKER: Fetcher;  // Service binding to openalex-content-worker
     CV_PARSER?: Fetcher;
     QUERY_WRITER?: Fetcher;   // Service binding to openalex-query-writer: /query/text, plain words to OQL (oxjob #1494)
-    QUERY_TEXT_ACCOUNTS?: string; // feature flag: user/org ids allowed to call /query/text (comma-separated); empty = nobody
+    QUERY_TEXT_ACCOUNTS?: string; // user/org ids allowed to call /query/text (comma-separated); `*` = every valid key; empty = nobody
     HIGH_RPS_ACCOUNTS?: string;   // user/org ids whose keys get a higher per-second cap, `id` or `id:rps` (oxjob #1689; highRps.ts)
     COLLECTION_PROXY_KEY?: string;  // Worker secret, same name and value as on users-api (oxjob #1515)
     AUTHOR_FIXES_URL?: string;   // openalex-author-fixes Heroku app (oxjob #1430)      // Service binding to openalex-cv-parser
@@ -719,8 +719,8 @@ const handler = {
                 message: "Writing a query from plain words uses a language model and needs your own API key. Get one free at https://openalex.org/users, then send it as an \"Authorization: Bearer YOUR_KEY\" header.",
             });
         }
-        // Feature flag: /query/text answers only the accounts listed in QUERY_TEXT_ACCOUNTS (user or org ids,
-        // comma-separated); everyone else gets a free 403 while it is in testing (Jason, 2026-10-11).
+        // Gate: /query/text answers the accounts listed in QUERY_TEXT_ACCOUNTS (user or org ids, comma-separated; `*` =
+        // every valid key, since 2026-10-20); anyone else gets a free 403.
         if (classification.type === 'query_text' && !queryTextAllowed(env.QUERY_TEXT_ACCOUNTS, keyAccountIds)) {
             return json(403, {
                 error: "Not available yet",

@@ -604,6 +604,12 @@ describe('/query/text enters at one credit, before the free /query rule (oxjob #
         expect(queryTextAllowed('user-a', [])).toBe(false);
     });
 
+    it('opens to every valid key with *', () => {
+        expect(queryTextAllowed('*', ['user-4jkBZiWYK4YX'])).toBe(true);
+        expect(queryTextAllowed(' user-a , * ', ['org-b'])).toBe(true);
+        expect(queryTextAllowed('*', [])).toBe(true);
+    });
+
     it('settles to the query writer\'s price on an answer, free on an error', () => {
         expect(actualCreditCost(200, QUERY_TEXT_ENTRY_CREDITS, '516')).toBe(516);
         expect(actualCreditCost(422, QUERY_TEXT_ENTRY_CREDITS, '480')).toBe(0);

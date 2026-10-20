@@ -8,9 +8,10 @@
 	"preview_urls": true,
 	"keep_vars": true,  // warning: this allows us to put plain text settings in the UI. If false it will delete them.
 	"vars": {
-		// Feature flag for /query/text (plain words to OQL, oxjob #1494): user or org ids allowed to call it, comma-separated.
-		// Jason's account only while it's in testing (2026-10-11); empty = nobody.
-		"QUERY_TEXT_ACCOUNTS": "user-TSamuHxDbnhn",
+		// Gate for /query/text (plain words to OQL, oxjob #1494): user or org ids allowed to call it, comma-separated;
+		// `*` = every valid API key, priced per call (Jason, 2026-10-20: open to all, the website's chat sits behind its
+		// nl_search flag); empty = nobody. It was Jason's account only from 2026-10-11.
+		"QUERY_TEXT_ACCOUNTS": "*",
 		// Per-second cap override (oxjob #1689): user or org ids, comma-separated, whose keys get their own per-second cap
 		// instead of the 50/30/10 tiers: `id` = 500/s, `id:rps` = that (at most 1000). For openalex.org's server-rendering
 		// key. Daily credits are unchanged; malformed entries are skipped. Set it here, not in the dashboard: a deploy
