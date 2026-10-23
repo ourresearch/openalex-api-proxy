@@ -35,6 +35,23 @@ describe('parsePublicationsJson', () => {
     );
   });
 
+  // The model read an uploaded CV, so every field's type is checked (oxjob #1762).
+  it('keeps only well-typed fields: a year must be a 4-digit year, a DOI a string', () => {
+    const content = JSON.stringify([
+      { title: 'A', doi: 10.1234, year: '2020&rerank=true', authors: ['x'] },
+      { title: 'B', doi: '10.1234/b', year: '2013', authors: 'Priem, J.' },
+    ]);
+    expect(parsePublicationsJson(content)).toEqual([
+      { title: 'A', doi: null, year: null, authors: null },
+      { title: 'B', doi: '10.1234/b', year: 2013, authors: 'Priem, J.' },
+    ]);
+  });
+
+  it('drops elements that are not objects with a title or DOI string; keeps a DOI-only one', () => {
+    const content = JSON.stringify([null, 7, 'title', ['x'], { year: 2013 }, { title: 5 }, { doi: '10.1234/c' }]);
+    expect(parsePublicationsJson(content)).toEqual([{ title: '', doi: '10.1234/c', year: null, authors: null }]);
+  });
+
   it('throws on valid JSON that is not an array', () => {
     expect(() => parsePublicationsJson('{"title": "not an array"}')).toThrow(
       'Failed to parse publications from CV'

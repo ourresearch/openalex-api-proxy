@@ -45,12 +45,16 @@ export async function searchOpenAlex(
   apiBase: string = 'https://api.openalex.org',
   apiKey?: string
 ): Promise<any | null> {
+  // The DOI and year come from the model, which read them from the uploaded CV: untrusted, and spliced into URLs
+  // fetched with our API key. Only a DOI-shaped DOI (each segment encoded) and a 4-digit year are used (oxjob #1762).
+  const year = cleanYear(publication.year);
+
   // Strategy 1: DOI lookup (most reliable — exact match, no similarity needed)
   if (publication.doi) {
     const cleanDoi = cleanDOI(publication.doi);
     if (cleanDoi) {
       const parsed = await fetchJson(
-        `${apiBase}/works/doi:${cleanDoi}`
+        `${apiBase}/works/doi:${doiPath(cleanDoi)}`
       );
       if (parsed?.id) {
         console.log(`  DOI match: ${cleanDoi} → "${parsed.display_name?.substring(0, 60)}"`);
@@ -89,9 +93,7 @@ export async function searchOpenAlex(
   const keyWords = extractKeyWords(publication.title);
   if (keyWords.split(' ').length >= 3) {
     await delay(200);
-    const yearFilter = publication.year
-      ? `&filter=publication_year:${publication.year}`
-      : '';
+    const yearFilter = year !== null ? `&filter=publication_year:${year}` : '';
     const result3 = await fetchJson(
       `${apiBase}/works?search=${encodeURIComponent(keyWords)}${yearFilter}&per_page=10`
     );
@@ -113,9 +115,7 @@ export async function searchOpenAlex(
   const firstWords = keyWords.split(' ').slice(0, 4).join(' ');
   if (firstWords.length > 10 && firstWords !== keyWords) {
     await delay(200);
-    const yearFilter = publication.year
-      ? `&filter=publication_year:${publication.year}`
-      : '';
+    const yearFilter = year !== null ? `&filter=publication_year:${year}` : '';
     const result5 = await fetchJson(
       `${apiBase}/works?search=${encodeURIComponent(firstWords)}${yearFilter}&per_page=10`
     );
@@ -129,16 +129,39 @@ export async function searchOpenAlex(
 
 // ─── DOI Cleaning ───────────────────────────────────────────
 
-export function cleanDOI(doi: string): string | null {
-  if (!doi) return null;
+// 10.<registrant>/<suffix>: a numeric registrant (optionally dotted) and a suffix with no whitespace, no control
+// characters, and no `?` or `#` (they would end the URL path).
+const DOI_SHAPE = /^10\.\d{4,9}(?:\.\d+)*\/[^\s?#\u0000-\u001f\u007f-\u009f]+$/;
+
+export function cleanDOI(doi: unknown): string | null {
+  if (typeof doi !== 'string' || !doi) return null;
   let d = doi.trim();
   // Strip URL prefixes
   d = d.replace(/^https?:\/\/doi\.org\//i, '');
   d = d.replace(/^https?:\/\/dx\.doi\.org\//i, '');
   d = d.replace(/^doi:\s*/i, '');
-  // Basic validation
-  if (d.startsWith('10.') && d.includes('/')) return d;
-  return null;
+  if (!DOI_SHAPE.test(d)) return null;
+  // A "." or ".." segment would walk the request path out of /works/doi: (to /query/text, /text, ...).
+  if (d.split('/').some((seg) => seg === '.' || seg === '..')) return null;
+  return d;
+}
+
+/** A cleaned DOI as URL path text: each segment percent-encoded, so nothing in it can leave the path component. */
+export function doiPath(cleanDoi: string): string {
+  return cleanDoi.split('/').map(encodeURIComponent).join('/');
+}
+
+// ─── Year ────────────────────────────────────────────────────
+
+export const MIN_YEAR = 1000;
+export const MAX_YEAR = 2100;
+
+/** A publication year: a 4-digit integer (or a string of exactly 4 digits) in [MIN_YEAR, MAX_YEAR], else null. */
+export function cleanYear(year: unknown): number | null {
+  const n = typeof year === 'number' ? year
+    : typeof year === 'string' && /^\d{4}$/.test(year.trim()) ? Number(year.trim())
+    : NaN;
+  return Number.isInteger(n) && n >= MIN_YEAR && n <= MAX_YEAR ? n : null;
 }
 
 // ─── Title similarity ────────────────────────────────────────
