@@ -13,6 +13,7 @@ import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
 import { syncFieldInParams, requestOqlText, mightNameSyncField, readXQuery, syncFieldInXQuery, oqlSyncMessage, DAILY_SYNC_PLANS } from "./syncGate";
 import { semanticSearchKey } from "./semanticGate";
 import { isChangefilesBrowsePath, isChangefileDownloadPath, isSnapshotCredentialsPath } from "./changefilesPaths";
+import { normalizePath, trimTrailingSlashes } from "./paths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
 import {
@@ -216,8 +217,10 @@ const handler = {
         // validation, like /cv-parse. This endpoint ONLY issues a provenance
         // marker — it grants no quota or access, so a failed/absent mint just
         // means the GUI's later requests are tagged untrusted, never blocked.
-        const uiTokenPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
-        if (uiTokenPath === 'ui-token') {
+        // The path with no leading or trailing slashes, lowercased: worked out once (in linear time, see paths.ts) and
+        // reused for every route test below.
+        const normalizedPath = normalizePath(url.pathname);
+        if (normalizedPath === 'ui-token') {
             if (req.method !== 'POST') {
                 return json(405, { error: "Method Not Allowed", message: "POST a Turnstile token to /ui-token" });
             }
@@ -264,7 +267,7 @@ const handler = {
         // pushing load. The static rules are public (this repo is), but the
         // real-time state needn't be free. 404 on miss/unset so the endpoint
         // doesn't advertise itself.
-        if (uiTokenPath === 'search-health' && req.method === 'GET') {
+        if (normalizedPath === 'search-health' && req.method === 'GET') {
             const presented = url.searchParams.get('key') || req.headers.get('X-Health-Key');
             if (!env.SEARCH_HEALTH_KEY || presented !== env.SEARCH_HEALTH_KEY) {
                 return json(404, { error: "Not found" });
@@ -312,7 +315,7 @@ const handler = {
         // multi-entity autocomplete, design that separately — this is a pragmatic
         // hack for one specific UI, not that.
         // ─────────────────────────────────────────────────────────────────────
-        if (uiTokenPath === 'gui/autocomplete') {
+        if (normalizedPath === 'gui/autocomplete') {
             if (req.method !== 'GET') {
                 return json(405, { error: "Method Not Allowed", message: "GET /gui/autocomplete?q=..." });
             }
@@ -324,9 +327,8 @@ const handler = {
             // (the GUI passes works=0 for short queries) — skip that upstream call.
             const includeWorks = url.searchParams.get('works') !== '0';
 
-            const trim = (s: string) => s.replace(/\/+$/, '');
-            const searchOrigin = trim(env.SEARCH_API_URL || env.OPENALEX_API_URL);
-            const apiOrigin = trim(env.OPENALEX_API_URL);
+            const searchOrigin = trimTrailingSlashes(env.SEARCH_API_URL || env.OPENALEX_API_URL);
+            const apiOrigin = trimTrailingSlashes(env.OPENALEX_API_URL);
             const eq = encodeURIComponent(q);
             const SELECT = 'id,display_name,works_count';
             const MAILTO = 'mailto=ui@openalex.org';
@@ -673,7 +675,6 @@ const handler = {
         }
 
         // Handle /rate-limit endpoint
-        const normalizedPath = url.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
         if (normalizedPath === 'rate-limit') {
             // Support ?fresh=1 to bypass cache (used after purchase redirect)
             if (apiKey && url.searchParams.get('fresh') === '1') {
@@ -767,7 +768,7 @@ const handler = {
         // Runs BEFORE the credits DO, so rejected requests are edge-cheap and
         // never charged. Untouched: keyed clients, the GUI, autocomplete (cheap
         // 'list'), singleton/list, semantic (already 1/s capped).
-        const isWorksSearch = url.pathname.replace(/^\/+/, "").split("/")[0].toLowerCase() === "works";
+        const isWorksSearch = normalizedPath.split("/")[0] === "works";
         if (isWorksSearch && !apiKey && !trustedUi && classification.type === 'search') {
             const verdict = await checkAnonSearchBudget(env, ctx);
             if (!verdict.ok) {
@@ -1555,7 +1556,7 @@ const handler = {
         //   - like the changefiles listing, this skips the 9s abort (it uses 25s
         //     instead). On a cold miss a saturated origin needs longer than 9s, and a
         //     504 populates nothing — the cache would never fill and never help.
-        const metadataPath = url.pathname.replace(/\/+$/, '').toLowerCase();
+        const metadataPath = trimTrailingSlashes(url.pathname).toLowerCase();
         const isStaticMetadata = req.method === "GET"
             && (metadataPath === '/entities' || metadataPath === '/properties' || metadataPath === '/meta/entities');
 
@@ -2069,7 +2070,7 @@ function addCorsHeaders(response: Response): Response {
 
 function getTargetApiUrl(url: URL, env: Env): string {
     const pathname = url.pathname;
-    const normalizedPath = pathname.replace(/^\/*|\/*$/g, '').toLowerCase();
+    const normalizedPath = normalizePath(pathname);
 
     // Route /text/* to TEXT_API_URL
     if (/^text\/?/.test(normalizedPath)) {

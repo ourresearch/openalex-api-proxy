@@ -1,4 +1,5 @@
 import { isChangefilesBrowsePath } from "./changefilesPaths";
+import { normalizePath } from "./paths";
 
 export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text' | 'query_text';
 
@@ -129,7 +130,7 @@ export function classifyEndpoint(
     searchParams?: URLSearchParams,
     opts: { websiteFacet?: boolean } = {},
 ): EndpointClassification {
-    const normalized = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+    const normalized = normalizePath(pathname);
     const segments = normalized.split('/');
 
     // Text/Aboutness endpoint - ML inference (expensive)

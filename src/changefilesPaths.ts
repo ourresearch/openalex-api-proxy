@@ -1,3 +1,5 @@
+import { normalizePath } from "./paths";
+
 // Single source of truth for matching changefiles URL paths.
 //
 // There are two very different things under /changefiles, with different
@@ -7,11 +9,8 @@
 // if a download path were ever matched as "browse", downloads would silently
 // become free and keyless (zd#8865).
 
-// Strip leading/trailing slashes and lowercase, matching endpointClassifier's
-// normalization so both operate on the same canonical form.
-function normalizePath(pathname: string): string {
-    return pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
-}
+// Paths are compared in normalizePath's form (paths.ts: no leading/trailing slashes, lowercase), the same one
+// endpointClassifier and index.ts use, so every matcher operates on the same canonical form.
 
 // The free, keyless, 0-credit *listing/browse* endpoints:
 //   /changefiles          — index of available dates
