@@ -2,6 +2,9 @@
   "name": "openalex-cv-parser",
   "account_id": "a452eddbbe06eb7d02f4879cee70d29c",
   "main": "src/index.ts",
+  // oxjob #1782: preview URLs would keep older versions (before the sign-in check) callable. The
+  // workers.dev URL stays on because the GUI calls it directly.
+  "preview_urls": false,
   "compatibility_date": "2025-10-03",
   "compatibility_flags": ["nodejs_compat"],
   "placement": {
