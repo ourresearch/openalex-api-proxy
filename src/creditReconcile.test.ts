@@ -224,6 +224,29 @@ describe('API path settles the origin plan price (oxjob #1533)', () => {
         expect(res.headers.get('Access-Control-Expose-Headers')).toContain('Content-Disposition');
     });
 
+    // Errors are free (oxjob #863), refusals made at the edge after /check too (oxjob #1762).
+    it('gives the charge back on the edge F1 400 (limit=), which never reaches the origin', async () => {
+        const { res, state, originRequests } = await run('/works?filter=publication_year:2020&limit=5&rerank=true', { status: 200 });
+        expect(res.status).toBe(400);
+        expect(res.headers.get('x-openalex-edge-reject')).toBe('f1:limit_param');
+        expect(originRequests).toEqual([]);
+        expect((state.store.get('counter') as any).count).toBe(0);
+    });
+
+    it('gives the charge back on the URL-too-long 400', async () => {
+        const ids = Array.from({ length: 900 }, (_, i) => `W${1_000_000_000 + i}`).join('|');
+        const { res, state, originRequests } = await run(`/works?filter=ids.openalex:${ids}`, { status: 200 });
+        expect(res.status).toBe(400);
+        expect(originRequests).toEqual([]);
+        expect((state.store.get('counter') as any).count).toBe(0);
+    });
+
+    it('gives the 100-credit charge back when a keyless content download is refused', async () => {
+        const { res, state } = await run('/content/works/W2741809807.pdf', { status: 200 });
+        expect(res.status).toBe(401);
+        expect((state.store.get('counter') as any).count).toBe(0);
+    });
+
     it('/query costs nothing', async () => {
         const { res, state } = await run('/query/oql/' + encodeURIComponent('works where year > (2020)'), { status: 200 });
         expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('0');

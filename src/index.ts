@@ -1235,6 +1235,14 @@ const handler = {
             return errorResponse;
         }
 
+        // Errors are free (oxjob #863): a refusal made at the edge after /check gives the up-front charge back, as the
+        // origin's errors, the 504 and the sync-field refusal do. The F1 and URL-length 400s and the content-key 401 used
+        // to keep it, so `&limit=1` was charged without the origin ever being asked (oxjob #1762).
+        const refundCharge = () => settleCredits(limiter, {
+            charged: creditCost, actual: 0, dailyLimit: limit, onetimeBalance: onetimeCreditsBalance,
+            remaining: rateLimitResult.remaining ?? 0, onetimeRemaining: rateLimitResult.onetimeRemaining ?? 0,
+        });
+
         // The IP's budget allowed it; now the contact address's shared one (fails open, like the IP check).
         if (contact) {
             try {
@@ -1299,6 +1307,7 @@ const handler = {
             // Content downloads require an API key (but allow root docs endpoint)
             const isContentDownload = /^\/works\//i.test(contentPath);
             if (isContentDownload && !hasValidApiKey) {
+                await refundCharge();
                 return json(401, {
                     error: "API key required",
                     message: "Content downloads require an API key. Get one free at https://openalex.org/users"
@@ -1407,6 +1416,7 @@ const handler = {
         if (req.method !== "POST") {
             const reason = f1Reason(openalexUrl);
             if (reason) {
+                await refundCharge();
                 return new Response(JSON.stringify({
                     error: "Invalid request rejected at the API edge",
                     error_source: "openalex-api-proxy",
@@ -1454,6 +1464,7 @@ const handler = {
                         ...Object.fromEntries(getCorsHeaders())
                     }
                 });
+                await refundCharge();
                 return errorResponse;
             }
         }
@@ -1675,10 +1686,7 @@ const handler = {
             const syncField = syncFieldInXQuery(await readXQuery(response.clone().body!));
             if (syncField) {
                 response.body?.cancel().catch(() => {});
-                await settleCredits(limiter, {
-                    charged: creditCost, actual: 0, dailyLimit: limit, onetimeBalance: onetimeCreditsBalance,
-                    remaining: rateLimitResult.remaining ?? 0, onetimeRemaining: rateLimitResult.onetimeRemaining ?? 0,
-                });
+                await refundCharge();
                 logAnalytics({
                     ctx, env, apiKey, req, url, scope: 'main',
                     responseTime: Date.now() - startTime,
