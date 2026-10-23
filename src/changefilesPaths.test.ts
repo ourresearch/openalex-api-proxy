@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { isChangefilesBrowsePath, isChangefileDownloadPath, isSnapshotCredentialsPath } from "./changefilesPaths";
-import { runWorker } from "./testHarness";
+import { runWorker, HARNESS_IP } from "./testHarness";
 
 // Keyed requests look their key up in api_keys_view: a free key and a daily-sync (Member+) key.
 vi.mock("pg", () => ({
@@ -156,5 +156,37 @@ describe("daily-sync gates judge the path the content worker is asked for", () =
         const w = contentWorker();
         expect((await runWorker("/CONTENT/works/W2741809807.pdf", { env: { ...HD, CONTENT_WORKER: w.CONTENT_WORKER } })).res.status).toBe(401);
         expect(w.paths).toEqual([]);
+    });
+});
+
+// The listing tolerates an invalid key ("YOUR_API_KEY") as anonymous. The key string used to name the credits bucket
+// anyway, so ?api_key=<someone's IP or /64> spent that network's keyless budget (oxjob #1762).
+describe("an invalid key on a changefiles listing is metered as the keyless caller", () => {
+    afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+    const HD = { HYPERDRIVE: { connectionString: "postgres://test" } };
+
+    it("?api_key=<another IP> spends the caller's own budget, not that IP's", async () => {
+        const { res, checks } = await runWorker("/changefiles?api_key=198.51.100.9&rerank=true", { env: HD });
+        expect(res.status).toBe(200);
+        expect(checks.map(c => c.bucket)).toEqual([`credits:${HARNESS_IP}`]);
+    });
+
+    it("nor can it name an IPv6 /64 or a verified assistant's bucket", async () => {
+        const ip = "2001:db8:abcd:12::1";
+        for (const named of ["2001:db8:1:2::/64", "verified-assistant:198.51.100.9"]) {
+            const { checks } = await runWorker(`/changefiles/2026-10-20?api_key=${named}`, { env: HD, ip });
+            expect(checks.map(c => c.bucket)).toEqual(["credits:2001:db8:abcd:12::/64"]);
+        }
+    });
+
+    it("falls under the keyless gates too: a mailto shares its contact budget", async () => {
+        const { checks } = await runWorker("/changefiles?api_key=YOUR_API_KEY&mailto=r.lee@ox.ac.uk", { env: HD });
+        expect(checks.map(c => c.bucket)).toEqual([`credits:${HARNESS_IP}`, expect.stringMatching(/^credits:contact:/)]);
+    });
+
+    it("a valid key still spends its own bucket there", async () => {
+        const { checks } = await runWorker("/changefiles?api_key=free-key", { env: HD });
+        expect(checks.map(c => c.bucket)).toEqual(["credits:free-key"]);
     });
 });

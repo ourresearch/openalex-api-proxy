@@ -371,7 +371,7 @@ const handler = {
         const trustedUi = uiTokenVerify.valid;
         if (uiTokenHeader && !trustedUi && uiTokenVerify.reason !== "no_secret") uiTokenRefused.add(req);
 
-        const apiKey = getApiKeyFromRequest(req, url);
+        let apiKey = getApiKeyFromRequest(req, url);
         let hasValidApiKey = false;
 
         // Changefiles browsing: tolerate placeholder keys (e.g., "YOUR_API_KEY")
@@ -444,6 +444,10 @@ const handler = {
 
                     return errorResponse;
                 }
+                // Anonymous from here on, as the comment above says: metered on the caller's own IP or network and under
+                // every keyless gate (enforcement list, contact budget). The key string used to stay in apiKey and name
+                // the credits bucket, so `?api_key=<someone's IP or /64>` spent that network's keyless budget (oxjob #1762).
+                apiKey = null;
             } else {
                 // Valid key — honor the account's limits, plan, and balance on
                 // EVERY path, including changefiles browse. Previously browse paths
@@ -789,6 +793,7 @@ const handler = {
         // one household or device and holds 2^64 addresses, so per address it bought a fresh budget per
         // request (14 Oct: 1,123 /64s took 3.33M credits over 39K addresses). IPv4 stays per address.
         // An agent's key spends from its account key's bucket (budgetKey; oxjob #1697): one free day per person.
+        // apiKey is set here only for a key that validated (an invalid one on a changefiles listing was cleared above).
         const identifier = (apiKey && (budgetKey || apiKey)) || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
         const rateLimitKey = verifiedAssistant ? `${scope}:verified-assistant:${identifier}` : `${scope}:${identifier}`;
         const limit = maxCreditsPerDay;
