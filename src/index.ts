@@ -1863,8 +1863,14 @@ function getApiKeyFromRequest(req: Request, url: URL): string | null {
     );
 }
 
+// What an API key can look like: printable ASCII, no spaces (users-api issues 22 letters and digits). Anything else
+// is an unknown key, decided before the database: a byte Postgres refuses (a NUL from ?api_key=%00x) made the lookup
+// throw, and the catch below then failed open as a valid 100K-credit key (oxjob #1762).
+const API_KEY_SHAPE = /^[\x21-\x7E]{1,256}$/;
+
 async function checkApiKey(apiKey: string, env: Env): Promise<ApiKeyAuth> {
     if (!apiKey) return { valid: false };
+    if (!API_KEY_SHAPE.test(apiKey)) return { valid: false, error: UNKNOWN_KEY_MESSAGE };
 
     // Check cache first
     const cached = API_KEY_CACHE.get(apiKey);
@@ -1940,8 +1946,18 @@ async function checkApiKey(apiKey: string, env: Env): Promise<ApiKeyAuth> {
         if (client) {
             try { await client.end(); } catch { /* ignore */ }
         }
+        // ...except a data exception (SQLSTATE class 22): the database answered and refused the value bound for this
+        // key, so the request chose the error and it is an unknown key, not an outage (oxjob #1762). Every other
+        // failure (no SQLSTATE, connection, auth, resources, Hyperdrive) still fails open, as before.
+        if (isDataException(error)) return { valid: false, error: UNKNOWN_KEY_MESSAGE };
         return { valid: true, maxPerDay: 100000, maxCreditsPerDay: 100000, isGrandfathered: false, onetimeCreditsBalance: 0, plan: null, rateThrottled: false, throttleScope: null, userId: null, orgId: null };
     }
+}
+
+/** A Postgres error in SQLSTATE class 22 (data exception: e.g. 22021, a byte the encoding refuses). */
+export function isDataException(error: unknown): boolean {
+    const code = (error as { code?: unknown } | null)?.code;
+    return typeof code === "string" && /^22[0-9A-Z]{3}$/.test(code);
 }
 
 /**
