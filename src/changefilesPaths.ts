@@ -26,3 +26,9 @@ export function isChangefilesBrowsePath(pathname: string): boolean {
 export function isChangefileDownloadPath(pathname: string): boolean {
     return /^changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/.test(normalizePath(pathname));
 }
+
+// The daily-snapshot credentials endpoint (/snapshots/credentials): daily sync too, plan-gated in index.ts with the
+// same normalization as the download gate.
+export function isSnapshotCredentialsPath(pathname: string): boolean {
+    return normalizePath(pathname) === 'snapshots/credentials';
+}

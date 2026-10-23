@@ -12,7 +12,7 @@ import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
 import { syncFieldInParams, requestOqlText, mightNameSyncField, readXQuery, syncFieldInXQuery, oqlSyncMessage, DAILY_SYNC_PLANS } from "./syncGate";
 import { semanticSearchKey } from "./semanticGate";
-import { isChangefilesBrowsePath, isChangefileDownloadPath } from "./changefilesPaths";
+import { isChangefilesBrowsePath, isChangefileDownloadPath, isSnapshotCredentialsPath } from "./changefilesPaths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
 import { isVerifiedAssistant, VERIFIED_ASSISTANT_HEADER, VERIFIED_ASSISTANT_CREDITS_PER_DAY } from "./verifiedAssistant";
 import {
@@ -626,9 +626,17 @@ const handler = {
             }
         }
 
+        // Requests for the content worker: content.openalex.org/X goes to it as /X, and so does api.openalex.org/content/X
+        // (any case: the same test routes it below). Decided once, here, so the daily-sync gates below judge the very path
+        // the content branch forwards; they used to judge only the raw path, so /content/changefiles/<date>/<file>
+        // reached the download with no key (oxjob #1762).
+        const isContentRequest = url.hostname === 'content.openalex.org' || /^\/content(\/|$)/i.test(url.pathname);
+        const contentPath = url.hostname === 'content.openalex.org' ? url.pathname : url.pathname.replace(/^\/content/i, '');
+        const dailySyncGatedPaths = isContentRequest ? [url.pathname, contentPath] : [url.pathname];
+
         // Changefile downloads are daily sync: a valid API key on a plan in ENTERPRISE_PLANS.
         // Gated here (before the rate limiter) so rejected requests don't consume credits.
-        if (isChangefileDownloadPath(url.pathname)) {
+        if (dailySyncGatedPaths.some(isChangefileDownloadPath)) {
             if (!hasValidApiKey) {
                 return json(401, {
                     error: "API key required",
@@ -645,7 +653,7 @@ const handler = {
 
         // Daily-snapshot credentials are daily sync: a valid API key on a plan in ENTERPRISE_PLANS.
         // Gated here (before the rate limiter) so rejected requests don't consume credits.
-        if (/^\/snapshots\/credentials\/?$/i.test(url.pathname)) {
+        if (dailySyncGatedPaths.some(isSnapshotCredentialsPath)) {
             if (!hasValidApiKey) {
                 return json(401, {
                     error: "API key required",
@@ -1259,8 +1267,7 @@ const handler = {
             }
         }
 
-        // Route content.openalex.org/* OR /content/* to content worker
-        const isContentRequest = url.hostname === 'content.openalex.org' || /^\/content(\/|$)/i.test(url.pathname);
+        // Route content.openalex.org/* OR /content/* to content worker (isContentRequest, decided above the plan gates)
         // /query/text goes to the query writer Worker, through this same block: one entry credit at /check, then
         // settled to the X-Credits-Cost it reports (oxjob #1494).
         const isQueryText = classification.type === 'query_text';
@@ -1282,11 +1289,7 @@ const handler = {
                     }
                 }
             } else {
-            // Normalize path: content.openalex.org/works/X → /works/X for content worker
-            // api.openalex.org/content/X → /X for content worker (strip /content prefix)
-            const contentPath = url.hostname === 'content.openalex.org'
-                ? url.pathname
-                : url.pathname.replace(/^\/content/, '');
+            // contentPath (above the plan gates): content.openalex.org/works/X → /works/X, api.openalex.org/content/X → /X
 
             // Content downloads require an API key (but allow root docs endpoint)
             const isContentDownload = /^\/works\//i.test(contentPath);

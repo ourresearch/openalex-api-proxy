@@ -58,6 +58,9 @@ echo "[3] Download path is plan-gated"
 DL="$BASE/changefiles/2026-06-05/works_2026-06-05.jsonl.gz"
 H=$(curl -sS -D - -o /dev/null "$DL")
 check "unauthenticated download returns 401" "$([[ "$(status "$H")" == *" 401"* ]] && echo 1 || echo 0)"
+# The /content/ prefix forwards to the content worker as /changefiles/...: gated the same (oxjob #1762).
+H=$(curl -sS -D - -o /dev/null "$BASE/content/changefiles/2026-06-05/works_2026-06-05.jsonl.gz")
+check "unauthenticated download via /content/ returns 401" "$([[ "$(status "$H")" == *" 401"* ]] && echo 1 || echo 0)"
 
 # 4. Keyed listing (only if API_KEY provided): honored + still 0 credits.
 if [ -n "$API_KEY" ]; then
