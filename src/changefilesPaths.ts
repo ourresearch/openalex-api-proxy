@@ -20,14 +20,24 @@ export function isChangefilesBrowsePath(pathname: string): boolean {
     return /^changefiles(\/\d{4}-\d{2}-\d{2})?$/.test(normalizePath(pathname));
 }
 
+// The forms a plan-gated (daily-sync) path is judged in: as written, and with encoded separators (%2F, %5C, any case)
+// decoded and runs of slashes merged. The origin decodes %2F before it routes, so /snapshots%2Fcredentials reached
+// the credentials route past a gate that compared the encoded text (oxjob #1762). Only the two gated matchers below
+// use this: an encoded slash is legitimate elsewhere (/works/https%3A%2F%2Fdoi.org%2F...), and the free browse
+// matcher must never match more than it says.
+function dailySyncForms(pathname: string): string[] {
+    const decoded = pathname.replace(/%2f|%5c/gi, '/').replace(/\/{2,}/g, '/');
+    return decoded === pathname ? [normalizePath(pathname)] : [normalizePath(pathname), normalizePath(decoded)];
+}
+
 // An actual changefile *download*: /changefiles/{date}/{filename}. These stay
 // metered and plan-gated (daily sync: Member+, Partner and legacy plans) in index.ts.
 export function isChangefileDownloadPath(pathname: string): boolean {
-    return /^changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/.test(normalizePath(pathname));
+    return dailySyncForms(pathname).some(p => /^changefiles\/\d{4}-\d{2}-\d{2}\/[^/]+$/.test(p));
 }
 
 // The daily-snapshot credentials endpoint (/snapshots/credentials): daily sync too, plan-gated in index.ts with the
 // same normalization as the download gate.
 export function isSnapshotCredentialsPath(pathname: string): boolean {
-    return normalizePath(pathname) === 'snapshots/credentials';
+    return dailySyncForms(pathname).some(p => p === 'snapshots/credentials');
 }

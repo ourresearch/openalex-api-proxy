@@ -108,6 +108,33 @@ describe("isSnapshotCredentialsPath", () => {
     });
 });
 
+// The origin decodes %2F before it routes, so the two plan-gated matchers judge encoded separators as slashes; the
+// free browse matcher doesn't (oxjob #1762).
+describe("encoded separators in daily-sync paths", () => {
+    it("the gated matchers see %2F and %5C (any case) and doubled slashes as one slash", () => {
+        for (const p of ["/snapshots%2Fcredentials", "/snapshots%2fcredentials", "/snapshots%5Ccredentials", "/snapshots%2F%2Fcredentials",
+                         "/SNAPSHOTS%2FCredentials/", "/snapshots//credentials"]) {
+            expect(isSnapshotCredentialsPath(p), p).toBe(true);
+        }
+        for (const p of ["/changefiles%2F2026-10-20%2Fworks_2026-10-20.jsonl.gz", "/changefiles/2026-10-20%2fworks.parquet",
+                         "/changefiles%5C2026-10-20%5Cworks.parquet", "/changefiles//2026-10-20//works.parquet"]) {
+            expect(isChangefileDownloadPath(p), p).toBe(true);
+        }
+    });
+
+    it("the free browse matcher still matches only what it says, and the predicates stay exclusive", () => {
+        for (const p of ["/changefiles%2F2026-10-20", "/changefiles%2F2026-10-20%2Fworks.parquet"]) {
+            expect(isChangefilesBrowsePath(p), p).toBe(false);
+        }
+        expect(isChangefileDownloadPath("/changefiles%2F2026-10-20")).toBe(false);
+    });
+
+    it("leaves other encoded slashes alone", () => {
+        expect(isChangefileDownloadPath("/works/https%3A%2F%2Fdoi.org%2F10.1%2Fx")).toBe(false);
+        expect(isSnapshotCredentialsPath("/works/https%3A%2F%2Fdoi.org%2F10.1%2Fx")).toBe(false);
+    });
+});
+
 // Every way to a changefile download is plan-gated alike, including api.openalex.org/content/..., which the content
 // branch forwards to the content worker as /changefiles/... (oxjob #1762).
 describe("daily-sync gates judge the path the content worker is asked for", () => {
@@ -150,6 +177,36 @@ describe("daily-sync gates judge the path the content worker is asked for", () =
         const w = contentWorker();
         expect((await runWorker("/content/snapshots/credentials", { env: { ...HD, CONTENT_WORKER: w.CONTENT_WORKER } })).res.status).toBe(401);
         expect(w.paths).toEqual([]);
+    });
+
+    it("an encoded separator doesn't open them: POST /snapshots%2Fcredentials and /content/changefiles%2F... (oxjob #1762)", async () => {
+        const w = contentWorker();
+        const origin: string[] = [];
+        const fetch = async (input: string | Request) => {
+            origin.push(typeof input === "string" ? input : input.url);
+            return new Response('{"meta":{}}', { status: 200, headers: { "Content-Type": "application/json" } });
+        };
+        const env = { ...HD, CONTENT_WORKER: w.CONTENT_WORKER };
+        const creds = (headers: Record<string, string> = {}) => runWorker("/snapshots%2Fcredentials", { method: "POST", env, headers, fetch });
+        expect((await creds()).res.status).toBe(401);
+        expect((await creds({ Authorization: "Bearer free-key" })).res.status).toBe(403);
+        expect(origin).toEqual([]);
+        expect((await creds({ Authorization: "Bearer sync-key" })).res.status).toBe(200);  // a daily-sync key still gets through
+        expect(origin).toHaveLength(1);
+        const file = await runWorker("/content/changefiles%2F2026-10-20%2Fworks_2026-10-20.jsonl.gz", { env });
+        expect(file.res.status).toBe(401);
+        expect(w.paths).toEqual([]);
+    });
+
+    it("an encoded slash in a works lookup is unaffected", async () => {
+        const origin: string[] = [];
+        const { res } = await runWorker("/works/https%3A%2F%2Fdoi.org%2F10.1/x", { env: HD, fetch: async (input: string | Request) => {
+            origin.push(typeof input === "string" ? input : input.url);
+            return new Response('{"id":"https://openalex.org/W1"}', { status: 200, headers: { "Content-Type": "application/json" } });
+        } });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("X-RateLimit-Credits-Used")).toBe("0");
+        expect(origin).toHaveLength(1);
     });
 
     it("an upper-case /CONTENT prefix is stripped like /content, so a PDF download needs a key", async () => {
