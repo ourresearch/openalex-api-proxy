@@ -43,4 +43,14 @@ describe('parse-cv sign-in gate (oxjob #1782)', () => {
     expect(resp.status).toBe(413);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it('still matches the route with trailing slashes, and a long slash run is cheap', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const trailing = new Request('https://cv.example/api/parse-cv///', { method: 'POST', body: 'x' });
+    expect((await worker.fetch(trailing, env)).status).toBe(401);
+    const started = Date.now();
+    const slashes = new Request('https://cv.example/' + '/'.repeat(16000) + 'x', { method: 'GET' });
+    expect((await worker.fetch(slashes, env)).status).toBe(404);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
 });

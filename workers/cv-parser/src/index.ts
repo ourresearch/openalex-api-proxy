@@ -64,7 +64,11 @@ export default {
 
     // Only accept POST to /api/parse-cv
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, '');
+    // Trim trailing slashes with a scan, not /\/+$/: that regex backtracks
+    // quadratically on a long interior run of slashes (#1762 finding).
+    let end = url.pathname.length;
+    while (end > 0 && url.pathname.charCodeAt(end - 1) === 47) end--;
+    const path = url.pathname.slice(0, end);
 
     if (request.method === 'POST' && path === '/api/parse-cv') {
       if (Number(request.headers.get('Content-Length') || 0) > MAX_UPLOAD_BYTES) {
