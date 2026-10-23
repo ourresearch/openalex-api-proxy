@@ -229,8 +229,11 @@ export function classifyEndpoint(
  */
 function isAutocompleteSearch(searchParams: URLSearchParams): boolean {
     if (!searchParams.has('search')) return false;
-    const perPage = searchParams.get('per_page') || searchParams.get('per-page');
-    if (!perPage || parseInt(perPage, 10) > 10) return false;
+    // Every page-size spelling sent must be a whole number 1-10. The origin reads per-page before per_page, so judging
+    // only per_page priced `per_page=1&per-page=100` free and ran 100 rows, the same gap as a repeated parameter
+    // (oxjob #1762). parseInt also read "5abc" as 5, a value the origin can't take as 5.
+    const perPages = [searchParams.get('per_page'), searchParams.get('per-page')].filter((v): v is string => v !== null);
+    if (perPages.length === 0 || !perPages.every(v => /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 10)) return false;
     if (searchParams.get('select') !== 'id,display_name,works_count') return false;
     return true;
 }

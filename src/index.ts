@@ -183,6 +183,8 @@ const handler = {
         }
 
         const url = new URL(req.url);
+        // One value per query parameter, read once, before anything prices, gates or forwards the request (oxjob #1762).
+        lastValuePerParam(url);
 
         // robots.txt for every hostname this proxy serves (api.openalex.org,
         // content.openalex.org). Sits before API-key validation so compliant
@@ -369,7 +371,7 @@ const handler = {
         const trustedUi = uiTokenVerify.valid;
         if (uiTokenHeader && !trustedUi && uiTokenVerify.reason !== "no_secret") uiTokenRefused.add(req);
 
-        const apiKey = getApiKeyFromRequest(req);
+        const apiKey = getApiKeyFromRequest(req, url);
         let hasValidApiKey = false;
 
         // Changefiles browsing: tolerate placeholder keys (e.g., "YOUR_API_KEY")
@@ -405,7 +407,7 @@ const handler = {
         let keyUserId: string | null = null;  // the key's person (null for org keys, and when the lookup failed open)
 
         if (apiKey) {
-            const authResult = await checkApiKey(req, env);
+            const authResult = await checkApiKey(apiKey, env);
             if (!authResult.valid) {
                 // Changefiles browse paths (/changefiles, /changefiles/{date})
                 // tolerate placeholder/invalid keys (e.g. "YOUR_API_KEY") so anyone
@@ -664,7 +666,7 @@ const handler = {
             // Support ?fresh=1 to bypass cache (used after purchase redirect)
             if (apiKey && url.searchParams.get('fresh') === '1') {
                 API_KEY_CACHE.delete(apiKey);
-                const freshAuth = await checkApiKey(req, env);
+                const freshAuth = await checkApiKey(apiKey, env);
                 if (freshAuth.valid) {
                     onetimeCreditsBalance = freshAuth.onetimeCreditsBalance ?? 0;
                     onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
@@ -1125,7 +1127,7 @@ const handler = {
                 // Opportunistic cap so the throttle map can't grow unbounded per isolate.
                 if (LAST_TOPUP_RECHECK.size > 10000) LAST_TOPUP_RECHECK.clear();
                 API_KEY_CACHE.delete(apiKey);
-                const freshAuth = await checkApiKey(req, env);
+                const freshAuth = await checkApiKey(apiKey, env);
                 const freshOnetime = freshAuth.valid ? (freshAuth.onetimeCreditsBalance ?? 0) : onetimeCreditsBalance;
                 if (freshAuth.valid && freshOnetime > onetimeCreditsBalance) {
                     onetimeCreditsBalance = freshOnetime;
@@ -1271,7 +1273,7 @@ const handler = {
                         { status: 503, headers: { "Content-Type": "application/json", "X-Credits-Cost": "0" } });
                 } else {
                     try {
-                        contentResponse = await env.QUERY_WRITER.fetch(new Request(req.url, req));
+                        contentResponse = await env.QUERY_WRITER.fetch(new Request(url, req));
                     } catch (error) {
                         console.error("Query writer call failed:", error);
                         reportError(error, { site: "query_writer" });
@@ -1295,7 +1297,7 @@ const handler = {
                 });
             }
 
-            const contentUrl = new URL(req.url);
+            const contentUrl = new URL(url);
             contentUrl.pathname = contentPath;
             const contentReq = new Request(contentUrl, req);
 
@@ -1808,7 +1810,26 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 
-function getApiKeyFromRequest(req: Request): string | null {
+/**
+ * Collapse every repeated query parameter to its last value, in place (oxjob #1762). The last value is what the origin
+ * has always run (the forwarder copies the query with searchParams.set), while URLSearchParams.get() reads the first,
+ * so `?per_page=1&select=id,display_name,works_count&per_page=100&select=id,title` was priced and gated as the free
+ * autocomplete shape and run as a 100-row search. With one value per key, the price, the rerank surcharge, every gate,
+ * the key lookup and every forwarder read the query the origin runs. A URL without repeats is left byte for byte.
+ */
+export function lastValuePerParam(url: URL): void {
+    const last = new Map<string, string>();  // first-seen key order, last value
+    let count = 0;
+    for (const [key, value] of url.searchParams) {
+        last.set(key, value);
+        count++;
+    }
+    if (last.size === count) return;
+    url.search = new URLSearchParams([...last]).toString();
+}
+
+// `url` is the handler's canonical URL (lastValuePerParam), so a repeated api_key names the key the origin receives.
+function getApiKeyFromRequest(req: Request, url: URL): string | null {
     const authHeader = req.headers.get("Authorization");
     if (authHeader) {
         const parts = authHeader.split(' ');
@@ -1817,7 +1838,6 @@ function getApiKeyFromRequest(req: Request): string | null {
         }
     }
 
-    const url = new URL(req.url);
     return (
         url.searchParams.get("api_key") ||
         url.searchParams.get("api-key") ||
@@ -1827,8 +1847,7 @@ function getApiKeyFromRequest(req: Request): string | null {
     );
 }
 
-async function checkApiKey(req: Request, env: Env): Promise<ApiKeyAuth> {
-    const apiKey = getApiKeyFromRequest(req);
+async function checkApiKey(apiKey: string, env: Env): Promise<ApiKeyAuth> {
     if (!apiKey) return { valid: false };
 
     // Check cache first

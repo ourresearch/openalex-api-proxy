@@ -364,6 +364,16 @@ describe('endpointClassifier', () => {
             expect(result.creditCost).toBe(10);
         });
 
+        it('is free only when every page-size spelling is a whole 1-10 (the origin reads per-page first; oxjob #1762)', () => {
+            const cost = (q: string) => classifyEndpoint('/works', new URLSearchParams(`search=x&select=id,display_name,works_count&${q}`)).creditCost;
+            expect(cost('per-page=10')).toBe(0);
+            expect(cost('per_page=1&per-page=100')).toBe(10);
+            expect(cost('per-page=1&per_page=100')).toBe(10);
+            expect(cost('per_page=5abc')).toBe(10);
+            expect(cost('per_page=0')).toBe(10);
+            expect(cost('per_page=')).toBe(10);
+        });
+
         it('a group_by never rides the free autocomplete shape', () => {
             const params = new URLSearchParams('search=frogs&per_page=10&select=id,display_name,works_count&group_by=type');
             expect(classifyEndpoint('/works', params).creditCost).toBe(10);
