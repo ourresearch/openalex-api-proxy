@@ -22,6 +22,26 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   OPENALEX_API_BASE?: string; // Direct upstream URL to avoid proxy loop
   OPENALEX_API_KEY?: string;  // API key to avoid 429 rate limits
+  USERS_API_BASE?: string;    // Where signed-in callers are checked (default user.openalex.org)
+}
+
+// Each parse is a paid Sonnet call and this worker answers on its public
+// workers.dev URL with CORS *, so only signed-in OpenAlex users may parse,
+// and uploads are capped (oxjob #1782).
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+async function isSignedIn(request: Request, env: Env): Promise<boolean> {
+  const auth = request.headers.get('Authorization') || '';
+  if (!/^Bearer\s+\S+/i.test(auth)) return false;
+  try {
+    const resp = await fetch(`${env.USERS_API_BASE || 'https://user.openalex.org'}/users/me`, {
+      headers: { Authorization: auth },
+      signal: AbortSignal.timeout(10000),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
 }
 
 interface ParseCvResponse {
@@ -47,6 +67,12 @@ export default {
     const path = url.pathname.replace(/\/+$/, '');
 
     if (request.method === 'POST' && path === '/api/parse-cv') {
+      if (Number(request.headers.get('Content-Length') || 0) > MAX_UPLOAD_BYTES) {
+        return jsonResponse(413, { error: 'CV file is too large (10 MB max)' });
+      }
+      if (!(await isSignedIn(request, env))) {
+        return jsonResponse(401, { error: 'Sign in to OpenAlex to parse a CV' });
+      }
       try {
         const result = await handleParseCv(request, env);
         return jsonResponse(200, result);
@@ -76,6 +102,9 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
   const file = formData.get('file') as unknown;
   if (!(file instanceof File)) {
     throw new Error('No file uploaded');
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error('CV file is too large (10 MB max)');
   }
 
   const authorId = (formData.get('authorId') as string) || '';
