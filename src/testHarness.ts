@@ -34,7 +34,7 @@ export interface RunOptions {
     buckets?: Record<string, Record<string, unknown>>;
     ip?: string;
     method?: string;
-    body?: string;
+    body?: BodyInit;
     // Answers every outbound fetch (origin, siteverify). Default: a 200 `{"meta":{}}` origin.
     fetch?: (url: string, init?: RequestInit) => Promise<Response>;
     // Pass the same map to several runs to keep the RateLimiters (and their in-memory gates) between requests.

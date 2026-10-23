@@ -693,10 +693,27 @@ const handler = {
         // cluster; the request then runs in its normal order at the normal price.
         let rerankAsked = isRerank(url.searchParams);
         let rewrittenPostBody: string | null = null;
-        // The POST body, parsed once: for rerank here and for the sync-field gate (oxjob #1689) below.
+        // The POST body, parsed once: for rerank here and for the sync-field gate (oxjob #1689) below. A non-empty body
+        // must be a JSON object in UTF-8, or it is refused here, uncharged. It used to be forwarded as is with nothing
+        // priced or gated, yet the origin's get_json also reads UTF-16/32 JSON and NaN, so such a body could carry an
+        // unpriced rerank or an unchecked sync filter (oxjob #1762). The origin's POST routes take only JSON objects.
         let postBody: unknown = null;
         if (req.method === "POST") {
-            try { postBody = JSON.parse(await req.clone().text()); } catch { /* not JSON: nothing to price or gate */ }
+            const text = await req.clone().text();
+            if (text.trim() !== "") {
+                try { postBody = JSON.parse(text); } catch { /* refused just below */ }
+                if (!postBody || typeof postBody !== "object" || Array.isArray(postBody)) {
+                    logAnalytics({
+                        ctx, env, apiKey, req, url, scope: 'main',
+                        responseTime: Date.now() - startTime,
+                        statusCode: 400, rateLimit: 0, rateLimitRemaining: 0,
+                    });
+                    return json(400, {
+                        error: "Invalid request body",
+                        message: 'A POST body must be a JSON object in UTF-8, such as {"oql": "works where year is 2025"}.',
+                    });
+                }
+            }
         }
         if (!rerankAsked && bodyAsksRerank(postBody)) {
             rerankAsked = true;

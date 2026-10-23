@@ -342,3 +342,40 @@ describe('the OQL/OQO sync gate, through the Worker (oxjob #1689)', () => {
         expect(origin.calls).toHaveLength(0);
     });
 });
+
+// A POST body the gates can't read is refused, not forwarded: the origin's get_json also reads UTF-16/32 JSON and
+// NaN, which JSON.parse refuses, so such a body rode past the sync gate and the rerank price (oxjob #1762).
+describe('a POST body must be a UTF-8 JSON object', () => {
+    afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+    const ADDED = { oql: 'works where added since 2026-10-15' };
+    const post = (body: BodyInit | undefined, origin = originAnswering({ url: '/works?filter=from_created_date:2026-10-15', oqo: {} })) =>
+        runWorker('/', { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, fetch: origin.fetch })
+            .then(r => ({ ...r, origin }));
+
+    it('refuses UTF-16 JSON (with or without a BOM) before the limiter and the origin', async () => {
+        for (const bytes of [Buffer.from('﻿' + JSON.stringify(ADDED), 'utf16le'), Buffer.from(JSON.stringify(ADDED), 'utf16le')]) {
+            const { res, checks, origin } = await post(new Uint8Array(bytes));
+            expect(res.status).toBe(400);
+            expect(checks).toEqual([]);
+            expect(origin.calls).toEqual([]);
+        }
+    });
+
+    it('refuses NaN, and JSON that is not an object', async () => {
+        for (const body of ['{"oql": "works where added since 2026-10-15", "page": NaN}', 'NaN', '[1]', '"works"', 'null', '{oql: 1}']) {
+            const { res, origin } = await post(body);
+            expect(res.status, body).toBe(400);
+            expect(origin.calls).toEqual([]);
+        }
+    });
+
+    it('a JSON object is read and forwarded as before; an empty body is forwarded as before', async () => {
+        const plain = originAnswering(undefined);
+        expect((await post(JSON.stringify({ oql: 'works where title has "coral reefs"' }), plain)).res.status).toBe(200);
+        expect((await post(JSON.stringify(ADDED))).res.status).toBe(429);  // the sync gate still reads it
+        const empty = originAnswering(undefined);
+        expect((await post(undefined, empty)).res.status).toBe(200);
+        expect(empty.calls).toHaveLength(1);
+    });
+});
