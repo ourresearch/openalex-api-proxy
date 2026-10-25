@@ -230,6 +230,10 @@ export function classifyEndpoint(
  */
 function isAutocompleteSearch(searchParams: URLSearchParams): boolean {
     if (!searchParams.has('search')) return false;
+    // A multi-facet group_bys (either spelling) runs one terms aggregation per key next to the search, and the origin
+    // refuses select only with group_by (elastic-api core/validate.py:110), so it ran as a free autocomplete (oxjob #1762).
+    // It pays what the search costs; group_by is priced before this shape is tried.
+    if (searchParams.has('group_bys') || searchParams.has('group-bys')) return false;
     // Every page-size spelling sent must be a whole number 1-10. The origin reads per-page before per_page, so judging
     // only per_page priced `per_page=1&per-page=100` free and ran 100 rows, the same gap as a repeated parameter
     // (oxjob #1762). parseInt also read "5abc" as 5, a value the origin can't take as 5.

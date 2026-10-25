@@ -123,3 +123,36 @@ describe('a repeated parameter is priced and gated on the value the origin runs 
         expect((await runWorker(`/works?filter=publication_year:2020&cursor=${page2}&cursor=*`)).res.status).toBe(200);
     });
 });
+
+// The page-size aliases and group_bys, end to end (oxjob #1762). The origin reads per-page before per_page
+// (elastic-api core/utils.py set_number_param), and refuses select only with group_by (core/validate.py), so the
+// free autocomplete shape must hold for every spelling the origin may run and never carry a group_bys.
+describe('page-size aliases and group_bys are priced on what the origin runs (oxjob #1762)', () => {
+    afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+    const AUTO = 'search=quantum&select=id,display_name,works_count';
+
+    it.each([
+        ['per_page=1&per-page=100'],
+        ['per-page=100&per_page=1'],
+        ['per-page=1&per-page=100'],            // a repeated alias: the origin runs the last
+        ['per_page=1&per-page=1&per-page=100'],
+    ])('%s is a 10-credit search', async (q) => {
+        const o = origin();
+        const { res } = await runWorker(`/works?${AUTO}&${q}`, { fetch: o.fetch });
+        expect(res.status).toBe(200);
+        expect(credits(res)).toBe('10');
+    });
+
+    it.each([['per-page=10'], ['per_page=10'], ['per-page=2&per_page=3']])('%s stays free', async (q) => {
+        const o = origin();
+        const { res } = await runWorker(`/works?${AUTO}&${q}`, { fetch: o.fetch });
+        expect(credits(res)).toBe('0');
+    });
+
+    it('a group_bys on the autocomplete shape pays for the search and reaches the origin unchanged', async () => {
+        const o = origin();
+        const { res } = await runWorker(`/works?${AUTO}&per_page=10&group_bys=type,publication_year`, { fetch: o.fetch });
+        expect(credits(res)).toBe('10');
+        expect(query(o.forwarded[0]).get('group_bys')).toBe('type,publication_year');
+    });
+});

@@ -374,6 +374,19 @@ describe('endpointClassifier', () => {
             expect(cost('per_page=')).toBe(10);
         });
 
+        it('a group_bys (either spelling) never rides the free autocomplete shape (oxjob #1762)', () => {
+            const cost = (q: string, websiteFacet = false) => classifyEndpoint('/works',
+                new URLSearchParams(`search=frogs&per_page=10&select=id,display_name,works_count&${q}`), { websiteFacet }).creditCost;
+            expect(cost('group_bys=type,publication_year,primary_topic.id')).toBe(10);
+            expect(cost('group-bys=type')).toBe(10);
+            expect(cost('group_bys=type', true)).toBe(10);  // no facet discount on this shape: it isn't a group_by
+            expect(cost('group_bys=')).toBe(10);
+            // Unchanged: the shape alone is free, and group_bys off this shape keeps its price.
+            expect(cost('mailto=x@y.org')).toBe(0);
+            expect(classifyEndpoint('/works', new URLSearchParams('group_bys=type,publication_year')).creditCost).toBe(1);
+            expect(classifyEndpoint('/works', new URLSearchParams('search=frogs&group_bys=type')).creditCost).toBe(10);
+        });
+
         it('a group_by never rides the free autocomplete shape', () => {
             const params = new URLSearchParams('search=frogs&per_page=10&select=id,display_name,works_count&group_by=type');
             expect(classifyEndpoint('/works', params).creditCost).toBe(10);
