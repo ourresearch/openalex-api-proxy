@@ -27,6 +27,7 @@ import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./key
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND, CONTACT_DAILY_CREDITS } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, enforceDailyLimit, enforceMessage } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
+import { setOriginKey } from "./originKey";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -70,6 +71,9 @@ export interface Env extends SentryEnv {
     // Unset = feature off (see enforcementList.ts).
     ENFORCEMENT?: KVNamespace;
     ENFORCE_AE?: AnalyticsEngineDataset;
+    // oxjob #1782: shared secret sent as X-OpenAlex-Origin-Key to the three origins above (see originKey.ts).
+    // Unset = no header.
+    ORIGIN_SHARED_SECRET?: string;   // Worker secret
 }
 
 // oxjob #338: minted UI-provenance tokens live 30 min; the GUI re-mints on expiry.
@@ -339,10 +343,9 @@ const handler = {
             // the /autocomplete/* endpoints.
             const sub = async (u: string): Promise<unknown[]> => {
                 try {
-                    const r = await fetch(u, {
-                        headers: { "User-Agent": "OpenAlex-Proxy/1.0", "Accept": "application/json" },
-                        signal: AbortSignal.timeout(9000),
-                    });
+                    const headers = new Headers({ "User-Agent": "OpenAlex-Proxy/1.0", "Accept": "application/json" });
+                    setOriginKey(headers, env, u);
+                    const r = await fetch(u, { headers, signal: AbortSignal.timeout(9000) });
                     if (!r.ok) return [];
                     const j = await r.json() as { results?: unknown[] };
                     return Array.isArray(j.results) ? j.results : [];
@@ -1514,6 +1517,7 @@ const handler = {
         if (forwardedAuth) {
             proxyHeaders.set("Authorization", forwardedAuth);
         }
+        setOriginKey(proxyHeaders, env, openalexUrl);
 
         const proxyReq = new Request(openalexUrl.toString(), {
             method: req.method,
