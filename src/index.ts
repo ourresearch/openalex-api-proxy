@@ -28,6 +28,7 @@ import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage,
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, enforceDailyLimit, enforceMessage } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
 import { setOriginKey } from "./originKey";
+import { originAbortMs } from "./originAbort";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -1624,7 +1625,8 @@ const handler = {
         // NB: the "cancels the upstream search on disconnect" claim in the oxjob #521 note
         // above is unverified for this stack and is what led the 6s change astray. Treat it
         // as an open question, not an established behaviour, before relying on it again.
-        const ORIGIN_ABORT_MS = 9000;
+        // OQL calls wait 12 s, past the engine's own 11 s deadline (oxjob #1598; originAbort.ts)
+        const abortMs = originAbortMs(oqlText);
 
         // Built as an if/else rather than a nested ternary: four cases is past the point
         // where a chained `?:` is reviewable, and this path runs on every proxied request.
@@ -1644,7 +1646,7 @@ const handler = {
                 signal: AbortSignal.timeout(25000)
             };
         } else {
-            fetchInit = { signal: AbortSignal.timeout(ORIGIN_ABORT_MS) };
+            fetchInit = { signal: AbortSignal.timeout(abortMs) };
         }
 
         let response: Response;
