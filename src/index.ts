@@ -1438,6 +1438,7 @@ const handler = {
         if (req.method !== "POST") {
             const reason = f1Reason(openalexUrl);
             if (reason) {
+                console.warn(`F1 edge reject: ${reason} ${url.pathname}`); // searchable in Better Stack (#1883)
                 await refundCharge();
                 return new Response(JSON.stringify({
                     error: "Invalid request rejected at the API edge",

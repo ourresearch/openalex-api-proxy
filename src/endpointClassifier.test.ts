@@ -5,6 +5,9 @@ import { actualCreditCost } from './creditReconcile';
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
 
 describe('countBooleanOperators', () => {
+    it('counts operators after a comma inside a search filter value (#1883)', () => {
+        expect(ops('filter=title.search:foo, bar OR baz OR qux,type:article')).toBe(2);
+    });
     it('returns 0 with no search params', () => {
         expect(countBooleanOperators(undefined)).toBe(0);
         expect(ops('filter=publication_year:2020')).toBe(0);

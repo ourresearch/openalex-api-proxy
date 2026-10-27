@@ -1,3 +1,4 @@
+import { splitFilterString } from './f1Validation';
 import { isChangefilesBrowsePath } from "./changefilesPaths";
 import { normalizePath } from "./paths";
 
@@ -73,8 +74,10 @@ export function countBooleanOperators(searchParams?: URLSearchParams): number {
         if (key === 'search' || key.startsWith('search.')) {
             text += ' ' + value;
         } else if (key === 'filter') {
-            for (const m of value.matchAll(/[a-z_]+\.search:([^,]*)/gi)) {
-                text += ' ' + m[1];
+            // the API's own split, so a comma inside a search value can't hide its operators (#1883)
+            for (const clause of splitFilterString(value)) {
+                const colon = clause.indexOf(':');
+                if (/^[a-z_.]*\.search/i.test(clause.slice(0, colon))) text += ' ' + clause.slice(colon + 1);
             }
         }
     }
@@ -109,7 +112,7 @@ export function countWideOrTerms(searchParams?: URLSearchParams): { field: strin
     let worst = { field: '', count: 0 };
     if (!searchParams) return worst;
     for (const value of searchParams.getAll('filter')) {
-        for (const clause of value.split(',')) {
+        for (const clause of splitFilterString(value)) {
             const colon = clause.indexOf(':');
             if (colon < 0) continue;
             const field = clause.slice(0, colon).trim().toLowerCase();

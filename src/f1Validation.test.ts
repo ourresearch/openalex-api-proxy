@@ -15,6 +15,22 @@ describe('f1Validation', () => {
         it('handles a single segment with no comma', () => {
             expect(splitFilterString('publication_year:2020')).toEqual(['publication_year:2020']);
         });
+        // oxjob #1883: a comma inside a search filter's value is text unless `key:` follows it
+        it('keeps a comma inside a search value', () => {
+            expect(splitFilterString('title.search:Music and British Culture, 1785'))
+                .toEqual(['title.search:Music and British Culture, 1785']);
+            expect(splitFilterString('abstract.search:3,4-methylenedioxymethamphetamine treatment'))
+                .toEqual(['abstract.search:3,4-methylenedioxymethamphetamine treatment']);
+        });
+        it('still splits a search value from the next filter', () => {
+            expect(splitFilterString('title.search:Music and British Culture, 1785,type:book'))
+                .toEqual(['title.search:Music and British Culture, 1785', 'type:book']);
+            expect(splitFilterString('title.search:cancer,publication-year:2020'))
+                .toEqual(['title.search:cancer', 'publication-year:2020']);
+        });
+        it('still splits a non-search value at every comma', () => {
+            expect(splitFilterString('type:article,book')).toEqual(['type:article', 'book']);
+        });
     });
 
     describe('limit_param shape (AutoRecruit)', () => {
@@ -31,9 +47,13 @@ describe('f1Validation', () => {
 
     describe('raw_comma_filter shape (Jenni)', () => {
         it('rejects a raw comma that yields a colonless segment', () => {
-            // 'title.search:climate change, biodiversity loss' splits into
-            // ['title.search:climate change', ' biodiversity loss'] -> 2nd has no colon
-            expect(reason('?filter=title.search:climate change, biodiversity loss')).toBe('raw_comma_filter');
+            // 'type:article,book' splits into ['type:article', 'book'] -> 2nd has no colon
+            expect(reason('?filter=type:article,book')).toBe('raw_comma_filter');
+        });
+        it('does NOT reject a comma inside a search value, raw or %2C (oxjob #1883)', () => {
+            expect(reason('?filter=title.search:climate change, biodiversity loss')).toBeNull();
+            expect(reason('?filter=title.search:climate%2C+biodiversity')).toBeNull();
+            expect(reason('?filter=title.search%3AMusic%20and%20British%20Culture%2C%201785%2Ctype%3Abook')).toBeNull();
         });
         it('does NOT reject a valid multi-filter (colon in every segment)', () => {
             expect(reason('?filter=publication_year:2020,title.search:climate')).toBeNull();
