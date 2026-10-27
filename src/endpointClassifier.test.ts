@@ -780,3 +780,27 @@ describe('isEntitySearch: one definition of a search for price and routing (oxjo
         expect(s(path, qs)).toBe(false);
     });
 });
+
+describe('the free autocomplete shape is the search box and nothing else (oxjob #1762 B3, shipped by #1886)', () => {
+    const SHAPE = 'search=smith&per_page=10&select=id,display_name,works_count';
+    const cost = (path: string, extra = '') => classifyEndpoint(path, new URLSearchParams(SHAPE + extra)).creditCost;
+
+    it.each([
+        // what openalex.org's search box sends (logs, 26 Oct: mailto & per-page & per_page & search & select)
+        '&mailto=ui@openalex.org&per-page=10', '', '&api_key=k', '&api-key=k', '&page=1', '&mailto=x@y.org',
+    ])('stays free: %s', (extra) => {
+        for (const path of ['/authors', '/institutions', '/sources', '/awards', '/keywords']) {
+            expect(cost(path, extra)).toBe(0);
+        }
+    });
+
+    it.each([
+        '&cursor=*', '&cursor=IlswLjUsICdodHRwczovL29wZW5hbGV4Lm9yZy9BMTIzJ10i', '&page=2', '&page=50', '&page=',
+        '&filter=last_known_institutions.country_code:US', '&sort=cited_by_count:desc', '&sample=10000&seed=7',
+        '&seed=7', '&group_bys=type', '&include_xpac=true', '&data-version=2',
+    ])('pays the search price with %s (a cursor walk over 17M awards or every Smith was free)', (extra) => {
+        for (const path of ['/authors', '/awards', '/works', '/entities/works']) {
+            expect(cost(path, extra)).toBe(10);
+        }
+    });
+});

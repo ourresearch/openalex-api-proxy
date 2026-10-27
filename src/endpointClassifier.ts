@@ -281,17 +281,25 @@ export function classifyEndpoint(
     return { type: 'list', creditCost: 1 };
 }
 
+// The only parameters the free autocomplete shape may carry: what the website's search box sends (search, select,
+// per_page, per-page, mailto) plus a key and the first page. Anything else turned the dropdown into free paged search
+// (oxjob #1762 B3, shipped by #1886): page=50, cursor=*, a filter, a sort, sample + seed walked every author named
+// Smith, or all 17M awards, for 0 credits. A multi-facet group_bys ran one terms aggregation per key next to the
+// search (the origin refuses select only with group_by), so it pays too; group_by is priced before this shape is tried.
+const AUTOCOMPLETE_SHAPE_PARAMS = new Set(['search', 'select', 'per_page', 'per-page', 'mailto', 'api_key', 'api-key',
+                                           'page']);
+
 /**
  * Detect autocomplete-style search requests: bare `search` param with small
- * per_page and a `select` projection.  These are cheap queries used by the
+ * per_page and a `select` projection, and nothing else.  These are cheap queries used by the
  * GUI's search-box autocomplete dropdown and are free for all callers.
  */
 function isAutocompleteSearch(searchParams: URLSearchParams): boolean {
     if (!searchParams.has('search')) return false;
-    // A multi-facet group_bys (either spelling) runs one terms aggregation per key next to the search, and the origin
-    // refuses select only with group_by (elastic-api core/validate.py:110), so it ran as a free autocomplete (oxjob #1762).
-    // It pays what the search costs; group_by is priced before this shape is tried.
-    if (searchParams.has('group_bys') || searchParams.has('group-bys')) return false;
+    for (const key of searchParams.keys()) {
+        if (!AUTOCOMPLETE_SHAPE_PARAMS.has(key)) return false;
+    }
+    if (searchParams.has('page') && searchParams.get('page') !== '1') return false;
     // Every page-size spelling sent must be a whole number 1-10. The origin reads per-page before per_page, so judging
     // only per_page priced `per_page=1&per-page=100` free and ran 100 rows, the same gap as a repeated parameter
     // (oxjob #1762). parseInt also read "5abc" as 5, a value the origin can't take as 5.
