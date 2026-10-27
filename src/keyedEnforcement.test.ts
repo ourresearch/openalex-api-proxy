@@ -136,6 +136,22 @@ describe('keyed entries on the API path', () => {
         expect(points.map(p => p.blobs[4])).toEqual(['pass', 'refuse']);
     });
 
+    it('entries naming one budget share one day: a second entry for the same client starts no fresh day', async () => {
+        const [a, b] = await shas('user-farm-a', 'user-farm-b');
+        const { env: e } = await env({ mode: 'enforce', keyed_mode: 'enforce', entries: [
+            { id: 'grp-ua', applies_to: 'free_keys', match: { ua_sha: await sha256Hex(UA) }, action: 'shared_budget', expires: LATER, budget: 'grp' },
+            { id: 'grp', applies_to: 'free_keys', match: { account_shas: [a, b] }, action: 'shared_budget', expires: LATER },
+            { id: 'bad', applies_to: 'free_keys', match: { account_shas: [a] }, action: 'shared_budget', expires: LATER, budget: 'no spaces' },
+        ] });
+        const first = await runWorker('/works?search=x', { headers: key('farm-c'), env: e });
+        expect(first.checks.map(c => c.bucket)).toEqual(['credits:farm-c', 'credits:enforce:grp']);
+        const spent = { 'credits:enforce:grp': { counter: { count: 10_000, date: today() } } };
+        expect((await runWorker('/works?search=x', { headers: key('farm-d'), env: e, buckets: spent })).res.status).toBe(429);
+        expect(parseState({ mode: 'enforce', entries: [
+            { id: 'bad', applies_to: 'free_keys', match: { account_shas: [a] }, action: 'shared_budget', expires: LATER, budget: 'no spaces' },
+        ] }).entries[0].budget).toBeUndefined();
+    });
+
     it('an agent key of a listed person is matched too (entries name accounts, not keys)', async () => {
         const { env: e } = await env(await farm('enforce', 'block'));
         expect((await runWorker('/works?search=x', { headers: key('agent-of-farm-a'), env: e })).res.status).toBe(403);

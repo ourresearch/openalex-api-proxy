@@ -42,6 +42,7 @@ export interface EnforceEntry {
     expires: number;        // epoch seconds
     mode?: "shadow";
     applies_to?: "free_keys";  // absent = keyless requests
+    budget?: string;        // shared budget name, else the id: entries of one client name one, so a new entry adds no day
 }
 export interface EnforceState { mode: EnforceMode; keyed_mode?: EnforceMode; entries: EnforceEntry[] }
 export interface RequestFacts { ua: string; mailto: string | null; refererHost: string | null; ip: string | null; asn: number | null }
@@ -78,7 +79,8 @@ function cleanEntry(e: unknown): EnforceEntry | null {
     if (x.action !== "shared_budget" && x.action !== "block") return null;
     if (typeof x.expires !== "number") return null;
     const daily = typeof x.daily_limit === "number" && x.daily_limit > 0 ? Math.floor(x.daily_limit) : undefined;
-    return { id: x.id, match, action: x.action, expires: x.expires, ...(daily ? { daily_limit: daily } : {}),
+    const budget = typeof x.budget === "string" && /^[\w.-]{1,40}$/.test(x.budget) ? x.budget : undefined;
+    return { id: x.id, match, action: x.action, expires: x.expires, ...(daily ? { daily_limit: daily } : {}), ...(budget ? { budget } : {}),
              ...(x.mode === "shadow" ? { mode: "shadow" as const } : {}), ...(keyed ? { applies_to: "free_keys" as const } : {}) };
 }
 
@@ -150,9 +152,9 @@ export function enforceMessage(e: EnforceEntry, why: "block" | "budget" | "seman
     return why === "block" ? ENFORCE_KEY_BLOCK_MESSAGE : why === "budget" ? ENFORCE_KEY_BUDGET_MESSAGE : ENFORCE_KEY_SEMANTIC_MESSAGE;
 }
 
-/** RateLimiter DO name for an entry's shared budget; shadow counts in its own bucket. */
+/** RateLimiter DO name for an entry's shared budget (and its semantic gate); shadow counts in its own bucket. */
 export function enforceBucket(hit: EnforceHit): string {
-    return `credits:enforce:${hit.mode === "shadow" ? "shadow:" : ""}${hit.entry.id}`;
+    return `credits:enforce:${hit.mode === "shadow" ? "shadow:" : ""}${hit.entry.budget ?? hit.entry.id}`;
 }
 
 // Shared budgets spent for the day, per isolate: bucket -> epoch ms of the next midnight UTC.
