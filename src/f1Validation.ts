@@ -37,15 +37,24 @@ export function splitFilterString(filterString: string): string[] {
     const parts: string[] = [];
     let start = 0;
     let inQuotes = false;
+    // The segment's first colon at or after `start` (-1: none), and whether its key names a search, each found once
+    // per segment rather than at every comma, so a hostile filter of thousands of commas splits in linear time
+    // (oxjob #1886; it cost ~1.3 ms per split at 16 KB, and a request splits its filter up to four times).
+    let colon = filterString.indexOf(":");
+    let keyCheckedAt = -1;
+    let searchKey = false;
 
     for (let i = 0; i < filterString.length; i++) {
         const char = filterString[i];
         if (char === '"') {
             inQuotes = !inQuotes;
         } else if (char === "," && !inQuotes) {
-            const colon = filterString.indexOf(":", start);
-            const inSearchValue = colon >= 0 && colon < i
-                && filterString.slice(start, colon).includes("search");
+            if (colon >= 0 && colon < start) colon = filterString.indexOf(":", start);
+            if (colon >= 0 && colon < i && keyCheckedAt !== start) {
+                searchKey = filterString.slice(start, colon).includes("search");
+                keyCheckedAt = start;
+            }
+            const inSearchValue = colon >= 0 && colon < i && searchKey;
             NEXT_FILTER_RE.lastIndex = i + 1;
             if (inSearchValue && !NEXT_FILTER_RE.test(filterString)) continue;
             if (i > start) parts.push(filterString.slice(start, i));

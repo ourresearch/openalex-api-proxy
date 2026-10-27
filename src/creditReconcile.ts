@@ -20,10 +20,14 @@ export const CREDITS_REMAINING_HEADER = "X-Credits-Remaining";
  * A malformed header is ignored, so a bad origin value can't zero a bill or inflate one.
  */
 export function actualCreditCost(status: number, charged: number, originCost: string | null): number {
+    return billableCreditCost(status, originPrice(originCost, charged));
+}
+
+/** The price an `X-Credits-Cost` header states, or `charged` when it is missing or malformed. */
+export function originPrice(originCost: string | null, charged: number): number {
     const raw = originCost?.trim() ?? "";
     const n = Number(raw);
-    const price = raw !== "" && Number.isInteger(n) && n >= 0 ? n : charged;
-    return billableCreditCost(status, price);
+    return raw !== "" && Number.isInteger(n) && n >= 0 ? n : charged;
 }
 
 /** Sent as "1" for a grandfathered key, whose searches cost 1 credit instead of 10, so an origin

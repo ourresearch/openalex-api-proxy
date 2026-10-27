@@ -4,9 +4,9 @@ import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { actualCreditCost, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER } from "./creditReconcile";
+import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER } from "./creditReconcile";
 import { logAnalytics, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
+import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
@@ -742,7 +742,7 @@ const handler = {
         // Only the website token says a request came from openalex.org; an Origin or Referer is forgeable
         // and stopped counting on 2026-10-15 (oxjobs #1691, #1692).
         // Classify endpoint and determine credit cost
-        const classification = classifyEndpoint(url.pathname, url.searchParams, { websiteFacet: trustedUi });
+        const classification = classifyEndpoint(url.pathname, url.searchParams, { websiteFacet: trustedUi, method: req.method });
         // Grandfathered users get search at 1 credit instead of 10; rerank adds RERANK_CREDITS for everyone
         const creditCost = ((isGrandfathered && classification.type === 'search') ? 1 : classification.creditCost)
             + rerankCredits(classification.type, rerankAsked);
@@ -772,8 +772,8 @@ const handler = {
         // Runs BEFORE the credits DO, so rejected requests are edge-cheap and
         // never charged. Untouched: keyed clients, the GUI, autocomplete (cheap
         // 'list'), singleton/list, semantic (already 1/s capped).
-        const isWorksSearch = normalizedPath.split("/")[0] === "works";
-        if (isWorksSearch && !apiKey && !trustedUi && classification.type === 'search') {
+        // Any spelling of /works (/entities/works, /v2/works) is a works search (oxjob #1886).
+        if (!apiKey && !trustedUi && classification.type === 'search' && entityFamily(normalizedPath)?.family === "works") {
             const verdict = await checkAnonSearchBudget(env, ctx);
             if (!verdict.ok) {
                 const statusCode = verdict.statusCode ?? 503;
@@ -1347,10 +1347,12 @@ const handler = {
             // credit, /refund below it; errors are free). An overrun past the caller's balance lands on the daily
             // counter, never on prepaid: we absorb it (Jason, 2026-10-11, oxjob #1494).
             // Content: check if the worker returned a different credit cost (e.g., 1 for 404) and refund.
-            const actualCostHeader = contentResponse.headers.get("X-Credits-Cost");
+            // The worker can lower the price, never raise it past what was charged: it prices a HEAD at 100 too, which
+            // the proxy charges 0 (oxjob #1886), and the headers must say what was charged.
+            const actualCostHeader = contentResponse.headers.get(ORIGIN_COST_HEADER);
             const actualCost = isQueryText
                 ? actualCreditCost(contentResponse.status, creditCost, actualCostHeader)
-                : (actualCostHeader ? parseInt(actualCostHeader, 10) : creditCost);
+                : Math.min(creditCost, originPrice(actualCostHeader, creditCost));
             let adjustedRemaining = rateLimitResult.remaining ?? 0;
 
             // Refund credits if actual cost < charged cost
@@ -2084,51 +2086,10 @@ function getTargetApiUrl(url: URL, env: Env): string {
         return env.TEXT_API_URL;
     }
 
-    // Check if this is an entity list endpoint (not a singleton)
-    if (env.SEARCH_API_URL) {
-        const segments = normalizedPath.split('/');
-        const ENTITY_TYPES = ['works', 'authors', 'sources', 'institutions',
-                              'topics', 'publishers', 'funders', 'concepts'];
-
-        if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
-            const OPENALEX_ID_PATTERN = /^[A-Za-z]?\d+$/;
-            const isSingleton = segments.length >= 2 && OPENALEX_ID_PATTERN.test(segments[1]);
-
-            if (!isSingleton) {
-                // Route to SEARCH_API_URL if request has search or search.* params
-                if (url.searchParams.has('search')) {
-                    return env.SEARCH_API_URL;
-                }
-                for (const key of url.searchParams.keys()) {
-                    if (key.startsWith('search.')) {
-                        return env.SEARCH_API_URL;
-                    }
-                }
-
-                // Route to SEARCH_API_URL if filter contains search filters
-                const filterParams = url.searchParams.getAll('filter');
-                if (filterParams.length > 0) {
-                    const SEARCH_FILTERS = [
-                        'abstract.search',
-                        'default.search',
-                        'display_name.search',
-                        'fulltext.search',
-                        'keyword.search',
-                        'raw_affiliation_strings.search',
-                        'raw_author_name.search',
-                        'title.search',
-                        'title_and_abstract.search',
-                        'title_abstract_keywords.search'
-                    ];
-                    const hasSearchFilter = filterParams.some(fp =>
-                        SEARCH_FILTERS.some(f => fp.includes(f))
-                    );
-                    if (hasSearchFilter) {
-                        return env.SEARCH_API_URL;
-                    }
-                }
-            }
-        }
+    // A search on an entity list runs on the search origin, by the same definition of a search the price uses (oxjob
+    // #1886). Autocomplete-shaped searches and website facets go there too: they are searches, priced lower.
+    if (env.SEARCH_API_URL && isEntitySearch(pathname, url.searchParams)) {
+        return env.SEARCH_API_URL;
     }
 
     return env.OPENALEX_API_URL;

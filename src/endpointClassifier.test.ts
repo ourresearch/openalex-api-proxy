@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyEndpoint, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_ENTRY_CREDITS, queryTextAllowed } from './endpointClassifier';
+import { classifyEndpoint, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, billableCreditCost, rerankCredits, bodyAsksRerank, QUERY_TEXT_ENTRY_CREDITS, queryTextAllowed } from './endpointClassifier';
 import { actualCreditCost } from './creditReconcile';
 
 const ops = (qs: string) => countBooleanOperators(new URLSearchParams(qs));
@@ -666,5 +666,117 @@ describe('/query is free (oxjob #1533)', () => {
 
     it('leaves the OQL door on the root at list price', () => {
         expect(classifyEndpoint('/', new URLSearchParams('oql=works')).creditCost).toBe(1);
+    });
+});
+
+describe('every entity endpoint charges the price list (oxjob #1886)', () => {
+    const price = (path: string, qs = '', opts = {}) => {
+        const r = classifyEndpoint(path, new URLSearchParams(qs), opts);
+        return `${r.type}:${r.creditCost}`;
+    };
+
+    it.each([
+        '/keywords/artificial-intelligence', '/awards/G3618239412', '/fields/17', '/subfields/1702', '/domains/3',
+        '/sdgs/3', '/countries/US', '/continents/Q46', '/languages/en', '/work-types/article', '/source-types/journal',
+        '/institution-types/education', '/licenses/cc-by', '/study-designs/observational-study', '/indexes/crossref',
+        '/source-lists/cwts-core', '/oa-statuses/gold', '/locations/doi:10.7717/peerj.4375',
+        '/locations/pmh:oai:arXiv.org:2101.00001',
+    ])('a lookup of one record is free: %s', (path) => {
+        expect(price(path)).toBe('singleton:0');
+    });
+
+    it.each([
+        '/people/A5059386507', '/journals/S137773608', '/types/article', '/entities/works/W2741809807',
+        '/entities/keywords/artificial-intelligence', '/v2/works/W2741809807', '/v2/keywords/climate-change',
+    ])('an alias spelling is a free lookup too: %s', (path) => {
+        expect(price(path)).toBe('singleton:0');
+    });
+
+    it.each([
+        '/keywords', '/awards', '/fields', '/subfields', '/domains', '/sdgs', '/countries', '/continents', '/languages',
+        '/work-types', '/source-types', '/institution-types', '/licenses', '/study-designs', '/indexes', '/source-lists',
+        '/oa-statuses', '/locations', '/raw-affiliation-strings', '/people', '/journals', '/types', '/entities/works',
+        '/v2/works',
+    ])('a search on %s costs 10 like any search, and its list 1', (path) => {
+        expect(price(path, 'search=cancer')).toBe('search:10');
+        expect(price(path, 'filter=display_name.search:cancer')).toBe('search:10');
+        expect(price(path)).toBe('list:1');
+        expect(price(path, 'per_page=5&select=id')).toBe('list:1');
+    });
+
+    it('the families keep the rules every entity has: website facets, the autocomplete shape', () => {
+        expect(price('/awards', 'search=cancer&group_by=funder.id')).toBe('search:10');
+        expect(price('/awards', 'search=cancer&group_by=funder.id', { websiteFacet: true })).toBe('list:1');
+        expect(price('/keywords', 'search=clim&per_page=10&select=id,display_name,works_count')).toBe('list:0');
+    });
+
+    it.each([
+        '/keywords/histogram/works_count', '/awards/filters/funder.id:F1', '/fields/valid_fields', '/domains/config',
+        '/subfields/flattened_schema', '/countries/filters_docstrings', '/institutions/stats', '/keywords/random',
+        '/works/random', '/authors/random', '/people/random',
+    ])('an origin subroute or a random record is not a lookup: %s', (path) => {
+        expect(price(path)).toBe('list:1');
+    });
+
+    it.each([
+        'description.search:cancer', 'text.search:harvard', 'keywords.search:coral', 'display_name.search.exact:nature',
+        'abstract.search.no_stem:coral', 'Title.Search:coral', 'type:article,text.search:harvard',
+        'title.search:Music and British Culture, 1785,type:book',
+        // every key the old fixed list held still prices as a search
+        'abstract.search:x', 'default.search:x', 'display_name.search:x', 'fulltext.search:x', 'keyword.search:x',
+        'raw_affiliation_strings.search:x', 'raw_author_name.search:x', 'title.search:x', 'title_and_abstract.search:x',
+        'title_abstract_keywords.search:x', 'authorships.institutions.display_name.search:x',
+    ])('filter=%s is a search (docs: filter-based searches cost the same)', (filter) => {
+        expect(price('/works', `filter=${encodeURIComponent(filter)}`)).toBe('search:10');
+        expect(price('/funders', `filter=${encodeURIComponent(filter)}`)).toBe('search:10');
+    });
+
+    it.each([
+        'doi:10.1/title.search', 'publication_year:2020', 'has_search:true', 'research_area.id:T1', 'searchable:true',
+    ])('filter=%s is not a search', (filter) => {
+        expect(price('/works', `filter=${encodeURIComponent(filter)}`)).toBe('list:1');
+    });
+
+    it('a HEAD on a content file is free; a download still costs 100', () => {
+        for (const path of ['/works/W3038568908.pdf', '/content/works/W3038568908.pdf', '/works/W1.grobid-xml']) {
+            expect(price(path, '', { method: 'HEAD' })).toBe('content:0');
+            expect(price(path, '', { method: 'head' })).toBe('content:0');
+            expect(price(path, '', { method: 'GET' })).toBe('content:100');
+            expect(price(path)).toBe('content:100');
+        }
+    });
+
+    it('a HEAD on the API itself still costs what the query costs (the origin runs it)', () => {
+        expect(price('/works', 'filter=publication_year:2020', { method: 'HEAD' })).toBe('list:1');
+        expect(price('/works', 'search=coral', { method: 'HEAD' })).toBe('search:10');
+    });
+
+    it('paths that are not entity endpoints are unchanged', () => {
+        expect(price('/entities')).toBe('list:1');
+        expect(price('/unknown/path')).toBe('list:1');
+        expect(price('/v2')).toBe('list:1');
+        expect(price('/autocomplete/keywords', 'q=clim')).toBe('list:0');
+    });
+});
+
+describe('isEntitySearch: one definition of a search for price and routing (oxjob #1886)', () => {
+    const s = (path: string, qs = '') => isEntitySearch(path, new URLSearchParams(qs));
+
+    it.each([
+        ['/works', 'search=coral'], ['/works', 'search.semantic=coral reefs'], ['/works', 'search.title=coral'],
+        ['/works', 'filter=title.search:coral'], ['/authors', 'filter=text.search:smith'],
+        ['/funders', 'filter=description.search:cancer'], ['/keywords', 'search=climate'], ['/awards', 'search=cancer'],
+        ['/entities/works', 'search=coral'], ['/v2/works', 'search=coral'], ['/people', 'search=smith'],
+        ['/authors', 'search=smith&per_page=10&select=id,display_name,works_count'],
+    ])('%s?%s is a search', (path, qs) => {
+        expect(s(path, qs)).toBe(true);
+    });
+
+    it.each([
+        ['/works', 'filter=publication_year:2020'], ['/works/W123', 'search=coral'], ['/keywords/climate', 'search=x'],
+        ['/autocomplete/works', 'q=coral'], ['/query', 'oql=works about coral'], ['/', 'oql=get works about coral'],
+        ['/text', 'title=coral'], ['/works', 'filter=doi:10.1/title.search'], ['/unknown', 'search=x'],
+    ])('%s?%s is not', (path, qs) => {
+        expect(s(path, qs)).toBe(false);
     });
 });

@@ -28,8 +28,57 @@ export interface EndpointClassification {
     creditCost: number;
 }
 
-const ENTITY_TYPES = ['works', 'authors', 'sources', 'institutions',
-                      'topics', 'publishers', 'funders', 'concepts'];
+// Entities whose records carry an OpenAlex id (W123) or an external id (doi:, orcid:, ror:...).
+const ENTITY_TYPES = new Set(['works', 'authors', 'sources', 'institutions',
+                              'topics', 'publishers', 'funders', 'concepts']);
+
+// Every other documented endpoint (help api/endpoints.md). Their records are looked up by a name-like or namespaced
+// id: /keywords/artificial-intelligence, /countries/US, /work-types/article, /fields/17, /awards/G123,
+// /locations/doi:10.1/x. Until oxjob #1886 these fell to the default at 1 credit, so a lookup cost 1 (docs: free) and
+// a search 1 (docs: 10). raw-affiliation-strings has a list but no lookup; a path under it is a free 404.
+// Copied from the origin's routes (elastic-api ids/views.py): a new entity endpoint there needs a line here.
+const NAMED_ID_FAMILIES = new Set(['keywords', 'awards', 'fields', 'subfields', 'domains', 'sdgs',
+                                   'countries', 'continents', 'languages', 'work-types', 'source-types',
+                                   'institution-types', 'licenses', 'study-designs', 'indexes', 'source-lists',
+                                   'oa-statuses', 'locations', 'raw-affiliation-strings']);
+
+// The origin's own routes under a family (/keywords/histogram/x runs an aggregation), answered before its
+// /<family>/<path:id> lookup, so they are never a lookup; and /random runs a random-score query (priced as a list).
+const FAMILY_SUBROUTES = new Set(['filters', 'histogram', 'valid_fields', 'flattened_schema',
+                                  'filters_docstrings', 'config', 'stats', 'random']);
+
+// Older spellings the origin still answers (elastic-api ids/views.py): /people = /authors, /journals = /sources,
+// /types = /work-types, and /entities/<family>/... or /v2/<family>/... for any family.
+const FAMILY_ALIASES: Record<string, string> = { people: 'authors', journals: 'sources', types: 'work-types' };
+
+/**
+ * The entity family a normalized path addresses, and whether the path looks up one record, or null for a path that
+ * isn't an entity endpoint. Aliases and the /entities and /v2 prefixes resolve to the family they serve, so each
+ * spelling costs the same (oxjob #1886: /entities/works?search= was a works search at 1 credit).
+ * A lookup: on the main entities an OpenAlex id (W123, 123), an external id prefix (doi:..., pmid:...) or an id URL
+ * (https://doi.org/...), read from everything after "/entity/", not one segment (/works/W123/ngrams counts); on the
+ * named-id families any id the origin's /<family>/<path:id> route takes, outside its subroutes.
+ */
+export function entityFamily(normalized: string): { family: string; lookup: boolean } | null {
+    const parts = normalized.split('/');
+    if (parts[0] === 'entities' || parts[0] === 'v2') parts.shift();
+    const family = FAMILY_ALIASES[parts[0]] ?? parts[0];
+    const named = NAMED_ID_FAMILIES.has(family);
+    if (!named && !ENTITY_TYPES.has(family)) return null;
+    const rest = parts.slice(1).join('/');
+    const lookup = rest !== '' && (named ? !FAMILY_SUBROUTES.has(parts[1]) : isSingletonIdentifier(rest));
+    return { family, lookup };
+}
+
+/**
+ * Does the request run a search on an entity list (search=, search.<x>=, or a .search filter)? The one definition
+ * both the price and the routing to the search origin (SEARCH_API_URL) use (oxjob #1886: routing kept its own copy
+ * of the old filter list, so text.search, the named-id families and the aliases ran on the main origin).
+ */
+export function isEntitySearch(pathname: string, searchParams: URLSearchParams): boolean {
+    const entity = entityFamily(normalizePath(pathname));
+    return !!entity && !entity.lookup && (hasSearchParams(searchParams) || hasSemanticSearch(searchParams));
+}
 
 // OpenAlex IDs: optional letter prefix followed by digits (e.g., W123, 123, A456)
 const OPENALEX_ID_PATTERN = /^[A-Za-z]?\d+$/;
@@ -47,19 +96,24 @@ const EXTERNAL_ID_PREFIXES = [
 // matching a host here never makes a list free.
 const EXTERNAL_ID_URL = /^(?:https?:\/\/?)?(?:www\.|dx\.)?(?:doi\.org|orcid\.org|ror\.org|openalex\.org|wikidata\.org|scopus\.com)\/./;
 
-// Search-type filters in the filter= param that trigger 10-credit search pricing
-const SEARCH_FILTERS = [
-    'abstract.search',
-    'default.search',
-    'display_name.search',
-    'fulltext.search',
-    'keyword.search',
-    'raw_affiliation_strings.search',
-    'raw_author_name.search',
-    'title.search',
-    'title_and_abstract.search',
-    'title_abstract_keywords.search'
-];
+/**
+ * Does a filter= value hold a search filter? Any key with a `.search` part is one (title.search, text.search,
+ * description.search, keywords.search, display_name.search.exact, abstract.search.no_stem...), and the docs price
+ * every one like the search parameter: "These filter-based searches cost the same $1 per 1,000 requests"
+ * (help api/searching.md). A fixed list missed text.search, description.search and keywords.search (oxjob #1886).
+ * Keys come from the API's own split, so a ".search" inside a filter's value is not a search.
+ */
+function hasSearchFilter(filterParam: string): boolean {
+    return splitFilterString(filterParam).some(clause => {
+        const colon = clause.indexOf(':');
+        return colon > 0 && isSearchFilterKey(clause.slice(0, colon));
+    });
+}
+
+/** A filter key with a `.search` part: title.search, text.search, display_name.search.exact, abstract.search.no_stem. */
+function isSearchFilterKey(key: string): boolean {
+    return /\.search(\.|$)/i.test(key.trim());
+}
 
 /**
  * Count Lucene boolean operators (OR / AND / NOT — uppercase, whole-word) across all
@@ -77,7 +131,7 @@ export function countBooleanOperators(searchParams?: URLSearchParams): number {
             // the API's own split, so a comma inside a search value can't hide its operators (#1883)
             for (const clause of splitFilterString(value)) {
                 const colon = clause.indexOf(':');
-                if (/^[a-z_.]*\.search/i.test(clause.slice(0, colon))) text += ' ' + clause.slice(colon + 1);
+                if (colon > 0 && isSearchFilterKey(clause.slice(0, colon))) text += ' ' + clause.slice(colon + 1);
             }
         }
     }
@@ -131,7 +185,7 @@ export function countWideOrTerms(searchParams?: URLSearchParams): { field: strin
 export function classifyEndpoint(
     pathname: string,
     searchParams?: URLSearchParams,
-    opts: { websiteFacet?: boolean } = {},
+    opts: { websiteFacet?: boolean; method?: string } = {},
 ): EndpointClassification {
     const normalized = normalizePath(pathname);
     const segments = normalized.split('/');
@@ -143,8 +197,10 @@ export function classifyEndpoint(
 
     // Content downloads: /works/{work_id}.pdf or .grobid-xml (for content.openalex.org)
     // Match paths with file extensions, including /content/* prefix from api.openalex.org
+    // A HEAD sends the file's headers and no bytes, and the docs price downloads, so it is free (oxjob #1886: it was
+    // charged the full 100). The content worker serves the bytes itself, never a signed link a HEAD could leak.
     if (/^(content\/)?works\/[^/]+\.(pdf|grobid-xml)$/i.test(normalized)) {
-        return { type: 'content', creditCost: 100 };
+        return { type: 'content', creditCost: opts.method?.toUpperCase() === 'HEAD' ? 0 : 100 };
     }
 
     // Changefiles listing/browse: /changefiles and /changefiles/{date} are free,
@@ -157,11 +213,10 @@ export function classifyEndpoint(
     }
 
     // Entity endpoints
-    if (segments.length >= 1 && ENTITY_TYPES.includes(segments[0])) {
-        // Singleton: /entity/ID or /entity/ID/subpath (e.g., /works/W123/ngrams)
-        // Matches OpenAlex IDs (W123, 123), external ID prefixes (doi:..., pmid:..., etc.) and ID URLs
-        // (https://doi.org/..., https://orcid.org/...), so it reads everything after "/entity/", not one segment.
-        if (segments.length >= 2 && isSingletonIdentifier(normalized.slice(segments[0].length + 1))) {
+    const entity = entityFamily(normalized);
+    if (entity) {
+        // Singleton: one record by its id (see entityFamily)
+        if (entity.lookup) {
             return { type: 'singleton', creditCost: 0 };
         }
 
@@ -290,15 +345,8 @@ function hasSearchParams(searchParams: URLSearchParams): boolean {
         }
     }
 
-    // Check for search-type filters in the filter= param
     const filterParam = searchParams.get('filter');
-    if (filterParam) {
-        if (SEARCH_FILTERS.some(f => filterParam.includes(f))) {
-            return true;
-        }
-    }
-
-    return false;
+    return filterParam !== null && hasSearchFilter(filterParam);
 }
 
 /**

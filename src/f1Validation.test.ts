@@ -78,3 +78,50 @@ describe('f1Validation', () => {
         });
     });
 });
+
+describe('splitFilterString runs in linear time with the same output (oxjob #1886)', () => {
+    // The splitter as #1883 shipped it (eedc2ee): it searched for the segment's colon and key at every comma.
+    const NEXT = /[A-Za-z_][A-Za-z0-9_.\-]*:/y;
+    function reference(f: string): string[] {
+        const parts: string[] = [];
+        let start = 0;
+        let inQuotes = false;
+        for (let i = 0; i < f.length; i++) {
+            const c = f[i];
+            if (c === '"') inQuotes = !inQuotes;
+            else if (c === ',' && !inQuotes) {
+                const colon = f.indexOf(':', start);
+                const inSearchValue = colon >= 0 && colon < i && f.slice(start, colon).includes('search');
+                NEXT.lastIndex = i + 1;
+                if (inSearchValue && !NEXT.test(f)) continue;
+                if (i > start) parts.push(f.slice(start, i));
+                start = i + 1;
+            }
+        }
+        if (f.length > start) parts.push(f.slice(start));
+        return parts;
+    }
+
+    it('matches the old splitter on 20,000 random filters', () => {
+        const atoms = ['title.search', 'text.search', 'type', ':', ',', ' ', '"', 'a', 'B c', 'search', '|', '1', '.', '-', '_x:'];
+        let seed = 1886;
+        const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+        for (let k = 0; k < 20_000; k++) {
+            let f = '';
+            const len = rand(14);
+            for (let j = 0; j < len; j++) f += atoms[rand(atoms.length)];
+            expect(splitFilterString(f), f).toEqual(reference(f));
+        }
+    });
+
+    it.each([
+        ['commas with no colon', 'a,'.repeat(8000)],
+        ['a search key, then a value of commas', 'x'.repeat(4000) + 'search:' + ',a'.repeat(6000)],
+        ['many short search filters', 'title.search:a,'.repeat(1100)],
+    ])('a 16 KB hostile filter (%s) splits in well under a millisecond per KB', (_name, f) => {
+        const t = performance.now();
+        for (let r = 0; r < 5; r++) splitFilterString(f);
+        expect((performance.now() - t) / 5).toBeLessThan(5);
+        expect(splitFilterString(f)).toEqual(reference(f));
+    });
+});
