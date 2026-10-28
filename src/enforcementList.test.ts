@@ -116,6 +116,43 @@ describe('enforcement list on the API path', () => {
         expect(points.map(p => p.blobs[4])).toEqual(['pass', 'refuse']);
     });
 
+    it('a free lookup passes without asking the shared budget (oxjob #1831), and is refused once the day is seen spent', async () => {
+        const { env: e, points } = await env(await budgetUa('enforce'));
+        const free = await runWorker('/works/https://doi.org/10.1234/abc', { headers: ua, env: e });
+        expect(free.res.status).toBe(200);
+        expect(free.checks.map(c => c.bucket)).toEqual([`credits:${HARNESS_IP}`]);
+        expect(points.map(p => p.blobs)).toEqual([['pool1', 'shared_budget', 'enforce', 'singleton', 'pass']]);
+        // A paid request still asks, learns the day is spent, and this isolate then refuses free lookups too (as before).
+        const spent = { 'credits:enforce:pool1': { counter: { count: 2000, date: today() } } };
+        expect((await runWorker('/works?search=x', { headers: ua, env: e, buckets: spent, ip: '198.51.100.3' })).res.status).toBe(429);
+        const after = await runWorker('/works/https://doi.org/10.1234/abc', { headers: ua, env: e, ip: '198.51.100.4' });
+        expect(after.res.status).toBe(429);
+        expect(after.checks).toEqual([]);
+        expect(points.map(p => p.blobs[4])).toEqual(['pass', 'refuse', 'refuse']);
+    });
+
+    it('a free lookup passes even when the shared budget object is overloaded, and reports no error (oxjob #1831)', async () => {
+        const { env: e } = await env(await budgetUa('enforce'));
+        const asked: string[] = [];
+        const { RateLimiter } = await import('./rateLimiter');
+        const { fakeState } = await import('./testHarness');
+        const live = new Map<string, InstanceType<typeof RateLimiter>>();
+        const overloaded = {
+            idFromName: (n: string) => n,
+            get: (name: string) => ({
+                fetch: async (u: string, init?: RequestInit) => {
+                    asked.push(name);
+                    if (name.startsWith('credits:enforce:')) throw new Error('Durable Object is overloaded. Requests queued for too long.');
+                    if (!live.has(name)) { live.set(name, new RateLimiter(fakeState() as any)); await new Promise(r => setTimeout(r, 0)); }
+                    return live.get(name)!.fetch(new Request(u, init));
+                },
+            }),
+        };
+        const { res } = await runWorker('/works/https://doi.org/10.1234/abc', { headers: ua, env: { ...e, RATE_LIMITER: overloaded } });
+        expect(res.status).toBe(200);
+        expect(asked).toEqual([`credits:${HARNESS_IP}`]);
+    });
+
     it('shadow: a shared budget counts in its own bucket and only records the refusal', async () => {
         const { env: e, points } = await env(await budgetUa('shadow'));
         const spent = { 'credits:enforce:shadow:pool1': { counter: { count: 2000, date: today() } } };

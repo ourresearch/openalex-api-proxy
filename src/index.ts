@@ -1286,6 +1286,14 @@ const handler = {
         }
 
         // An enforcement-list shared budget (shadow counts in its own bucket, so shadow numbers are real numbers).
+        // A free request (0 credits) passes without asking the budget's object (oxjob #1831): its answer to a 0-credit
+        // /check is always yes (it refuses only when fewer credits remain than asked, and its per-second answer is not a
+        // refusal here). Every keyless IP of an entry shares that ONE object, so a bulk run of free lookups behind one
+        // entry sent it every request until it answered "overloaded", and each such error was a free pass anyway. The
+        // spent mark checked above still refuses free requests once this isolate has seen the day spent, as before.
+        if (enforceHit && !enforceSettled && creditCost === 0) {
+            enforceDecision(false);  // records the pass the object would have given, and settles the request
+        }
         if (enforceHit && !enforceSettled) {
             const bucket = enforceBucket(enforceHit);
             try {
