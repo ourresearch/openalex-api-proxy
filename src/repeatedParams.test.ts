@@ -112,7 +112,7 @@ describe('a repeated parameter is priced and gated on the value the origin runs 
         const o = origin();
         const { res, checks } = await runWorker('/works?api_key=not-a-key&api_key=good-key', { fetch: o.fetch, env: { HYPERDRIVE: { connectionString: 'postgres://test' } } });
         expect(res.status).toBe(200);
-        expect(checks[0].bucket).toBe('credits:good-key');
+        expect(checks[0].bucket).toBe('credits:user:user-good');
         expect(query(o.forwarded[0]).get('api_key')).toBe('good-key');
     });
 

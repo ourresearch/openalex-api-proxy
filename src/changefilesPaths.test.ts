@@ -244,6 +244,6 @@ describe("an invalid key on a changefiles listing is metered as the keyless call
 
     it("a valid key still spends its own bucket there", async () => {
         const { checks } = await runWorker("/changefiles?api_key=free-key", { env: HD });
-        expect(checks.map(c => c.bucket)).toEqual(["credits:free-key"]);
+        expect(checks.map(c => c.bucket)).toEqual(["credits:user:user-free-key"]);
     });
 });

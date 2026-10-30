@@ -117,7 +117,7 @@ describe('keyed entries on the API path', () => {
         const { env: e, points } = await env(await farm('shadow'));
         const first = await runWorker('/works?search=x', { headers: key('farm-a'), env: e });
         expect(first.res.status).toBe(200);
-        expect(first.checks.map(c => [c.bucket, c.dailyLimit])).toEqual([['credits:farm-a', 10_000], ['credits:enforce:shadow:grp', 10_000]]);
+        expect(first.checks.map(c => [c.bucket, c.dailyLimit])).toEqual([['credits:user:user-farm-a', 10_000], ['credits:enforce:shadow:grp', 10_000]]);
         const spent = { 'credits:enforce:shadow:grp': { counter: { count: 10_000, date: today() } } };
         expect((await runWorker('/works?search=x', { headers: key('farm-b'), env: e, buckets: spent })).res.status).toBe(200);
         expect(points.map(p => p.blobs)).toEqual([['grp', 'shared_budget', 'shadow', 'search', 'pass'], ['grp', 'shared_budget', 'shadow', 'search', 'refuse']]);
@@ -127,7 +127,7 @@ describe('keyed entries on the API path', () => {
         const { env: e, points } = await env(await farm('enforce'));
         const first = await runWorker('/works?search=x', { headers: key('farm-a'), env: e });
         expect(first.res.status).toBe(200);
-        expect(first.checks.map(c => [c.bucket, c.dailyLimit])).toEqual([['credits:farm-a', 10_000], ['credits:enforce:grp', 10_000]]);
+        expect(first.checks.map(c => [c.bucket, c.dailyLimit])).toEqual([['credits:user:user-farm-a', 10_000], ['credits:enforce:grp', 10_000]]);
         const spent = { 'credits:enforce:grp': { counter: { count: 10_000, date: today() } } };
         const second = await runWorker('/works?search=x', { headers: key('farm-c'), env: e, buckets: spent });
         expect(second.res.status).toBe(429);
@@ -144,7 +144,7 @@ describe('keyed entries on the API path', () => {
             { id: 'bad', applies_to: 'free_keys', match: { account_shas: [a] }, action: 'shared_budget', expires: LATER, budget: 'no spaces' },
         ] });
         const first = await runWorker('/works?search=x', { headers: key('farm-c'), env: e });
-        expect(first.checks.map(c => c.bucket)).toEqual(['credits:farm-c', 'credits:enforce:grp']);
+        expect(first.checks.map(c => c.bucket)).toEqual(['credits:user:user-farm-c', 'credits:enforce:grp']);
         const spent = { 'credits:enforce:grp': { counter: { count: 10_000, date: today() } } };
         expect((await runWorker('/works?search=x', { headers: key('farm-d'), env: e, buckets: spent })).res.status).toBe(429);
         expect(parseState({ mode: 'enforce', entries: [

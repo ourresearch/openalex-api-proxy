@@ -115,6 +115,16 @@ interface ApiKeyAuth {
     cacheRefreshed?: boolean;
 }
 
+/**
+ * The daily credits bucket a valid key spends from: `credits:<this>` (oxjob #1725). Every key of one person shares one:
+ * the current key, a retired key still in its grace window, and every key an AI agent asked for. So rotating a key buys
+ * no fresh day (30 Oct: one farm rotated 5,140 keys in a day, 10K credits each). Org keys (no person) and a lookup that
+ * failed open keep the old naming: the account key's bucket for an agent key (budgetKey), else the key's own.
+ */
+export function creditsBucketFor(apiKey: string, budgetKey: string | null, userId: string | null): string {
+    return userId ? `user:${userId}` : (budgetKey || apiKey);
+}
+
 // In-memory cache for API key validation
 const API_KEY_CACHE = new Map<string, ApiKeyAuth & { cachedAt: number }>();
 const CACHE_TTL = 60000; // 60 seconds
@@ -524,10 +534,11 @@ const handler = {
                 }
 
                 // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
+                // from the bucket the charges land in, billed to the person (one balance per person, any of their keys).
                 if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
-                    const wbRateLimitKey = `credits:${apiKey}`;
+                    const wbRateLimitKey = `credits:${creditsBucketFor(apiKey, budgetKey, keyUserId)}`;
                     ctx.waitUntil(
-                        writebackOnetimeCredits(env, apiKey, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
+                        writebackOnetimeCredits(env, apiKey, keyUserId, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
                     );
                 }
             }
@@ -689,7 +700,8 @@ const handler = {
                     onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
                 }
             }
-            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt, budgetKey);
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt,
+                apiKey ? creditsBucketFor(apiKey, budgetKey, keyUserId) : null);
         }
 
         // rerank (oxjob #1521): `rerank=true` in the URL, or `"rerank": true` in a POST body (the
@@ -814,9 +826,10 @@ const handler = {
         // Ordinary keyless budgets are per network, not per address (oxjob #1692): an IPv6 /64 belongs to
         // one household or device and holds 2^64 addresses, so per address it bought a fresh budget per
         // request (14 Oct: 1,123 /64s took 3.33M credits over 39K addresses). IPv4 stays per address.
-        // An agent's key spends from its account key's bucket (budgetKey; oxjob #1697): one free day per person.
+        // A key spends from its person's bucket (creditsBucketFor; oxjobs #1697, #1725): one day per person, whichever
+        // of their keys they use and however often they rotate it.
         // apiKey is set here only for a key that validated (an invalid one on a changefiles listing was cleared above).
-        const identifier = (apiKey && (budgetKey || apiKey)) || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
+        const identifier = (apiKey && creditsBucketFor(apiKey, budgetKey, keyUserId)) || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
         const rateLimitKey = verifiedAssistant ? `${scope}:verified-assistant:${identifier}` : `${scope}:${identifier}`;
         const limit = maxCreditsPerDay;
 
@@ -2002,6 +2015,7 @@ export function isDataException(error: unknown): boolean {
 async function writebackOnetimeCredits(
     env: Env,
     apiKey: string,
+    userId: string | null,
     rateLimitKey: string,
     dailyLimit: number,
     onetimeBalance: number
@@ -2026,9 +2040,13 @@ async function writebackOnetimeCredits(
         await client.connect();
 
         try {
+            // By person when the key has one (oxjob #1725): a retired key's api_key is no longer on the users row, so
+            // a write by key string matched nothing and its prepaid spend was never billed.
             await client.query(
-                "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE api_key = $2",
-                [consumed, apiKey]
+                userId
+                    ? "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE id = $2"
+                    : "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE api_key = $2",
+                [consumed, userId ?? apiKey]
             );
         } catch (dbError) {
             // DB write failed — restore consumed credits to the DO so they aren't lost.
@@ -2266,7 +2284,7 @@ async function handleRateLimitEndpoint(
     isGrandfathered: boolean = false,
     onetimeCreditsBalance: number = 0,
     onetimeCreditsExpiresAt?: string,
-    budgetKey: string | null = null
+    bucket: string | null = null
 ): Promise<Response> {
     // Require a valid API key
     if (!hasValidApiKey || !apiKey) {
@@ -2276,9 +2294,9 @@ async function handleRateLimitEndpoint(
         });
     }
 
-    // Query the rate limiter DO for current status (without incrementing). An agent's key reports its account
-    // key's bucket, which it spends from (oxjob #1697).
-    const rateLimitKey = `credits:${budgetKey || apiKey}`;
+    // Query the rate limiter DO for current status (without incrementing): the bucket the key spends from, its
+    // person's (creditsBucketFor; oxjobs #1697, #1725).
+    const rateLimitKey = `credits:${bucket || apiKey}`;
     const id = env.RATE_LIMITER.idFromName(rateLimitKey);
     const limiter = env.RATE_LIMITER.get(id);
 

@@ -139,7 +139,7 @@ describe('the per-second cap on the API path (oxjob #1689)', () => {
 
     it("a listed user's key gets 500/s, with its daily credits unchanged", async () => {
         const { checks, count } = await burst(RECORD, 120, { headers: key('ssr-key') });
-        expect(checks[0]).toEqual({ bucket: 'credits:ssr-key', dailyLimit: 1_000_000, perSecondLimit: 500 });
+        expect(checks[0]).toEqual({ bucket: `credits:user:${SSR_USER}`, dailyLimit: 1_000_000, perSecondLimit: 500 });
         expect(count(200)).toBe(120);
     });
 
@@ -150,7 +150,7 @@ describe('the per-second cap on the API path (oxjob #1689)', () => {
 
     it('an unlisted paid key keeps 50/s: the 51st request in the same instant is refused', async () => {
         const { checks, count } = await burst(RECORD, 60, { headers: key('other-key') });
-        expect(checks[0]).toEqual({ bucket: 'credits:other-key', dailyLimit: 1_000_000, perSecondLimit: 50 });
+        expect(checks[0]).toEqual({ bucket: 'credits:user:user-SomeoneElse1', dailyLimit: 1_000_000, perSecondLimit: 50 });
         expect(count(200)).toBe(50);
         expect(count(429)).toBe(10);
     });

@@ -229,18 +229,18 @@ describe('two key states: a key an agent asked for works only once its person cl
     });
 });
 
-describe("one free day per person: an agent's key spends from its account key's bucket", () => {
-    it('counts in the account bucket', async () => {
+describe("one free day per person: an agent's key spends from its person's bucket", () => {
+    it('counts in the person bucket', async () => {
         const { res, checks } = await runWorker('/works?api_key=AGENTKEY', {
             env: HD, fetch: async () => new Response(LIST, { status: 200, headers: { 'Content-Type': 'application/json' } }),
         });
         expect(res.status).toBe(200);
-        expect(checks[0]).toMatchObject({ bucket: 'credits:ACCOUNTK', dailyLimit: 10000 });
+        expect(checks[0]).toMatchObject({ bucket: 'credits:user:user-g1', dailyLimit: 10000 });
     });
 
     it('is refused when the account spent its day on its own key', async () => {
         const { res } = await runWorker('/works?api_key=AGENTKEY', {
-            env: HD, buckets: { 'credits:ACCOUNTK': { counter: { count: 10000, date: today() } } },
+            env: HD, buckets: { 'credits:user:user-g1': { counter: { count: 10000, date: today() } } },
         });
         expect(res.status).toBe(429);
     });
