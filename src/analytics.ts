@@ -52,6 +52,15 @@ async function readEsTookFromBody(resp: Response): Promise<number | null> {
     }
 }
 
+// The person behind a request's key (oxjob #1725), set once after the key check and logged as blob9 by every call
+// site, so a key string the person has since rotated away can still be traced to them (30 Oct: a farm rotated 5,768
+// keys in a day, and the doorman, which maps key strings to accounts, could trace 86). Weak: gone with the request.
+const REQUEST_PERSON = new WeakMap<Request, string>();
+
+export function setRequestPerson(req: Request, userId: string | null): void {
+    if (userId) REQUEST_PERSON.set(req, userId);
+}
+
 export function logAnalytics(params: {
     ctx: ExecutionContext;
     env: { ANALYTICS: AnalyticsEngineDataset; VERIFIED_ASSISTANT_TOKEN?: string };
@@ -114,7 +123,8 @@ export function logAnalytics(params: {
                         params.scope,                                              // blob5: scope
                         params.req.headers.get('User-Agent') || '',               // blob6: user agent
                         params.req.headers.get('Referer') || '',                  // blob7: referrer
-                        params.endpointType || 'unknown'                          // blob8: endpoint type (singleton, list, text, etc.)
+                        params.endpointType || 'unknown',                         // blob8: endpoint type (singleton, list, text, etc.)
+                        REQUEST_PERSON.get(params.req) ?? ''                      // blob9: the key's person (user id; empty for org keys and keyless)
                     ],
 
                     // Doubles: numeric data (for aggregation/math)

@@ -110,3 +110,20 @@ describe('prepaid credits are billed to the person (oxjob #1725)', () => {
         expect(db.writes).toEqual([]);
     });
 });
+
+describe('every logged request names its key\'s person (Analytics Engine blob9; oxjob #1725)', () => {
+    it("a personal key's row carries its user id, whichever key it was; an org key's and a keyless row carry none", async () => {
+        for (const [k, want] of [['rot-old', 'user-r1'], ['rot-agent', 'user-r1'], ['org-key', '']] as const) {
+            const { rows } = await runWorker('/works', { headers: key(k), env: HD });
+            expect(rows.map(r => r.blobs[8])).toEqual([want]);
+        }
+        const { rows } = await runWorker('/works');
+        expect(rows.map(r => r.blobs[8])).toEqual(['']);
+    });
+
+    it('a refused request is traced too', async () => {
+        const { res, rows } = await runWorker('/works', { headers: key('rot-new'), env: HD, buckets: spent('credits:user:user-r1') });
+        expect(res.status).toBe(429);
+        expect(rows.map(r => r.blobs[8])).toEqual(['user-r1']);
+    });
+});

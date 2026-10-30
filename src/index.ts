@@ -5,7 +5,7 @@ import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collecti
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER } from "./creditReconcile";
-import { logAnalytics, shouldSampleEsTook } from "./analytics";
+import { logAnalytics, setRequestPerson, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
@@ -419,7 +419,7 @@ const handler = {
         // pay→usable race recovery on the 429 path (oxjob #409).
         let usedCachedAuth = false;
         let activationPending = false;  // oxjob #1697
-        let budgetKey: string | null = null;  // oxjob #1697: the key whose daily bucket this one spends from
+        let creditsBucket: string | null = null;  // a valid key's daily bucket, `credits:<this>` (creditsBucketFor)
         let keyUserId: string | null = null;  // the key's person (null for org keys, and when the lookup failed open)
 
         if (apiKey) {
@@ -479,8 +479,9 @@ const handler = {
                 userPlan = authResult.plan ?? null;
                 keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
                 activationPending = authResult.activationPending === true;
-                budgetKey = authResult.budgetKey ?? null;
                 keyUserId = authResult.userId ?? null;
+                creditsBucket = creditsBucketFor(apiKey, authResult.budgetKey ?? null, keyUserId);
+                setRequestPerson(req, keyUserId);
                 // cacheRefreshed === true means we just read the DB; false/undefined
                 // means this balance came from the (≤60s, per-isolate) cache.
                 usedCachedAuth = authResult.cacheRefreshed !== true;
@@ -536,7 +537,7 @@ const handler = {
                 // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
                 // from the bucket the charges land in, billed to the person (one balance per person, any of their keys).
                 if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
-                    const wbRateLimitKey = `credits:${creditsBucketFor(apiKey, budgetKey, keyUserId)}`;
+                    const wbRateLimitKey = `credits:${creditsBucket}`;
                     ctx.waitUntil(
                         writebackOnetimeCredits(env, apiKey, keyUserId, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
                     );
@@ -700,8 +701,7 @@ const handler = {
                     onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
                 }
             }
-            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt,
-                apiKey ? creditsBucketFor(apiKey, budgetKey, keyUserId) : null);
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt, creditsBucket);
         }
 
         // rerank (oxjob #1521): `rerank=true` in the URL, or `"rerank": true` in a POST body (the
@@ -828,8 +828,8 @@ const handler = {
         // request (14 Oct: 1,123 /64s took 3.33M credits over 39K addresses). IPv4 stays per address.
         // A key spends from its person's bucket (creditsBucketFor; oxjobs #1697, #1725): one day per person, whichever
         // of their keys they use and however often they rotate it.
-        // apiKey is set here only for a key that validated (an invalid one on a changefiles listing was cleared above).
-        const identifier = (apiKey && creditsBucketFor(apiKey, budgetKey, keyUserId)) || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
+        // creditsBucket is set only for a key that validated (an invalid one on a changefiles listing was cleared above).
+        const identifier = creditsBucket || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
         const rateLimitKey = verifiedAssistant ? `${scope}:verified-assistant:${identifier}` : `${scope}:${identifier}`;
         const limit = maxCreditsPerDay;
 
@@ -2043,9 +2043,7 @@ async function writebackOnetimeCredits(
             // By person when the key has one (oxjob #1725): a retired key's api_key is no longer on the users row, so
             // a write by key string matched nothing and its prepaid spend was never billed.
             await client.query(
-                userId
-                    ? "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE id = $2"
-                    : "UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE api_key = $2",
+                `UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE ${userId ? "id" : "api_key"} = $2`,
                 [consumed, userId ?? apiKey]
             );
         } catch (dbError) {
