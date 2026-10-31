@@ -53,8 +53,8 @@ async function readEsTookFromBody(resp: Response): Promise<number | null> {
 }
 
 // The person behind a request's key (oxjob #1725), set once after the key check and logged as blob9 by every call
-// site, so a key string the person has since rotated away can still be traced to them (30 Oct: a farm rotated 5,768
-// keys in a day, and the doorman, which maps key strings to accounts, could trace 86). Weak: gone with the request.
+// site, so a key string the person has since rotated away can still be traced to them (users-api keeps no key history).
+// Weak: gone with the request.
 const REQUEST_PERSON = new WeakMap<Request, string>();
 
 export function setRequestPerson(req: Request, userId: string | null): void {

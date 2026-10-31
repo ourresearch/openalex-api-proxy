@@ -118,7 +118,7 @@ interface ApiKeyAuth {
 /**
  * The daily credits bucket a valid key spends from: `credits:<this>` (oxjob #1725). Every key of one person shares one:
  * the current key, a retired key still in its grace window, and every key an AI agent asked for. So rotating a key buys
- * no fresh day (30 Oct: one farm rotated 5,140 keys in a day, 10K credits each). Org keys (no person) and a lookup that
+ * no fresh day. Org keys (no person) and a lookup that
  * failed open keep the old naming: the account key's bucket for an agent key (budgetKey), else the key's own.
  */
 export function creditsBucketFor(apiKey: string, budgetKey: string | null, userId: string | null): string {

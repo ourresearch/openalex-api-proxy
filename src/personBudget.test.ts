@@ -1,6 +1,5 @@
-// One daily budget per person, whichever of their keys they use (oxjob #1725). On 30 Oct a farm rotated each free
-// account's key every ~5 min (users-api /api-key/rotate) and the proxy, which named the bucket by the key string,
-// gave every new string a fresh 10K: 5,140 keys, 44M credits in a day. Driven through the whole Worker.
+// One daily budget per person, whichever of their keys they use (oxjob #1725). The bucket used to be named by the key
+// string, so rotating a key (users-api /api-key/rotate) started a fresh day. Driven through the whole Worker.
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { creditsBucketFor } from './index';
 import { runWorker, today } from './testHarness';
