@@ -1,6 +1,7 @@
 import { splitCharge } from "./creditReconcile";
 import { reportError, withErrorReporting, Invocation, SentryEnv } from './sentry';
 import { checkSemanticGate, newSemanticGateState } from "./semanticGate";
+import { checkFirstDollar, FirstDollarState, FIRST_DOLLAR_CREDITS } from "./firstDollar";
 
 interface TokenBucket {
     tokens: number;
@@ -26,6 +27,10 @@ export class RateLimiter implements DurableObject {
     private perSecondBucket: TokenBucket | null = null;
     private dailyCounter: DailyCounter | null = null;
     private onetimeCounter: OnetimeCounter | null = null;
+    // A new free account's first $1 (oxjob #1740; firstDollar.ts). `spent` rides in the 'counter' value as `fd` (no extra
+    // storage key, read or write); tokens start full (the refill caps them at the pace).
+    private firstDollar: FirstDollarState = { spent: 0, tokens: Infinity, lastRefill: 0 };
+    private firstDollarPace = 0;  // the pace the last /check applied; /charge's settle-ups count against it too
     private semanticGate = newSemanticGateState(); // one semantic search a second (semanticGate.ts)
     private lastThrottleTime: number = 0; // oxjob #166: admin rate-throttle
     private lastBooleanTime: number = 0; // oxjob #521/#677: rate limit for >5-operator boolean searches
@@ -40,7 +45,8 @@ export class RateLimiter implements DurableObject {
     private async loadFromStorage(): Promise<void> {
         const today = new Date().toISOString().split('T')[0];
         try {
-            const stored = await this.state.storage.get<{ count: number; date: string }>('counter');
+            const stored = await this.state.storage.get<{ count: number; date: string; fd?: number }>('counter');
+            this.firstDollar.spent = stored?.fd ?? 0;  // never resets at midnight
             this.dailyCounter = {
                 count: (stored?.date === today) ? stored.count : 0,
                 date: today,
@@ -65,13 +71,19 @@ export class RateLimiter implements DurableObject {
         }
     }
 
+    // The stored 'counter' value. `fd` (first-dollar spend) appears only for paced accounts.
+    private counterValue(): { count: number; date: string; fd?: number } {
+        const { count, date } = this.dailyCounter!;
+        return this.firstDollar.spent > 0 ? { count, date, fd: this.firstDollar.spent } : { count, date };
+    }
+
     private async persist(): Promise<void> {
         const writes: Array<{ key: string; value: unknown; counter: { dirty: boolean; lastPersisted: number } }> = [];
 
         if (this.dailyCounter?.dirty) {
             writes.push({
                 key: 'counter',
-                value: { count: this.dailyCounter.count, date: this.dailyCounter.date },
+                value: this.counterValue(),
                 counter: this.dailyCounter
             });
         }
@@ -114,7 +126,7 @@ export class RateLimiter implements DurableObject {
     // Settle writes (/refund, /charge) persist at once: a DO eviction before the next
     // /check would otherwise lose them, and prepaid credits are real money.
     private async persistDailyNow(): Promise<void> {
-        await this.state.storage.put('counter', { count: this.dailyCounter!.count, date: this.dailyCounter!.date });
+        await this.state.storage.put('counter', this.counterValue());
         this.dailyCounter!.dirty = false;
         this.dailyCounter!.lastPersisted = Date.now();
     }
@@ -135,6 +147,7 @@ export class RateLimiter implements DurableObject {
             consumedWriteback?: number;
             intervalMs?: number;
             search?: string;
+            firstDollarPace?: number;  // credits per 5 minutes while a new free account spends its first $1 (oxjob #1740)
         }>();
         const { dailyLimit, perSecondLimit, credits = 1, onetimeBalance = 0 } = body;
 
@@ -304,6 +317,10 @@ export class RateLimiter implements DurableObject {
             const onetimeAvailable = Math.max(0, onetimeBalance - this.onetimeCounter!.consumed);
             const split = splitCharge(credits, dailyLimit - this.dailyCounter!.count, onetimeAvailable);
 
+            if (this.firstDollarPace > 0 && this.firstDollar.spent < FIRST_DOLLAR_CREDITS) {
+                this.firstDollar.spent += credits;   // a query priced after it ran (oxjob #1740): its bucket goes into debt
+                this.firstDollar.tokens -= credits;
+            }
             if (split.daily > 0) {
                 this.dailyCounter!.count += split.daily;
                 await this.persistDailyNow();
@@ -344,7 +361,26 @@ export class RateLimiter implements DurableObject {
             });
         }
 
-        // --- 2. Dual-Pool Draw-Down ---
+        // --- 2. A new free account's first $1 (oxjob #1740) ---
+        // Refunded requests stay counted (spent and bucket): the pace still bounds the rate, so failing on purpose can
+        // only lift it as slowly as spending would.
+        const pace = body.firstDollarPace ?? 0;
+        const paced = pace > 0 && this.firstDollar.spent < FIRST_DOLLAR_CREDITS;
+        this.firstDollarPace = paced ? pace : 0;
+        if (paced) {
+            const verdict = checkFirstDollar(this.firstDollar, pace, credits, now);
+            if (!verdict.ok) {
+                return Response.json({
+                    success: false,
+                    remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
+                    onetimeRemaining: Math.max(0, onetimeBalance - this.onetimeCounter!.consumed),
+                    retryAfter: verdict.retryAfter,
+                    limitType: 'first_dollar'
+                });
+            }
+        }
+
+        // --- 3. Dual-Pool Draw-Down ---
         const dailyRemaining = dailyLimit - this.dailyCounter!.count;
         const onetimeAvailable = Math.max(0, onetimeBalance - this.onetimeCounter!.consumed);
         let fromOnetime = false;
@@ -381,7 +417,12 @@ export class RateLimiter implements DurableObject {
         // Decrement per-second token
         this.perSecondBucket.tokens -= 1;
 
-        // --- 3. Persistence Strategy ---
+        if (paced) {  // paced accounts draw from the daily pool, so the counter write below carries `fd`
+            this.firstDollar.spent += credits;
+            this.firstDollar.tokens -= credits;
+        }
+
+        // --- 4. Persistence Strategy ---
         // Mark daily dirty and schedule alarm if needed
         if (!fromOnetime && !this.dailyCounter!.dirty) {
             this.dailyCounter!.dirty = true;

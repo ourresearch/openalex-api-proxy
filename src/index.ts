@@ -12,6 +12,7 @@ import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
 import { syncFieldInParams, requestOqlText, mightNameSyncField, readXQuery, syncFieldInXQuery, oqlSyncMessage, DAILY_SYNC_PLANS } from "./syncGate";
 import { semanticSearchKey } from "./semanticGate";
+import { firstDollarMessage, firstDollarPaceFor } from "./firstDollar";
 import { isChangefilesBrowsePath, isChangefileDownloadPath, isSnapshotCredentialsPath } from "./changefilesPaths";
 import { normalizePath, trimTrailingSlashes } from "./paths";
 import { mintUiToken, networkOf, verifyUiToken, verifyTurnstile } from "./uiToken";
@@ -62,6 +63,9 @@ export interface Env extends SentryEnv {
     FORCE_HEALTH_STATE?: string;     // plain env var (keep_vars)
     // oxjob #1433: the same override for the semantic ladder (free and anonymous semantic searches).
     FORCE_SEMANTIC_HEALTH_STATE?: string;  // plain env var (keep_vars)
+    // oxjob #1740: credits per 5 minutes a new free account spends its first $1 at (firstDollar.ts). Unset = 1,000;
+    // "0" = off.
+    FIRST_DOLLAR_PACE_CREDITS?: string;  // plain env var (keep_vars)
     // oxjob #521 WS-3 v3.5: Slack incoming-webhook URL for episode alerts
     // (ORANGE/RED engaged, RED escalation, recovered). Unset = alerts inert.
     SLACK_WEBHOOK_URL?: string;      // Worker secret
@@ -112,6 +116,9 @@ interface ApiKeyAuth {
     // The key whose daily bucket this key spends from, when not its own: an agent's key shares its account key's
     // day, so one person gets one free day (oxjob #1697/#1692; api_keys_view.budget_key).
     budgetKey?: string | null;
+    // When the key's account was made (ms; api_keys_view.account_created, users-api migration 119): a free account made
+    // after the first-$1 pace went live spends its first $1 slowly (oxjob #1740; firstDollar.ts). Null for org keys.
+    accountCreated?: number | null;
     cacheRefreshed?: boolean;
 }
 
@@ -421,6 +428,7 @@ const handler = {
         let activationPending = false;  // oxjob #1697
         let creditsBucket: string | null = null;  // a valid key's daily bucket, `credits:<this>` (creditsBucketFor)
         let keyUserId: string | null = null;  // the key's person (null for org keys, and when the lookup failed open)
+        let accountCreated: number | null = null;  // when the key's account was made (oxjob #1740)
 
         if (apiKey) {
             const authResult = await checkApiKey(apiKey, env);
@@ -480,6 +488,7 @@ const handler = {
                 keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
                 activationPending = authResult.activationPending === true;
                 keyUserId = authResult.userId ?? null;
+                accountCreated = authResult.accountCreated ?? null;
                 creditsBucket = creditsBucketFor(apiKey, authResult.budgetKey ?? null, keyUserId);
                 setRequestPerson(req, keyUserId);
                 // cacheRefreshed === true means we just read the DB; false/undefined
@@ -857,6 +866,8 @@ const handler = {
         // assistants are never matched. In shadow it records what an entry would refuse (ENFORCE_AE), changing nothing.
         const freeAccount = keyUserId && !trustedUi && !verifiedAssistant
             && isFreeSemanticCaller(hasValidApiKey, userPlan, onetimeCreditsBalance, isGrandfathered, maxCreditsPerDay) ? keyUserId : null;
+        // The same free accounts, if made after the pace went live, spend their first $1 slowly (oxjob #1740).
+        const firstDollarPace = firstDollarPaceFor(Boolean(freeAccount), accountCreated, env.FIRST_DOLLAR_PACE_CREDITS);
         const enforceHit = ((!apiKey && !trustedUi && !verifiedAssistant) || freeAccount)
             ? await matchEnforcement(await loadEnforcement(env.ENFORCEMENT, Date.now()),
                 apiKeysFacts(req, url.searchParams.get("mailto"), refererHostOf(req.headers.get("Referer"))), Date.now(), freeAccount)
@@ -1140,17 +1151,20 @@ const handler = {
             retryAfter?: number;
             remaining?: number;
             onetimeRemaining?: number;
-            limitType?: 'per_second' | 'daily';
+            limitType?: 'per_second' | 'daily' | 'first_dollar';
             creditsUsed?: number;
             creditsRequired?: number;
             fromOnetime?: boolean;
         };
 
+        // Built at call time: the top-up recheck below reruns it with the fresh prepaid balance (and a person who just
+        // bought credit is no longer paced).
+        const checkBody = () => JSON.stringify({
+            dailyLimit: limit, perSecondLimit, credits: creditCost, onetimeBalance: onetimeCreditsBalance,
+            firstDollarPace: onetimeCreditsBalance > 0 ? 0 : firstDollarPace,
+        });
         try {
-            rateLimitResult = await limiter.fetch("http://internal/check", {
-                method: "POST",
-                body: JSON.stringify({ dailyLimit: limit, perSecondLimit, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
-            }).then(res => res.json());
+            rateLimitResult = await limiter.fetch("http://internal/check", { method: "POST", body: checkBody() }).then(res => res.json());
         } catch (error) {
             // If DO fails, allow the request through but log the error
             console.error("Rate limiter DO error:", error);
@@ -1181,10 +1195,8 @@ const handler = {
                     onetimeCreditsBalance = freshOnetime;
                     onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
                     try {
-                        rateLimitResult = await limiter.fetch("http://internal/check", {
-                            method: "POST",
-                            body: JSON.stringify({ dailyLimit: limit, perSecondLimit, credits: creditCost, onetimeBalance: onetimeCreditsBalance })
-                        }).then(res => res.json());
+                        rateLimitResult = await limiter.fetch("http://internal/check", { method: "POST", body: checkBody() })
+                            .then(res => res.json());
                     } catch (error) {
                         console.error("Rate limiter DO error (post-topup recheck):", error);
                         reportError(error, { site: "rate_limiter_do_topup_recheck" });
@@ -1203,6 +1215,8 @@ const handler = {
             let message: string;
             if (isPerSecond) {
                 message = `Rate limit exceeded: ${perSecondLimit} requests per second. Please slow down.`;
+            } else if (rateLimitResult.limitType === 'first_dollar') {
+                message = firstDollarMessage(creditsToUsd(firstDollarPace), rateLimitResult.retryAfter ?? 1);
             } else if (!apiKey) {
                 // Anonymous: the exhausted budget is the free per-IP one, shared by
                 // everyone behind the same NAT (an office, a campus). Say so, and say
@@ -1258,7 +1272,7 @@ const handler = {
                 apiKey,
                 req,
                 url,
-                scope,
+                scope: rateLimitResult.limitType === 'first_dollar' ? 'first-dollar' : scope,  // oxjob #1740
                 responseTime: Date.now() - startTime,
                 statusCode: 429,
                 rateLimit: limit,
@@ -1925,21 +1939,10 @@ async function checkApiKey(apiKey: string, env: Env): Promise<ApiKeyAuth> {
     const now = Date.now();
 
     if (cached && (now - cached.cachedAt) < CACHE_TTL) {
+        // Every field the lookup stored (a field-by-field copy here once dropped each new one on cache hits, #1740).
+        const { cachedAt: _cachedAt, ...auth } = cached;
         return {
-            valid: cached.valid,
-            error: cached.error,
-            maxPerDay: cached.maxPerDay,
-            maxCreditsPerDay: cached.maxCreditsPerDay,
-            isGrandfathered: cached.isGrandfathered,
-            onetimeCreditsBalance: cached.onetimeCreditsBalance,
-            onetimeCreditsExpiresAt: cached.onetimeCreditsExpiresAt,
-            plan: cached.plan,
-            rateThrottled: cached.rateThrottled,
-            throttleScope: cached.throttleScope,
-            userId: cached.userId,
-            orgId: cached.orgId,
-            activationPending: cached.activationPending,
-            budgetKey: cached.budgetKey,
+            ...auth,
             cacheRefreshed: false
         };
     }
@@ -1980,6 +1983,7 @@ async function checkApiKey(apiKey: string, env: Env): Promise<ApiKeyAuth> {
             orgId: (row.org_id as string) ?? null,
             activationPending: row.activation_pending === true,
             budgetKey: typeof row.budget_key === "string" && row.budget_key ? row.budget_key : null,
+            accountCreated: row.account_created ? new Date(row.account_created as string | Date).getTime() : null,
             cacheRefreshed: true
         };
 
