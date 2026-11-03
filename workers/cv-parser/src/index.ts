@@ -12,8 +12,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { extractText } from './extractText';
 import { parsePublicationsJson } from './parseClaudeResponse';
 import {
-  searchOpenAlex,
+  matchPublication,
   setApiKey,
+  setJevKey,
   type CvPublication,
   type MatchedWork,
 } from './openalexMatcher';
@@ -22,6 +23,7 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   OPENALEX_API_BASE?: string; // Direct upstream URL to avoid proxy loop
   OPENALEX_API_KEY?: string;  // API key to avoid 429 rate limits
+  TYPESAFE_API_KEY?: string;  // Jev, which decides which search result is the publication (oxjob #1330)
   USERS_API_BASE?: string;    // Where signed-in callers are checked (default user.openalex.org)
 }
 
@@ -130,6 +132,7 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
   // Step 3: Match against OpenAlex (with rate limiting)
   // Set API key for authenticated requests (avoids 429 rate limits)
   setApiKey(env.OPENALEX_API_KEY);
+  setJevKey(env.TYPESAFE_API_KEY);
   console.log('Matching against OpenAlex...');
   const matched: MatchedWork[] = [];
   const unmatched: CvPublication[] = [];
@@ -137,8 +140,9 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
   for (const pub of publications) {
     try {
       const apiBase = env.OPENALEX_API_BASE || 'https://api.openalex.org';
-      const oaWork = await searchOpenAlex(pub, apiBase, env.OPENALEX_API_KEY);
-      if (oaWork) {
+      const found = await matchPublication(pub, apiBase);
+      if (found) {
+        const oaWork = found.work;
         // Check if this work is already linked to the author
         const authorShortId = authorId
           .replace('https://openalex.org/', '')
@@ -160,6 +164,7 @@ async function handleParseCv(request: Request, env: Env): Promise<ParseCvRespons
             primary_location: oaWork.primary_location,
           },
           alreadyLinked: !!isAlreadyLinked,
+          match: { matcher: found.matcher, p: found.p },
         });
       } else {
         unmatched.push(pub);

@@ -8,10 +8,15 @@
  *   4. Keyword search with year filter (if year available)
  *   5. Short title / last-resort keyword search
  *
+ * In strategies 2-5, Jev (TypeSafe's decision model) decides which result, if any, is the publication (sameWork.ts,
+ * oxjob #1330); the word-overlap `bestMatch` decides only when Jev can't answer.
+ *
  * The apiBase parameter controls which URL to call. When running
  * inside the proxy's service binding, set OPENALEX_API_BASE to the
  * upstream backend so sub-requests don't loop back through the proxy.
  */
+
+import { jevPick, citationLine, MAX_CANDIDATES } from './sameWork';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -32,6 +37,17 @@ export interface MatchedWork {
     primary_location: any;
   };
   alreadyLinked: boolean;
+  /** How the work was chosen: by DOI, by Jev (with its probability), or by the word-overlap fallback. */
+  match: MatchInfo;
+}
+
+export interface MatchInfo {
+  matcher: 'doi' | 'jev' | 'heuristic';
+  p: number | null;
+}
+
+export interface PublicationMatch extends MatchInfo {
+  work: any;
 }
 
 // ─── Public API ──────────────────────────────────────────────
@@ -45,6 +61,14 @@ export async function searchOpenAlex(
   apiBase: string = 'https://api.openalex.org',
   apiKey?: string
 ): Promise<any | null> {
+  return (await matchPublication(publication, apiBase))?.work ?? null;
+}
+
+/** searchOpenAlex, plus how the work was chosen. The OpenAlex and Jev keys come from setApiKey and setJevKey. */
+export async function matchPublication(
+  publication: CvPublication,
+  apiBase: string = 'https://api.openalex.org'
+): Promise<PublicationMatch | null> {
   // The DOI and year come from the model, which read them from the uploaded CV: untrusted, and spliced into URLs
   // fetched with our API key. Only a DOI-shaped DOI (each segment encoded) and a 4-digit year are used (oxjob #1762).
   const year = cleanYear(publication.year);
@@ -58,7 +82,7 @@ export async function searchOpenAlex(
       );
       if (parsed?.id) {
         console.log(`  DOI match: ${cleanDoi} → "${parsed.display_name?.substring(0, 60)}"`);
-        return parsed;
+        return { work: parsed, matcher: 'doi', p: null };
       }
     }
   }
@@ -78,7 +102,7 @@ export async function searchOpenAlex(
   const result1 = await fetchJson(
     `${apiBase}/works?filter=title.search:${titleEncoded}&per_page=10`
   );
-  const match1 = bestMatch(result1?.results, publication, 0.35);
+  const match1 = await pick(result1?.results, publication, year, 0.35);
   if (match1) return match1;
 
   // Strategy 3: Full-text search — catches partial title matches and subtitles
@@ -86,7 +110,7 @@ export async function searchOpenAlex(
   const result2 = await fetchJson(
     `${apiBase}/works?search=${titleEncoded}&per_page=10`
   );
-  const match2 = bestMatch(result2?.results, publication, 0.35);
+  const match2 = await pick(result2?.results, publication, year, 0.35);
   if (match2) return match2;
 
   // Strategy 4: Keywords + year filter (tighter constraint, different result set)
@@ -97,7 +121,7 @@ export async function searchOpenAlex(
     const result3 = await fetchJson(
       `${apiBase}/works?search=${encodeURIComponent(keyWords)}${yearFilter}&per_page=10`
     );
-    const match3 = bestMatch(result3?.results, publication, 0.3);
+    const match3 = await pick(result3?.results, publication, year, 0.3);
     if (match3) return match3;
 
     // Strategy 4b: Keywords without year (in case year is wrong or missing)
@@ -106,7 +130,7 @@ export async function searchOpenAlex(
       const result3b = await fetchJson(
         `${apiBase}/works?search=${encodeURIComponent(keyWords)}&per_page=10`
       );
-      const match3b = bestMatch(result3b?.results, publication, 0.35);
+      const match3b = await pick(result3b?.results, publication, year, 0.35);
       if (match3b) return match3b;
     }
   }
@@ -119,7 +143,7 @@ export async function searchOpenAlex(
     const result5 = await fetchJson(
       `${apiBase}/works?search=${encodeURIComponent(firstWords)}${yearFilter}&per_page=10`
     );
-    const match5 = bestMatch(result5?.results, publication, 0.4);
+    const match5 = await pick(result5?.results, publication, year, 0.4);
     if (match5) return match5;
   }
 
@@ -277,6 +301,30 @@ export function bestMatch(
   return null;
 }
 
+/**
+ * One strategy's answer. Jev chooses among the five results whose titles are closest to the publication's (shown in
+ * the API's order, which is what #1318 measured), and its "none of these" stands: the next strategy runs. Only when
+ * Jev can't answer (no key, timeout, error) does the word-overlap `bestMatch` decide, as before #1330.
+ */
+async function pick(
+  results: any[] | undefined,
+  publication: CvPublication,
+  year: number | null,
+  threshold: number
+): Promise<PublicationMatch | null> {
+  if (!results || results.length === 0) return null;
+  const shown = results
+    .map((r, i) => ({ r, i, s: titleSimilarity(publication.title, r.display_name) }))
+    .sort((a, b) => b.s - a.s) // stable: equal scores keep the API's order
+    .slice(0, MAX_CANDIDATES)
+    .sort((a, b) => a.i - b.i)
+    .map((x) => x.r);
+  const jev = await jevPick(citationLine(publication, year), year, shown, _jevKey);
+  if (jev) return jev.work ? { work: jev.work, matcher: 'jev', p: jev.p } : null;
+  const fallback = bestMatch(results, publication, threshold);
+  return fallback ? { work: fallback, matcher: 'heuristic', p: null } : null;
+}
+
 // ─── Title cleaning ──────────────────────────────────────────
 
 function cleanTitle(title: string): string {
@@ -303,6 +351,10 @@ export function extractKeyWords(title: string): string {
 // Module-level API key — set once per request via setApiKey()
 let _apiKey: string | undefined;
 export function setApiKey(key?: string) { _apiKey = key; }
+
+// Jev key (worker secret TYPESAFE_API_KEY), set once per request via setJevKey(); unset = word-overlap matching only.
+let _jevKey: string | undefined;
+export function setJevKey(key?: string) { _jevKey = key; }
 
 async function fetchJson(url: string): Promise<any | null> {
   try {
