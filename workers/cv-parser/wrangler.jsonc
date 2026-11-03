@@ -6,7 +6,10 @@
   // workers.dev URL stays on because the GUI calls it directly.
   "preview_urls": false,
   "compatibility_date": "2025-10-03",
-  "compatibility_flags": ["nodejs_compat"],
+  // global_fetch_strictly_public (oxjob #1330): when the proxy calls this worker through its service binding
+  // (api.openalex.org/cv-parse), fetches to api.openalex.org otherwise skip the proxy and go to the origin, which
+  // answers 522, so every publication came back unmatched on that route.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "placement": {
     "mode": "smart"
   },
