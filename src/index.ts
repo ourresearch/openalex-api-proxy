@@ -1511,9 +1511,21 @@ const handler = {
                 // the OQL execute route accepts the same query via a POST body,
                 // which has no request-line cap.
                 const isOql = openalexUrl.searchParams.has("oql");
+                // Name the parameter that fills most of the line (a long filter
+                // list is not a long 'search'). Counted as forwarded, like the line.
+                let longestParam = "";
+                let longestParamBytes = 0;
+                openalexUrl.searchParams.forEach((value, key) => {
+                    const bytes = new URLSearchParams({ [key]: value }).toString().length;
+                    if (bytes > longestParamBytes) {
+                        longestParam = key;
+                        longestParamBytes = bytes;
+                    }
+                });
+                const mostly = longestParamBytes * 2 > requestLineBytes ? `, mostly the '${longestParam}' value` : "";
                 const message = isOql
                     ? `Your OQL query URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit for URLs (roughly 8 KB). This query is too long to share as a URL — submit it via POST to / with a JSON body {"oql": "..."}, which has no length limit.`
-                    : `Your request URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit (roughly 8 KB, mostly the 'search' value). Split a large Boolean query into smaller chunks, request each separately, and combine the returned IDs client-side. See https://docs.openalex.org/guides/searching#large-boolean-queries`;
+                    : `Your request URL is ${requestLineBytes} bytes, over the ${MAX_REQUEST_LINE_BYTES}-byte limit (roughly 8 KB${mostly}). Send the query as OQL in a POST body, which has no length limit, or split a large Boolean query into smaller chunks and combine the returned IDs client-side. See https://help.openalex.org/api/searching/#large-boolean-queries`;
                 const errorResponse = new Response(JSON.stringify({
                     error: isOql ? "OQL query too long for URL" : "Request URL too long",
                     message
