@@ -4,8 +4,8 @@ import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER } from "./creditReconcile";
-import { logAnalytics, setRequestPerson, shouldSampleEsTook } from "./analytics";
+import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER, RERANK_SHED_HEADER } from "./creditReconcile";
+import { logAnalytics, markRerankShed, setRequestPerson, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
@@ -29,7 +29,8 @@ import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage,
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, enforceDailyLimit, enforceMessage } from "./enforcementList";
 import { perSecondLimitFor } from "./highRps";
 import { setOriginKey } from "./originKey";
-import { originAbortMs } from "./originAbort";
+import { originAbortMs, LONG_ORIGIN_ABORT_MS } from "./originAbort";
+import { gatewayTimeoutBody } from "./gatewayTimeout";
 
 export interface Env extends SentryEnv {
     HYPERDRIVE: Hyperdrive;
@@ -741,17 +742,20 @@ const handler = {
                 }
             }
         }
-        if (!rerankAsked && bodyAsksRerank(postBody)) {
-            rerankAsked = true;
-            if (cachedHealthLevel(env) >= 1) {
+        // A shed is told to the origin (RERANK_SHED_HEADER), which answers meta.reranked false with rerank_reason
+        // "search_busy", and logged (analytics double9), so it no longer looks like rerank was never asked (oxjob #2003).
+        let rerankShed = false;
+        if (bodyAsksRerank(postBody)) rerankAsked = true;
+        if (rerankAsked && cachedHealthLevel(env) >= 1) {
+            url.searchParams.delete('rerank');
+            if (bodyAsksRerank(postBody)) {
                 const parsed = postBody as Record<string, unknown>;
                 delete parsed.rerank;
                 rewrittenPostBody = JSON.stringify(parsed);
             }
-        }
-        if (rerankAsked && cachedHealthLevel(env) >= 1) {
-            url.searchParams.delete('rerank');
             rerankAsked = false;
+            rerankShed = true;
+            markRerankShed(req);
         }
 
         // Sync filters through OQL/OQO (oxjob #1689; see syncGate.ts): armed for a caller without a paid plan whose
@@ -1553,6 +1557,7 @@ const handler = {
         });
         if (isGrandfathered) proxyHeaders.set(GRANDFATHERED_HEADER, "1");
         if (trustedUi) proxyHeaders.set(WEBSITE_HEADER, "1");
+        if (rerankShed) proxyHeaders.set(RERANK_SHED_HEADER, "search_busy");
 
         // Only add Content-Type for POST requests
         if (req.method === "POST") {
@@ -1647,7 +1652,8 @@ const handler = {
         //
         // Probes that name a collection (`col_…`) are never cached: their count depends
         // on the collection's members and on whether it's shared by link (oxjob #646).
-        const isCountProbe = isCacheableCountProbe(
+        // A shed rerank's answer says so (oxjob #2003), so it must not be cached for plain probes of the same URL.
+        const isCountProbe = !rerankShed && isCacheableCountProbe(
             url, req.method, !!apiKey, !!req.headers.get("Authorization"),
         );
 
@@ -1686,14 +1692,14 @@ const handler = {
         } else if (isStaticMetadata) {
             fetchInit = {
                 cf: { cacheTtl: 3600, cacheEverything: true, cacheKey: `${url.origin}${metadataPath}` },
-                signal: AbortSignal.timeout(25000)
+                signal: AbortSignal.timeout(LONG_ORIGIN_ABORT_MS)
             };
         } else if (isCountProbe) {
             // Same 25s reasoning as the metadata paths: at 9s a cold miss 504s against a
             // saturated origin and the cache never populates, so the fix would do nothing.
             fetchInit = {
                 cf: { cacheTtl: 300, cacheEverything: true, cacheKey: countProbeCacheKey },
-                signal: AbortSignal.timeout(25000)
+                signal: AbortSignal.timeout(LONG_ORIGIN_ABORT_MS)
             };
         } else {
             fetchInit = { signal: AbortSignal.timeout(abortMs) };
@@ -1736,13 +1742,11 @@ const handler = {
                     status: 504,
                     anon: !apiKey
                 });
-                return addCorsHeaders(new Response(JSON.stringify({
-                    error: "Gateway timeout",
-                    message: "Your query took too long and was stopped before completing. " +
-                        "This usually means a very broad search (e.g. many OR/AND/NOT terms). " +
-                        "Please narrow the query and try again. You were not charged for this request.",
-                    reason: "query_timeout"
-                }), {
+                // Worded by request type and which clock fired: a record lookup isn't a broad search (oxjob #2003)
+                const timeoutMs = (isStaticMetadata || isCountProbe) ? LONG_ORIGIN_ABORT_MS : abortMs;
+                return addCorsHeaders(new Response(JSON.stringify(
+                    gatewayTimeoutBody(classification.type, timeoutMs, oqlText !== null)
+                ), {
                     status: 504,
                     headers: { "Content-Type": "application/json", ...Object.fromEntries(getCorsHeaders()) }
                 }));

@@ -61,6 +61,14 @@ export function setRequestPerson(req: Request, userId: string | null): void {
     if (userId) REQUEST_PERSON.set(req, userId);
 }
 
+// Requests whose rerank the proxy dropped under load (oxjob #2003). The logged URL no longer carries rerank=true, so
+// without this flag (double9) a shed request looks exactly like a plain search.
+const RERANK_SHED = new WeakSet<Request>();
+
+export function markRerankShed(req: Request): void {
+    RERANK_SHED.add(req);
+}
+
 export function logAnalytics(params: {
     ctx: ExecutionContext;
     env: { ANALYTICS: AnalyticsEngineDataset; VERIFIED_ASSISTANT_TOKEN?: string };
@@ -140,7 +148,8 @@ export function logAnalytics(params: {
                         // Derived here from the request rather than passed in, so every call site (429s,
                         // ladder 503s, gate 401s, successes) is tagged without each one remembering to.
                         isVerifiedAssistant(params.apiKey, params.req.headers.get(VERIFIED_ASSISTANT_HEADER),
-                            params.env.VERIFIED_ASSISTANT_TOKEN) ? 1 : 0
+                            params.env.VERIFIED_ASSISTANT_TOKEN) ? 1 : 0,
+                        RERANK_SHED.has(params.req) ? 1 : 0   // double9: rerank asked, dropped under load (oxjob #2003)
                     ]
                 });
             } catch (error) {

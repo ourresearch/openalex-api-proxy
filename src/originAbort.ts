@@ -10,6 +10,8 @@
  */
 export const ORIGIN_ABORT_MS = 9000;
 export const OQL_ORIGIN_ABORT_MS = 12000;
+/** The cached count-probe and static-metadata paths wait 25 s, so a cold miss can fill the cache (index.ts). */
+export const LONG_ORIGIN_ABORT_MS = 25000;
 
 export function originAbortMs(oqlText: string | null): number {
     return oqlText !== null ? OQL_ORIGIN_ABORT_MS : ORIGIN_ABORT_MS;

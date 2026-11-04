@@ -38,6 +38,11 @@ export const GRANDFATHERED_HEADER = "X-Credits-Grandfathered";
  *  origin can price a website facet (a group by on a search) at 1 credit instead of 10 (Jason, 2026-10-03). */
 export const WEBSITE_HEADER = "X-Credits-Website";
 
+/** Sent as "search_busy" when the proxy dropped the request's rerank because search is under heavy load (search-health
+ *  YELLOW or worse), so the origin answers meta.reranked false with a reason instead of no rerank field at all
+ *  (oxjob #2003). Like the headers above it is set only here; a caller's copy is never forwarded. */
+export const RERANK_SHED_HEADER = "X-Rerank-Shed";
+
 export function creditsRemainingForOrigin(remaining?: number, onetimeRemaining?: number): number {
     return Math.max(0, remaining ?? 0) + Math.max(0, onetimeRemaining ?? 0);
 }
