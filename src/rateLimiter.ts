@@ -54,8 +54,10 @@ export class RateLimiter implements DurableObject {
                 dirty: false
             };
         } catch (error) {
+            // Rethrown, so blockConcurrencyWhile resets the object and the next request reads again. Starting at 0 here
+            // gave the caller its day back once the next write overwrote the stored count (oxjob #2039).
             reportError(error, { site: 'rate_limiter_load_counter', inv: this.sentryInvocation() });
-            this.dailyCounter = { count: 0, date: today, lastPersisted: Date.now(), dirty: false };
+            throw error;
         }
 
         try {
@@ -66,8 +68,9 @@ export class RateLimiter implements DurableObject {
                 dirty: false
             };
         } catch (error) {
+            // Likewise: 0 here dropped the prepaid spend not yet written back.
             reportError(error, { site: 'rate_limiter_load_onetime', inv: this.sentryInvocation() });
-            this.onetimeCounter = { consumed: 0, lastPersisted: Date.now(), dirty: false };
+            throw error;
         }
     }
 

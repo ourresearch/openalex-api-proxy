@@ -47,3 +47,43 @@ describe('RateLimiter write-behind (oxjob #1698)', () => {
         expect((state.store.get('counter') as { count: number }).count).toBe(51);
     });
 });
+
+// oxjob #2039: a failed storage read started the object at 0, and its next write overwrote the stored count, so the
+// caller got its day (or its unbilled prepaid spend) back. Now the read failure resets the object, as the runtime does
+// when blockConcurrencyWhile's callback throws, and the next instance reads again.
+describe('RateLimiter read failure (oxjob #2039)', () => {
+    const today = () => new Date().toISOString().split('T')[0];
+
+    async function failFirstLoad(stored: Record<string, unknown>, failing: string) {
+        const state = fakeState(stored);
+        const get = state.storage.get;
+        let load: Promise<void> | undefined;
+        state.storage.get = async (k: string) => { if (k === failing) throw new Error('internal error; reference = test'); return get(k); };
+        state.blockConcurrencyWhile = (fn: () => Promise<void>) => (load = fn());
+        new RateLimiter(state as any);
+        await expect(load).rejects.toThrow('internal error');
+        state.storage.get = get;
+        state.blockConcurrencyWhile = async (fn: () => Promise<void>) => fn();
+        const limiter = new RateLimiter(state as any);
+        await new Promise(r => setTimeout(r, 0)); // let loadFromStorage finish
+        return { state, limiter };
+    }
+
+    it('keeps the day: the next instance continues from the stored count', async () => {
+        const { state, limiter } = await failFirstLoad({ counter: { count: 700, date: today() } }, 'counter');
+        expect((state.store.get('counter') as { count: number }).count).toBe(700);
+        await limiter.fetch(new Request('http://internal/check', {
+            method: 'POST', body: JSON.stringify({ dailyLimit: 1_000_000, perSecondLimit: 1000 }),
+        }));
+        await limiter.alarm();
+        expect((state.store.get('counter') as { count: number }).count).toBe(701);
+    });
+
+    it('keeps the prepaid spend not yet written back', async () => {
+        const { limiter } = await failFirstLoad({ onetime: { consumed: 300 } }, 'onetime');
+        const status = await limiter.fetch(new Request('http://internal/status', {
+            method: 'POST', body: JSON.stringify({ dailyLimit: 10_000, onetimeBalance: 1_000 }),
+        })).then(r => r.json() as Promise<{ onetime: { consumed: number } }>);
+        expect(status.onetime.consumed).toBe(300);
+    });
+});
