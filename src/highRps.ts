@@ -9,9 +9,18 @@
 // traffic, Origin/Referer and UI tokens never get it. A malformed entry is skipped: that account keeps its tier.
 
 export const DEFAULT_HIGH_RPS = 500;
-// Ceiling: a key's bucket is one Durable Object, which Cloudflare soft-limits at about 1,000 requests a second (past
-// that its calls fail, and the proxy fails open). A cap above this needs the bucket sharded first.
+// Ceiling: ten shares of BUCKET_SHARE_RPS.
 export const MAX_HIGH_RPS = 1000;
+
+// One RateLimiter object answers one request at a time, so a key capped well past the tiers spends from one object per
+// BUCKET_SHARE_RPS of its cap, each request picking one at random (oxjob #2039: on one object the website's key was
+// refused and slowed in crawler bursts while under its cap). Tier caps (50/30/10) stay on one object.
+export const BUCKET_SHARE_RPS = 100;
+
+/** How many objects a key's budget is spread over: one per BUCKET_SHARE_RPS of its per-second cap. */
+export function bucketSharesFor(perSecondLimit: number): number {
+    return Math.max(1, Math.ceil(perSecondLimit / BUCKET_SHARE_RPS));
+}
 
 export function parseHighRpsAccounts(raw: string | undefined): Map<string, number> {
     const caps = new Map<string, number>();

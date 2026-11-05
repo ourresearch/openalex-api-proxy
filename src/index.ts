@@ -27,7 +27,7 @@ import { isApiKeysPath, apiKeysHowResponse, readApiKeysBody, apiKeysFacts, apiKe
 import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./keylessNotice";
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND, CONTACT_DAILY_CREDITS } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, enforceDailyLimit, enforceMessage } from "./enforcementList";
-import { perSecondLimitFor } from "./highRps";
+import { bucketSharesFor, perSecondLimitFor } from "./highRps";
 import { setOriginKey } from "./originKey";
 import { originAbortMs, LONG_ORIGIN_ABORT_MS } from "./originAbort";
 import { gatewayTimeoutBody } from "./gatewayTimeout";
@@ -844,7 +844,6 @@ const handler = {
         // creditsBucket is set only for a key that validated (an invalid one on a changefiles listing was cleared above).
         const identifier = creditsBucket || (verifiedAssistant ? ip : networkOf(ip) ?? ip) || "anon";
         const rateLimitKey = verifiedAssistant ? `${scope}:verified-assistant:${identifier}` : `${scope}:${identifier}`;
-        const limit = maxCreditsPerDay;
 
         // oxjob #521 follow-up: tiered per-second cap. Free/anonymous clients burst
         // far above sustainable rates during saved-search batches (peaks of 100-700/s
@@ -859,9 +858,15 @@ const handler = {
         // 2026-10-15: keys of accounts listed in HIGH_RPS_ACCOUNTS get their own cap instead, default 500/s: the
         // website's server-rendering key (oxjob #1689; see highRps.ts).
         const perSecondLimit = perSecondLimitFor(maxCreditsPerDay, keyAccountIds, env.HIGH_RPS_ACCOUNTS);
+        // A cap past one object's pace spreads the key over several, each with its share of the cap and the day
+        // (bucketSharesFor; oxjob #2039). Only HIGH_RPS_ACCOUNTS caps are that high, so only our own service keys spread:
+        // their headers show one share, /rate-limit reads the unspread bucket, and the per-key semantic and boolean gates
+        // run per share. Never a key with prepaid credit: its writeback claims from the one object.
+        const shares = onetimeCreditsBalance > 0 ? 1 : bucketSharesFor(perSecondLimit);
+        const limit = Math.floor(maxCreditsPerDay / shares);
 
         // Check rate limit using Durable Object
-        const id = env.RATE_LIMITER.idFromName(rateLimitKey);
+        const id = env.RATE_LIMITER.idFromName(shares > 1 ? `${rateLimitKey}#${Math.floor(Math.random() * shares)}` : rateLimitKey);
         const limiter = env.RATE_LIMITER.get(id);
 
         // The private enforcement list (oxjob #1692; see enforcementList.ts). Keyless entries match keyless traffic;
@@ -1164,7 +1169,7 @@ const handler = {
         // Built at call time: the top-up recheck below reruns it with the fresh prepaid balance (and a person who just
         // bought credit is no longer paced).
         const checkBody = () => JSON.stringify({
-            dailyLimit: limit, perSecondLimit, credits: creditCost, onetimeBalance: onetimeCreditsBalance,
+            dailyLimit: limit, perSecondLimit: Math.ceil(perSecondLimit / shares), credits: creditCost, onetimeBalance: onetimeCreditsBalance,
             firstDollarPace: onetimeCreditsBalance > 0 ? 0 : firstDollarPace,
         });
         try {

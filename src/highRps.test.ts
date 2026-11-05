@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { RateLimiter } from './rateLimiter';
 import { mintUiToken } from './uiToken';
-import { parseHighRpsAccounts, perSecondLimitFor, DEFAULT_HIGH_RPS, MAX_HIGH_RPS } from './highRps';
+import { parseHighRpsAccounts, perSecondLimitFor, bucketSharesFor, DEFAULT_HIGH_RPS, MAX_HIGH_RPS } from './highRps';
 import worker from './index';
 
 // A keyed request looks its key up in api_keys_view. This fake database answers from KEYS; a key it doesn't hold is
@@ -24,6 +24,7 @@ db.keys.set('ssr-key', row(SSR_USER));
 db.keys.set('other-key', row('user-SomeoneElse1'));
 db.keys.set('org-key', row(null, 'org-SsrServiceOrg'));
 db.keys.set('free-key', row('user-FreeAccount1', null, 10_000));
+db.keys.set('ssr-prepaid-key', { ...row(SSR_USER), onetime_credits_balance: 50_000 });
 
 describe('parseHighRpsAccounts (oxjob #1689)', () => {
     it('reads `id` as the default cap and `id:rps` as its own', () => {
@@ -43,8 +44,14 @@ describe('parseHighRpsAccounts (oxjob #1689)', () => {
         expect([...caps]).toEqual([['user-ok', 600]]);
     });
 
-    it(`clamps a cap above ${MAX_HIGH_RPS}/s (one Durable Object's ceiling)`, () => {
+    it(`clamps a cap above ${MAX_HIGH_RPS}/s (ten objects' worth)`, () => {
         expect(parseHighRpsAccounts('user-a:5000').get('user-a')).toBe(MAX_HIGH_RPS);
+    });
+});
+
+describe('bucketSharesFor (oxjob #2039)', () => {
+    it('gives one object per 100/s of cap, and one to every tier', () => {
+        expect([10, 30, 50, 100, 101, 500, 800, MAX_HIGH_RPS].map(bucketSharesFor)).toEqual([1, 1, 1, 1, 2, 5, 8, 10]);
     });
 });
 
@@ -137,15 +144,26 @@ const key = (k: string) => ({ Authorization: `Bearer ${k}` });
 describe('the per-second cap on the API path (oxjob #1689)', () => {
     afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); db.down = false; });
 
-    it("a listed user's key gets 500/s, with its daily credits unchanged", async () => {
-        const { checks, count } = await burst(RECORD, 120, { headers: key('ssr-key') });
-        expect(checks[0]).toEqual({ bucket: `credits:user:${SSR_USER}`, dailyLimit: 1_000_000, perSecondLimit: 500 });
-        expect(count(200)).toBe(120);
+    it("a listed user's key gets 500/s and its daily credits, spread over five objects (oxjob #2039)", async () => {
+        const { checks, count } = await burst(RECORD, 200, { headers: key('ssr-key') });
+        const shares = [0, 1, 2, 3, 4].map(k => `credits:user:${SSR_USER}#${k}`);
+        for (const c of checks) {
+            expect(shares).toContain(c.bucket);
+            expect(c).toMatchObject({ dailyLimit: 200_000, perSecondLimit: 100 });
+        }
+        expect(new Set(checks.map(c => c.bucket)).size).toBe(5);
+        expect(count(200)).toBe(200);
     });
 
-    it("a listed org's key gets its own `id:rps` cap", async () => {
+    it("a listed org's key gets its own `id:rps` cap, one object per 100/s of it", async () => {
         const { checks } = await burst(RECORD, 1, { headers: key('org-key') });
-        expect(checks[0].perSecondLimit).toBe(800);
+        expect(checks[0].bucket).toMatch(/^credits:org-key#[0-7]$/);
+        expect(checks[0].perSecondLimit).toBe(100);
+    });
+
+    it('a listed key with prepaid credit stays on its one object: the writeback claims from it', async () => {
+        const { checks } = await burst(RECORD, 1, { headers: key('ssr-prepaid-key') });
+        expect(checks[0]).toEqual({ bucket: `credits:user:${SSR_USER}`, dailyLimit: 1_000_000, perSecondLimit: 500 });
     });
 
     it('an unlisted paid key keeps 50/s: the 51st request in the same instant is refused', async () => {
