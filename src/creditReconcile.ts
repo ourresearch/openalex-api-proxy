@@ -10,6 +10,19 @@ import { reportError } from "./sentry";
 /** The origin's actual price for a request, in credits; internal, never sent to clients. */
 export const ORIGIN_COST_HEADER = "X-Credits-Cost";
 
+/** Credits the origin gives back on a request (oxjob #2055: a priced Profile Doctor fix returns the rest of its hold); internal. */
+export const ORIGIN_REFUND_HEADER = "X-Credits-Refund";
+
+/**
+ * Credits a Profile Doctor response settles on the caller (oxjob #2055): what it charges (X-Credits-Cost: holds for new fixes,
+ * overruns) less what it gives back (X-Credits-Refund). Negative = a refund. Errors settle nothing (errors are free, oxjob #863;
+ * the app settles only on success). A missing or malformed header counts as 0, so a bad value can neither charge nor refund.
+ */
+export function profileFixCredits(status: number, cost: string | null, refund: string | null): number {
+    if (status >= 400) return 0;
+    return originPrice(cost, 0) - originPrice(refund, 0);
+}
+
 /** What the caller has left after the up-front charge (daily + prepaid), sent to the origin so it
  *  can refuse a plan it can't pay for before running it. */
 export const CREDITS_REMAINING_HEADER = "X-Credits-Remaining";
@@ -71,9 +84,10 @@ interface Limiter {
  */
 export async function settleCredits(
     limiter: Limiter,
-    opts: { charged: number; actual: number; dailyLimit: number; onetimeBalance: number; remaining: number; onetimeRemaining: number },
+    opts: { charged: number; actual: number; dailyLimit: number; onetimeBalance: number; remaining: number; onetimeRemaining: number;
+            fix?: boolean },   // a Profile Doctor settlement: its refunds return prepaid credits even after a writeback (rateLimiter /refund)
 ): Promise<{ remaining: number; onetimeRemaining: number }> {
-    const { charged, actual, dailyLimit, onetimeBalance } = opts;
+    const { charged, actual, dailyLimit, onetimeBalance, fix } = opts;
     const unchanged = { remaining: opts.remaining, onetimeRemaining: opts.onetimeRemaining };
     const delta = actual - charged;
     if (delta === 0) return unchanged;
@@ -81,7 +95,7 @@ export async function settleCredits(
     try {
         const result = await limiter.fetch(`http://internal${path}`, {
             method: "POST",
-            body: JSON.stringify({ dailyLimit, credits: Math.abs(delta), onetimeBalance })
+            body: JSON.stringify({ dailyLimit, credits: Math.abs(delta), onetimeBalance, ...(fix ? { fix: true } : {}) })
         }).then(res => res.json() as Promise<{ remaining: number; onetimeRemaining: number }>);
         return { remaining: result.remaining, onetimeRemaining: result.onetimeRemaining };
     } catch (error) {

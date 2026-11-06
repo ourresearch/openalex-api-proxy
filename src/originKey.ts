@@ -12,6 +12,7 @@ export interface OriginKeyEnv {
     OPENALEX_API_URL: string;
     SEARCH_API_URL?: string;
     TEXT_API_URL: string;
+    AUTHOR_FIXES_URL?: string;   // the Profile Doctor app (oxjob #2055): it bills only callers who come through here
     ORIGIN_SHARED_SECRET?: string;
 }
 
@@ -32,6 +33,6 @@ export function setOriginKey(headers: Headers, env: OriginKeyEnv, target: string
     if (!secret) return;
     const to = originOf(String(target));
     if (!to || to === "null") return;  // an opaque origin (data:, blob:) matches nothing
-    const origins = [env.OPENALEX_API_URL, env.SEARCH_API_URL, env.TEXT_API_URL].map(originOf);
+    const origins = [env.OPENALEX_API_URL, env.SEARCH_API_URL, env.TEXT_API_URL, env.AUTHOR_FIXES_URL].map(originOf);
     if (origins.includes(to)) headers.set(ORIGIN_KEY_HEADER, secret);
 }

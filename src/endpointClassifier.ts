@@ -1,8 +1,9 @@
+import { isBilledFixesRequest } from './authorFixes';
 import { splitFilterString } from './f1Validation';
 import { isChangefilesBrowsePath } from "./changefilesPaths";
 import { normalizePath } from "./paths";
 
-export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text' | 'query_text';
+export type EndpointType = 'singleton' | 'list' | 'search' | 'content' | 'semantic' | 'text' | 'query_text' | 'profile_fix';
 
 /**
  * Natural language to OQL (oxjob #1494): /query/text writes the query with a model, so it costs what the model cost
@@ -193,6 +194,12 @@ export function classifyEndpoint(
     // Text/Aboutness endpoint - ML inference (expensive)
     if (/^text\/?/.test(normalized)) {
         return { type: 'text', creditCost: 100 };
+    }
+
+    // The Profile Doctor (oxjob #2055): 0 up front; the app prices each fix and the proxy settles what it says (authorFixes.ts).
+    // Decided before the entity rules, which would read /authors/A1/fixes as an author lookup.
+    if (isBilledFixesRequest(pathname, opts.method ?? 'GET')) {
+        return { type: 'profile_fix', creditCost: 0 };
     }
 
     // Content downloads: /works/{work_id}.pdf or .grobid-xml (for content.openalex.org)

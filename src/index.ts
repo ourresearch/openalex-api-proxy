@@ -1,10 +1,10 @@
 import { isCacheableCountProbe } from './countProbe';
 import { authorizationToForward } from './forwardAuth';
-import { isAuthorFixesPath, authorFixesRequest } from './authorFixes';
+import { isAuthorFixesPath, isBilledFixesRequest, authorFixesRequest } from './authorFixes';
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, ORIGIN_COST_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER, RERANK_SHED_HEADER } from "./creditReconcile";
+import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, profileFixCredits, ORIGIN_COST_HEADER, ORIGIN_REFUND_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER, RERANK_SHED_HEADER } from "./creditReconcile";
 import { logAnalytics, markRerankShed, setRequestPerson, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
@@ -179,9 +179,9 @@ const handler = {
             });
         }
 
-        // Author fixes (oxjob #1430): its own app, its own auth (site-wide keys),
-        // no credits. Before the method gate because fixes use PATCH.
-        if (env.AUTHOR_FIXES_URL && isAuthorFixesPath(new URL(req.url).pathname)) {
+        // Author fixes (oxjob #1430): its own app and its own auth. A PATCH (apply or revert, staff only) goes straight
+        // there, uncharged, before the method gate; GETs and POSTs are priced and settled below (oxjob #2055).
+        if (env.AUTHOR_FIXES_URL && isAuthorFixesPath(new URL(req.url).pathname) && !isBilledFixesRequest(new URL(req.url).pathname, req.method)) {
             const r = await fetch(await authorFixesRequest(req, env.AUTHOR_FIXES_URL));
             return addCorsHeaders(new Response(r.body, { status: r.status, headers: r.headers }));
         }
@@ -1350,10 +1350,31 @@ const handler = {
         // /query/text goes to the query writer Worker, through this same block: one entry credit at /check, then
         // settled to the X-Credits-Cost it reports (oxjob #1494).
         const isQueryText = classification.type === 'query_text';
+        // The Profile Doctor (oxjob #2055) also answers through this block: 0 credits at /check, then settled in either
+        // direction to what the app says (holds for new fixes, the rest of a hold back once a fix is priced).
+        const isProfileFix = classification.type === 'profile_fix';
 
-        if (isContentRequest || isQueryText) {
+        if (isContentRequest || isQueryText || isProfileFix) {
             let contentResponse: Response;
-            if (isQueryText) {
+            if (isProfileFix) {
+                if (!env.AUTHOR_FIXES_URL) {
+                    contentResponse = new Response(JSON.stringify({ error: "The Profile Doctor isn't available on this server." }),
+                        { status: 503, headers: { "Content-Type": "application/json" } });
+                } else {
+                    try {
+                        contentResponse = await fetch(await authorFixesRequest(req, env.AUTHOR_FIXES_URL, {
+                            authorization: authorizationToForward(req.headers.get("Authorization"), apiKey, hasValidApiKey),
+                            creditsRemaining: creditsRemainingForOrigin(rateLimitResult.remaining, rateLimitResult.onetimeRemaining),
+                            env,
+                        }));
+                    } catch (error) {
+                        console.error("Profile Doctor call failed:", error);
+                        reportError(error, { site: "author_fixes" });
+                        contentResponse = new Response(JSON.stringify({ error: "The Profile Doctor didn't answer; nothing was charged. Try again in a moment." }),
+                            { status: 502, headers: { "Content-Type": "application/json" } });
+                    }
+                }
+            } else if (isQueryText) {
                 if (!env.QUERY_WRITER) {
                     contentResponse = new Response(JSON.stringify({ error: "Writing queries from plain words isn't available on this server yet." }),
                         { status: 503, headers: { "Content-Type": "application/json", "X-Credits-Cost": "0" } });
@@ -1394,17 +1415,19 @@ const handler = {
             // The worker can lower the price, never raise it past what was charged: it prices a HEAD at 100 too, which
             // the proxy charges 0 (oxjob #1886), and the headers must say what was charged.
             const actualCostHeader = contentResponse.headers.get(ORIGIN_COST_HEADER);
-            const actualCost = isQueryText
+            const actualCost = isProfileFix
+                ? profileFixCredits(contentResponse.status, actualCostHeader, contentResponse.headers.get(ORIGIN_REFUND_HEADER))
+                : isQueryText
                 ? actualCreditCost(contentResponse.status, creditCost, actualCostHeader)
                 : Math.min(creditCost, originPrice(actualCostHeader, creditCost));
             let adjustedRemaining = rateLimitResult.remaining ?? 0;
 
             // Refund credits if actual cost < charged cost
             let adjustedOnetimeRemaining = rateLimitResult.onetimeRemaining ?? 0;
-            if (isQueryText) {
+            if (isQueryText || isProfileFix) {
                 ({ remaining: adjustedRemaining, onetimeRemaining: adjustedOnetimeRemaining } = await settleCredits(limiter, {
                     charged: creditCost, actual: actualCost, dailyLimit: limit, onetimeBalance: onetimeCreditsBalance,
-                    remaining: adjustedRemaining, onetimeRemaining: adjustedOnetimeRemaining,
+                    remaining: adjustedRemaining, onetimeRemaining: adjustedOnetimeRemaining, fix: isProfileFix,
                 }));
             } else if (actualCost < creditCost) {
                 const refundAmount = creditCost - actualCost;
@@ -1423,7 +1446,8 @@ const handler = {
 
             // Add rate limit headers to the response
             const newHeaders = new Headers(contentResponse.headers);
-            newHeaders.delete("X-Credits-Cost"); // Remove internal header
+            newHeaders.delete("X-Credits-Cost"); // Remove internal headers
+            newHeaders.delete(ORIGIN_REFUND_HEADER);
             // New USD headers
             newHeaders.set("X-RateLimit-Limit-USD", creditsToUsd(limit).toString());
             newHeaders.set("X-RateLimit-Remaining-USD", creditsToUsd(adjustedRemaining).toString());

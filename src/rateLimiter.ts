@@ -17,6 +17,9 @@ interface DailyCounter {
 
 interface OnetimeCounter {
     consumed: number;
+    // Prepaid credits that Profile Doctor charges took and its refunds may still return (oxjob #2055; see /refund). Rides in the
+    // 'onetime' value as `fix`, like `fd` in 'counter'.
+    fix: number;
     lastPersisted: number;
     dirty: boolean;
 }
@@ -61,9 +64,10 @@ export class RateLimiter implements DurableObject {
         }
 
         try {
-            const storedOnetime = await this.state.storage.get<{ consumed: number }>('onetime');
+            const storedOnetime = await this.state.storage.get<{ consumed: number; fix?: number }>('onetime');
             this.onetimeCounter = {
                 consumed: storedOnetime?.consumed ?? 0,
+                fix: storedOnetime?.fix ?? 0,
                 lastPersisted: Date.now(),
                 dirty: false
             };
@@ -80,6 +84,12 @@ export class RateLimiter implements DurableObject {
         return this.firstDollar.spent > 0 ? { count, date, fd: this.firstDollar.spent } : { count, date };
     }
 
+    // The stored 'onetime' value. `fix` appears only while Profile Doctor holds can still come back.
+    private onetimeValue(): { consumed: number; fix?: number } {
+        const { consumed, fix } = this.onetimeCounter!;
+        return fix > 0 ? { consumed, fix } : { consumed };
+    }
+
     private async persist(): Promise<void> {
         const writes: Array<{ key: string; value: unknown; counter: { dirty: boolean; lastPersisted: number } }> = [];
 
@@ -94,7 +104,7 @@ export class RateLimiter implements DurableObject {
         if (this.onetimeCounter?.dirty) {
             writes.push({
                 key: 'onetime',
-                value: { consumed: this.onetimeCounter.consumed },
+                value: this.onetimeValue(),
                 counter: this.onetimeCounter
             });
         }
@@ -135,7 +145,7 @@ export class RateLimiter implements DurableObject {
     }
 
     private async persistOnetimeNow(): Promise<void> {
-        await this.state.storage.put('onetime', { consumed: this.onetimeCounter!.consumed });
+        await this.state.storage.put('onetime', this.onetimeValue());
         this.onetimeCounter!.dirty = false;
         this.onetimeCounter!.lastPersisted = Date.now();
     }
@@ -151,6 +161,7 @@ export class RateLimiter implements DurableObject {
             intervalMs?: number;
             search?: string;
             firstDollarPace?: number;  // credits per 5 minutes while a new free account spends its first $1 (oxjob #1740)
+            fix?: boolean;             // a Profile Doctor settlement (oxjob #2055): see /refund
         }>();
         const { dailyLimit, perSecondLimit, credits = 1, onetimeBalance = 0 } = body;
 
@@ -246,7 +257,7 @@ export class RateLimiter implements DurableObject {
             // Atomically claim: reset consumed, preserving 0 for concurrent callers
             this.onetimeCounter!.consumed = 0;
             // Persist immediately so DO eviction doesn't revert to stale value
-            await this.state.storage.put('onetime', { consumed: 0 });
+            await this.state.storage.put('onetime', this.onetimeValue());
             this.onetimeCounter!.dirty = false;
             this.onetimeCounter!.lastPersisted = Date.now();
             return Response.json({ consumed });
@@ -258,7 +269,7 @@ export class RateLimiter implements DurableObject {
             const restoreAmount = body.consumedWriteback ?? 0;
             if (restoreAmount > 0 && this.onetimeCounter) {
                 this.onetimeCounter.consumed += restoreAmount;
-                await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
+                await this.state.storage.put('onetime', this.onetimeValue());
                 this.onetimeCounter.dirty = false;
                 this.onetimeCounter.lastPersisted = Date.now();
             }
@@ -273,12 +284,36 @@ export class RateLimiter implements DurableObject {
                 // Subtract what was written back, preserving any credits consumed during the sync window
                 this.onetimeCounter.consumed = Math.max(0, this.onetimeCounter.consumed - consumedWriteback);
                 // Persist immediately so DO eviction doesn't revert to stale consumed value
-                await this.state.storage.put('onetime', { consumed: this.onetimeCounter.consumed });
+                await this.state.storage.put('onetime', this.onetimeValue());
                 this.onetimeCounter.dirty = false;
                 this.onetimeCounter.lastPersisted = Date.now();
             }
             return Response.json({
                 onetimeConsumed: this.onetimeCounter!.consumed,
+            });
+        }
+
+        // A Profile Doctor refund (oxjob #2055) comes 10-30 minutes after its hold, by when the prepaid part has almost always been
+        // written back to users-api (the auth cache refreshes every 60 s, and /begin-writeback resets consumed to 0), so the refund
+        // below would find nothing to give back and a prepaid customer would lose it. Here the prepaid part goes back first, and may
+        // take consumed below 0: a credit the next spend uses first (/begin-writeback leaves it alone). Only what fix charges took from
+        // prepaid (`fix`) can return there, so a hold paid from the daily pool never turns into prepaid credit; the rest returns to
+        // today's daily pool, which may go below 0 for the day (daily credits back as daily credits).
+        if (url.pathname === '/refund' && body.fix) {
+            const toOnetime = Math.min(credits, Math.max(0, this.onetimeCounter!.fix));
+            if (toOnetime > 0) {
+                this.onetimeCounter!.consumed -= toOnetime;
+                this.onetimeCounter!.fix -= toOnetime;
+                await this.persistOnetimeNow();
+            }
+            if (credits - toOnetime > 0) {
+                this.dailyCounter!.count -= credits - toOnetime;
+                await this.persistDailyNow();
+            }
+            return Response.json({
+                refunded: credits,
+                remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
+                onetimeRemaining: Math.max(0, onetimeBalance - this.onetimeCounter!.consumed)
             });
         }
 
@@ -330,6 +365,7 @@ export class RateLimiter implements DurableObject {
             }
             if (split.onetime > 0) {
                 this.onetimeCounter!.consumed += split.onetime;
+                if (body.fix) this.onetimeCounter!.fix += split.onetime;   // what a Profile Doctor refund may return to prepaid
                 await this.persistOnetimeNow();
             }
 
@@ -398,7 +434,7 @@ export class RateLimiter implements DurableObject {
             // The old dirty-flag + alarm pattern was dead code (dirty already true
             // when the alarm check ran), so onetime consumption was never persisted
             // via alarm. DO eviction = lost consumption = free API calls.
-            await this.state.storage.put('onetime', { consumed: this.onetimeCounter!.consumed });
+            await this.state.storage.put('onetime', this.onetimeValue());
             this.onetimeCounter!.dirty = false;
             this.onetimeCounter!.lastPersisted = Date.now();
             fromOnetime = true;
