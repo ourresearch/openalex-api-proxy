@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     bucketSeverity,
     effectiveDwellMs,
@@ -6,6 +6,8 @@ import {
     newBucket,
     checkBudget,
     MIN_BUCKET_SAMPLES,
+    BUCKET_MS,
+    SearchHealthController,
     type AnonBucket,
     type BucketStats,
     type HealthLevel,
@@ -245,5 +247,193 @@ describe('cachedHealthLevel (oxjob #1521 rerank gate)', () => {
         expect(cachedHealthLevel({ FORCE_HEALTH_STATE: 'YELLOW' })).toBe(1);
         expect(cachedHealthLevel({ FORCE_HEALTH_STATE: 'RED' })).toBe(3);
         expect(cachedHealthLevel({})).toBe(0);
+    });
+});
+
+// oxjob #2088: Slack #dev hears from the ladder only when its own healing is failing. Driven through the real Durable
+// Object: 10 sampled searches per 30 s bucket, then the alarm rolls the bucket (as it does every bucket in production).
+describe('oxjob #2088 Slack policy: one "needs a look" per episode, only when RED will not clear', () => {
+    const T0 = 1_760_000_010_000;   // a bucket boundary
+    const BAD = 5000;               // works search: > 3000 ms average is RED
+    const SEMANTIC_BAD = 9000;      // semantic: > 6500 ms
+    const MIN = 60_000;
+    let now = T0;
+    let posts: string[] = [];
+
+    function memState(initial: Record<string, unknown> = {}) {
+        const store = new Map<string, unknown>(Object.entries(initial));
+        return {
+            store,
+            storage: {
+                get: async (k: string) => store.get(k),
+                put: async (k: string, v: unknown) => { store.set(k, v); },
+                setAlarm: async () => {},
+            },
+            blockConcurrencyWhile: async (fn: () => Promise<void>) => fn(),
+            waitUntil: (_p: Promise<unknown>) => {},
+        };
+    }
+    async function make(state = memState()) {
+        const dobj = new SearchHealthController(state as any, { SLACK_WEBHOOK_URL: 'https://slack.test/hook' } as any);
+        await new Promise((r) => setTimeout(r, 0));   // let the constructor's storage read finish
+        return dobj;
+    }
+    // One bucket: n searches at ms each (null = a silent bucket, which reads GREEN), then the bucket rolls.
+    async function bucketAt(dobj: SearchHealthController, ms: number | null) {
+        if (ms !== null) {
+            for (let i = 0; i < MIN_BUCKET_SAMPLES; i++) {
+                await dobj.fetch(new Request('http://internal/observe', {
+                    method: 'POST', body: JSON.stringify({ ms, status: 200, kind: 'search' }),
+                }));
+            }
+        }
+        now += BUCKET_MS;
+        await dobj.alarm();
+    }
+    async function buckets(dobj: SearchHealthController, n: number, ms: number | null) {
+        for (let i = 0; i < n; i++) await bucketAt(dobj, ms);
+    }
+    const view = async (dobj: SearchHealthController) =>
+        (await dobj.fetch(new Request('http://internal/state'))).json<Record<string, any>>();
+    const level = async (dobj: SearchHealthController) => (await view(dobj)).state as string;
+
+    beforeEach(() => {
+        now = T0 + 1000;
+        posts = [];
+        vi.spyOn(Date, 'now').mockImplementation(() => now);
+        vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+            posts.push(JSON.parse(String(init?.body)).text);
+            return new Response('ok');
+        }));
+    });
+    afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+    it('a 10-min RED that lifts, and the whole episode, post nothing (ladder and transitions unchanged)', async () => {
+        const dobj = await make();
+        await buckets(dobj, 2, BAD);
+        expect(await level(dobj)).toBe('RED');
+        await buckets(dobj, 18, BAD);                  // RED held ~9 min
+        while (await level(dobj) === 'RED') await bucketAt(dobj, null);
+        expect(await level(dobj)).toBe('ORANGE');
+        await buckets(dobj, 60, null);                 // walk down to GREEN, then 10 quiet min close the episode
+        const v = await view(dobj);
+        expect(v.state).toBe('GREEN');
+        expect(v.episode.open).toBe(false);
+        expect(posts).toEqual([]);
+        expect([...v.recentTransitions].reverse().map((t: any) => `${t.from}->${t.to}`)).toEqual([
+            'GREEN->YELLOW', 'YELLOW->RED', 'RED->ORANGE', 'ORANGE->YELLOW', 'YELLOW->GREEN',
+        ]);
+    });
+
+    it('RED held 30 min posts one "needs a look", never repeats, and the episode closes with one ✅', async () => {
+        const dobj = await make();
+        await buckets(dobj, 2, BAD);                   // RED from here
+        await buckets(dobj, 59, BAD);                  // 29.5 min
+        expect(posts).toEqual([]);
+        await bucketAt(dobj, BAD);                     // 30 min
+        expect(posts).toHaveLength(1);
+        expect(posts[0]).toMatch(/^🔴 \*OpenAlex search-health: needs a look\*/);
+        expect(posts[0]).toMatch(/anonymous works search has been paused \(503\) for 30 min without a break/);
+        expect(posts[0]).toMatch(/works Elasticsearch cluster/);
+        expect(posts[0]).toContain('https://api.openalex.org/search-health ');
+        expect((await view(dobj)).episode.needsLookPosted).toBe(true);
+        await buckets(dobj, 60, BAD);                  // 60 min RED in total: still the one post
+        expect(posts).toHaveLength(1);
+        await buckets(dobj, 60, null);
+        expect(await level(dobj)).toBe('GREEN');
+        expect(posts).toHaveLength(2);
+        expect(posts[1]).toMatch(/^✅ \*OpenAlex search-health: recovered\*/);
+        const redMin = Number(posts[1].match(/(\d+) min of it paused \(RED\)/)![1]);
+        expect(redMin).toBeGreaterThanOrEqual(61);
+        expect(redMin).toBeLessThanOrEqual(63);
+        expect((await view(dobj)).episode).toMatchObject({ open: false, redMin: 0, needsLookPosted: false });
+    });
+
+    it('short REDs that add up to 60 min in one episode post one "needs a look"', async () => {
+        const dobj = await make();
+        let stretches = 0;
+        let longestMs = 0;
+        while (posts.length === 0 && stretches < 10) {
+            const start = now;
+            await buckets(dobj, 20, BAD);              // ~10 min of trouble; RED caps its hold at 10 min
+            while (await level(dobj) === 'RED') await bucketAt(dobj, null);
+            expect(await level(dobj)).toBe('ORANGE');  // lifted to rationing: the same episode
+            longestMs = Math.max(longestMs, now - start);
+            stretches++;
+        }
+        expect(longestMs).toBeLessThan(15 * MIN);      // never near the 30-min continuous rule
+        expect(stretches).toBeGreaterThanOrEqual(5);
+        expect(posts).toHaveLength(1);
+        expect(posts[0]).toMatch(/needs a look/);
+        expect(posts[0]).toMatch(/has been paused \(503\) for 60 of the last \d+ min/);
+        for (let i = 0; i < 3; i++) {                  // more of the same: still one post
+            await buckets(dobj, 20, BAD);
+            while (await level(dobj) === 'RED') await bucketAt(dobj, null);
+        }
+        expect(posts).toHaveLength(1);
+        await buckets(dobj, 60, null);
+        expect(posts).toHaveLength(2);
+        expect(posts[1]).toMatch(/recovered/);
+    });
+
+    it('an ORANGE-only episode and a sub-threshold RED episode close silently, back to back', async () => {
+        const dobj = await make();
+        await bucketAt(dobj, 2000);                    // ORANGE-severity buckets
+        await buckets(dobj, 3, 2000);
+        expect(await level(dobj)).toBe('ORANGE');
+        await buckets(dobj, 60, null);
+        await buckets(dobj, 2, BAD);
+        await buckets(dobj, 40, BAD);                  // RED ~20 min
+        await buckets(dobj, 60, null);
+        expect(await level(dobj)).toBe('GREEN');
+        expect(posts).toEqual([]);
+    });
+
+    it('loads state stored before #2088 (no new fields) mid-RED without crashing or double-posting', async () => {
+        const state = memState({ health: {
+            level: 3, since: now - 12 * MIN, lastUnhealthyExit: 0, reclampStreak: 0,
+            episodeOpen: true, episodeRedAlerted: true, episodeStartedAt: now - 14 * MIN, episodePeak: 3,
+            redStartedAt: now - 12 * MIN,
+        } });
+        let dobj = await make(state);
+        const v = await view(dobj);
+        expect(v.state).toBe('RED');
+        expect(v.episode).toMatchObject({ open: true, redMin: 12, needsLookPosted: false });
+        await buckets(dobj, 35, BAD);                  // 12 + 17.5 = 29.5 min held
+        expect(posts).toEqual([]);
+        await bucketAt(dobj, BAD);
+        expect(posts).toHaveLength(1);
+        expect(posts[0]).toMatch(/for 30 min without a break/);
+        const stored = state.store.get('health') as Record<string, unknown>;
+        expect(stored).toMatchObject({ episodeNeedsLookPosted: true, redAccumMs: 0 });
+        dobj = await make(state);                      // a deploy right after the post
+        await buckets(dobj, 10, BAD);
+        expect(posts).toHaveLength(1);
+        await buckets(dobj, 60, null);
+        expect(posts).toHaveLength(2);
+        expect(posts[1]).toMatch(/recovered/);
+
+        // A record from before v3.5 (level and since only) loads too, and stays quiet.
+        const old = await make(memState({ health: { level: 0, since: now - 60 * MIN } }));
+        expect((await view(old)).episode).toMatchObject({ open: false, redMin: 0, needsLookPosted: false });
+        await buckets(old, 5, null);
+        expect(posts).toHaveLength(2);
+    });
+
+    it('the semantic instance names its own search, cluster and ladder URL', async () => {
+        const dobj = await make(memState({ profile: 'semantic' }));
+        await buckets(dobj, 62, SEMANTIC_BAD);
+        expect(posts).toHaveLength(1);
+        expect(posts[0]).toMatch(/^🔴 \*OpenAlex semantic-health: needs a look\* — free and anonymous semantic search has been paused/);
+        expect(posts[0]).toMatch(/semantic search \(vector\) cluster/);
+        expect(posts[0]).toContain('https://api.openalex.org/search-health?ladder=semantic');
+    });
+
+    it('the test ping still posts, and describes the new policy', async () => {
+        const dobj = await make();
+        const r = await (await dobj.fetch(new Request('http://internal/test-slack', { method: 'POST' }))).json<any>();
+        expect(r.sent).toBe(true);
+        expect(posts).toHaveLength(1);
+        expect(posts[0]).toMatch(/test ping.*only when a RED pause isn't clearing/);
     });
 });

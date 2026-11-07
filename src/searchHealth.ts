@@ -84,6 +84,12 @@ export const MAX_UNHEALTHY_DWELL_MS = 30 * 60 * 1000;
 // back in RED within ~60s, which costs little — but if the source ebbed,
 // anonymous users regain partial service up to 20 min sooner.
 export const MAX_RED_DWELL_MS = 10 * 60 * 1000;
+// oxjob #2088 (2026-11-07): Slack #dev hears from the ladder only when its self-healing is failing. In 8 Oct-7 Nov,
+// RED pauses lasted 5-11 min in 76 of 77 cases and cleared on their own; 205 RED / RED-lifted / recovered posts drew no
+// action. An episode now posts ONE "needs a look" when RED has held this long without a break...
+export const NEEDS_LOOK_RED_HOLD_MS = 30 * 60 * 1000;
+// ...or when its RED stretches add up to this much (a sawtooth: each RED capped at MAX_RED_DWELL_MS, re-melting).
+export const NEEDS_LOOK_RED_TOTAL_MS = 60 * 60 * 1000;
 
 export function effectiveDwellMs(reclampStreak: number, level: HealthLevel = 2): number {
     const cap = level === 3 ? MAX_RED_DWELL_MS : MAX_UNHEALTHY_DWELL_MS;
@@ -225,10 +231,12 @@ export interface HealthProfile {
     slowMs: number;
     rationed: string;      // who the ladder rations, for logs and Slack
     unaffected: string;
+    cluster: string;       // what to look at when a pause won't clear (oxjob #2088)
 }
 export const SEARCH_PROFILE: HealthProfile = {
     name: 'search', bounds: LEVEL_BOUNDS, refill: BUCKET_REFILL, slowMs: 3000,
     rationed: 'anonymous works search', unaffected: 'Keyed clients and the GUI are unaffected.',
+    cluster: 'the works Elasticsearch cluster',
 };
 export const SEMANTIC_BOUNDS: ReadonlyArray<{ avgMs: number; errRate: number }> = [
     { avgMs: 2500, errRate: 0.05 },  // YELLOW
@@ -241,6 +249,7 @@ export const SEMANTIC_REFILL: Record<HealthLevel, number> = { 0: Infinity, 1: 1,
 export const SEMANTIC_PROFILE: HealthProfile = {
     name: 'semantic', bounds: SEMANTIC_BOUNDS, refill: SEMANTIC_REFILL, slowMs: 5000,
     rationed: 'free and anonymous semantic search', unaffected: 'Paid keys and the website are unaffected.',
+    cluster: 'the semantic search (vector) cluster',
 };
 export const SEMANTIC_HEALTH_DO_NAME = 'global:semantic-health-v1';
 // Every Worker call to the semantic instance carries this header; the instance remembers its profile in storage.
@@ -276,12 +285,14 @@ interface PersistedHealth {
     // v3.4 backoff state (older persisted records lack these; default 0)
     lastUnhealthyExit?: number;
     reclampStreak?: number;
-    // v3.5 Slack episode state
+    // v3.5 Slack episode state (pre-#2088 records also carry episodeRedAlerted, now ignored)
     episodeOpen?: boolean;
-    episodeRedAlerted?: boolean;
     episodeStartedAt?: number;
     episodePeak?: HealthLevel;
     redStartedAt?: number;
+    // oxjob #2088 (older records lack these; default 0 / false)
+    redAccumMs?: number;               // RED time in this episode from stretches that have ended
+    episodeNeedsLookPosted?: boolean;  // this episode's one "needs a look" went out
 }
 
 // Ring of recent transitions kept for GET /search-health, so spot-checking
@@ -313,17 +324,23 @@ export class SearchHealthController implements DurableObject {
     // row we've re-entered within RECLAMP_WINDOW_MS (drives effectiveDwellMs).
     private lastUnhealthyExit = 0;
     private reclampStreak = 0;
-    // v3.5 Slack alerting (episode-consolidated; inert unless SLACK_WEBHOOK_URL
-    // is set). An "episode" opens on a fresh entry into ORANGE/RED and closes
-    // after GREEN holds for RECLAMP_WINDOW_MS — re-clamps inside the window are
-    // the same episode and do NOT re-alert (sim on 5 days of history: raw
-    // per-transition policy = 79 pings, consolidated = 51, of which normal
-    // days are 2-11 and only genuinely-bad days are loud).
+    // Slack alerting (inert unless SLACK_WEBHOOK_URL is set). An "episode" opens
+    // on a fresh entry into ORANGE/RED and closes after GREEN holds for
+    // RECLAMP_WINDOW_MS; re-clamps inside the window are the same episode.
+    // oxjob #2088 (2026-11-07) replaced the v3.5 RED-only policy (a post at the
+    // first RED of each episode, at every RED lift, and at recovery: 205 posts
+    // in a month for pauses that healed themselves in 5-11 min). Now an episode
+    // that heals on its own is SILENT. It posts ONE "needs a look" when the
+    // guard is failing: RED held NEEDS_LOOK_RED_HOLD_MS (30 min) without a
+    // break, or its RED stretches adding up to NEEDS_LOOK_RED_TOTAL_MS (60 min).
+    // Checked on every bucket roll (checkNeedsLook), since RED can sit with no
+    // transition. Only an episode that posted gets a closing ✅ line.
     private episodeOpen = false;
-    private episodeRedAlerted = false;
     private episodeStartedAt = 0;
     private episodePeak: HealthLevel = 0;
-    private redStartedAt = 0;
+    private redStartedAt = 0;          // start of the current RED stretch; 0 when not RED
+    private redAccumMs = 0;            // ended RED stretches in this episode
+    private episodeNeedsLookPosted = false;
     // Which ladder this instance runs (oxjob #1433): the works-search one unless a Worker call said semantic.
     private profile: HealthProfile = SEARCH_PROFILE;
 
@@ -340,10 +357,11 @@ export class SearchHealthController implements DurableObject {
                     this.lastUnhealthyExit = stored.lastUnhealthyExit ?? 0;
                     this.reclampStreak = stored.reclampStreak ?? 0;
                     this.episodeOpen = stored.episodeOpen ?? false;
-                    this.episodeRedAlerted = stored.episodeRedAlerted ?? false;
                     this.episodeStartedAt = stored.episodeStartedAt ?? 0;
                     this.episodePeak = stored.episodePeak ?? 0;
                     this.redStartedAt = stored.redStartedAt ?? 0;
+                    this.redAccumMs = stored.redAccumMs ?? 0;
+                    this.episodeNeedsLookPosted = stored.episodeNeedsLookPosted ?? false;
                 }
                 const storedTransitions = await this.state.storage.get<TransitionRecord[]>('transitions');
                 if (storedTransitions) this.transitions = storedTransitions;
@@ -429,8 +447,9 @@ export class SearchHealthController implements DurableObject {
             if (!this.env.SLACK_WEBHOOK_URL) {
                 return Response.json({ sent: false, reason: 'SLACK_WEBHOOK_URL not configured' });
             }
-            this.sendSlack('🧪 *OpenAlex search-health: test ping* — Slack alerting is wired up. ' +
-                'You will hear from me on RED (anon search paused) and on recovery. That is all.');
+            this.sendSlack(`🧪 *OpenAlex ${this.tag}: test ping* — Slack alerting is wired up. ` +
+                `You will hear from me only when a RED pause isn't clearing on its own (30 min without a break, or ` +
+                `60 min in one episode), and once more when that episode is over. That is all.`);
             return Response.json({ sent: true });
         }
 
@@ -447,6 +466,13 @@ export class SearchHealthController implements DurableObject {
                 backoff: {
                     reclampStreak: this.reclampStreak,
                     nextHoldMin: { ORANGE: effectiveDwellMs(this.reclampStreak, 2) / 60000, RED: effectiveDwellMs(this.reclampStreak, 3) / 60000 },
+                },
+                episode: {   // oxjob #2088: what the "needs a look" post counts
+                    open: this.episodeOpen,
+                    startedAt: this.episodeOpen ? new Date(this.episodeStartedAt).toISOString() : null,
+                    peak: this.episodeOpen ? LEVEL_NAMES[this.episodePeak] : null,
+                    redMin: Math.round(this.redTotalMs(now) / 60000),
+                    needsLookPosted: this.episodeNeedsLookPosted,
                 },
                 window: this.ring.map((b) => summarize(b, this.profile.bounds)),
                 currentBucket: this.current ? summarize(this.current, this.profile.bounds) : null,
@@ -465,6 +491,52 @@ export class SearchHealthController implements DurableObject {
 
     private sentryInvocation(): Invocation {
         return { env: this.env, waitUntil: (p) => this.state.waitUntil(p) };
+    }
+
+    private get tag(): string {
+        return this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health';
+    }
+
+    // RED time in the open episode: ended stretches plus the one running now.
+    private redTotalMs(now: number): number {
+        return this.redAccumMs + (this.level === 3 ? Math.max(0, now - (this.redStartedAt || this.since)) : 0);
+    }
+
+    private async persistHealth(): Promise<void> {
+        await this.state.storage.put('health', {
+            level: this.level,
+            since: this.since,
+            lastUnhealthyExit: this.lastUnhealthyExit,
+            reclampStreak: this.reclampStreak,
+            episodeOpen: this.episodeOpen,
+            episodeStartedAt: this.episodeStartedAt,
+            episodePeak: this.episodePeak,
+            redStartedAt: this.redStartedAt,
+            redAccumMs: this.redAccumMs,
+            episodeNeedsLookPosted: this.episodeNeedsLookPosted,
+        } satisfies PersistedHealth);
+    }
+
+    // oxjob #2088: the one Slack post an episode can earn, when the guard's own
+    // healing is failing. Runs on every bucket roll, transition or not.
+    private async checkNeedsLook(now: number): Promise<void> {
+        if (!this.episodeOpen || this.episodeNeedsLookPosted) return;
+        const heldMs = this.level === 3 ? Math.max(0, now - (this.redStartedAt || this.since)) : 0;
+        const totalMs = this.redTotalMs(now);
+        if (heldMs < NEEDS_LOOK_RED_HOLD_MS && totalMs < NEEDS_LOOK_RED_TOTAL_MS) return;
+        this.episodeNeedsLookPosted = true;
+        const episodeMin = Math.round((now - (this.episodeStartedAt || this.since)) / 60000);
+        const paused = heldMs >= NEEDS_LOOK_RED_HOLD_MS
+            ? `has been paused (503) for ${Math.round(heldMs / 60000)} min without a break`
+            : `has been paused (503) for ${Math.round(totalMs / 60000)} of the last ${episodeMin} min`;
+        const semantic = this.profile === SEMANTIC_PROFILE;
+        this.sendSlack(
+            `🔴 *OpenAlex ${this.tag}: needs a look* — ${this.profile.rationed} ${paused}, and the guard isn't ` +
+            `clearing it. Likely ${this.profile.cluster} needs capacity, or a stuck query needs killing. ` +
+            `${this.profile.unaffected} Ladder state: GET https://api.openalex.org/search-health` +
+            `${semantic ? '?ladder=semantic' : ''} (key-gated, SEARCH_HEALTH_KEY).`,
+        );
+        try { await this.persistHealth(); } catch { /* non-fatal: worst case one repeat post after a restart */ }
     }
 
     // v3.5: fire-and-forget Slack ping. Inert when SLACK_WEBHOOK_URL is unset;
@@ -494,29 +566,27 @@ export class SearchHealthController implements DurableObject {
         }
         if (this.current.start === bucketStart) return;
 
-        // v3.5: close an alert episode once GREEN has held a full re-clamp
-        // window — a quicker "recovered" ping would fire mid-sawtooth. RED-only
-        // policy: episodes that never reached RED close silently.
+        // Close an alert episode once GREEN has held a full re-clamp window — a
+        // quicker close would split one sawtooth into several episodes. oxjob
+        // #2088: only an episode that posted "needs a look" gets a ✅ line;
+        // every other episode closes silently.
         if (this.episodeOpen && this.level === 0 && now - this.since >= RECLAMP_WINDOW_MS) {
-            const mins = Math.round((now - this.episodeStartedAt) / 60000);
-            if (this.episodePeak === 3) {
-                this.sendSlack(this.profile === SEMANTIC_PROFILE
-                    ? `✅ *OpenAlex semantic-health: recovered* — GREEN and quiet for 10 min. ` +
-                      `Episode lasted ~${mins} min, peaked RED. Free and anonymous semantic search fully open.`
-                    : `✅ *OpenAlex search-health: recovered* — GREEN and quiet for 10 min. ` +
-                      `Episode lasted ~${mins} min, peaked RED. Anonymous search fully open.`,
+            if (this.episodeNeedsLookPosted) {
+                const mins = Math.round((now - this.episodeStartedAt) / 60000);
+                const redMin = Math.round(this.redAccumMs / 60000);
+                const who = this.profile.rationed[0].toUpperCase() + this.profile.rationed.slice(1);
+                this.sendSlack(
+                    `✅ *OpenAlex ${this.tag}: recovered* — GREEN and quiet for 10 min. Episode lasted ~${mins} min, ` +
+                    `${redMin} min of it paused (RED). ${who} fully open.`,
                 );
             }
             this.episodeOpen = false;
-            this.episodeRedAlerted = false;
+            this.episodeStartedAt = 0;
             this.episodePeak = 0;
-            try {
-                await this.state.storage.put('health', {
-                    level: this.level, since: this.since,
-                    lastUnhealthyExit: this.lastUnhealthyExit, reclampStreak: this.reclampStreak,
-                    episodeOpen: false, episodeRedAlerted: false, episodeStartedAt: 0, episodePeak: 0,
-                } satisfies PersistedHealth);
-            } catch { /* non-fatal */ }
+            this.redStartedAt = 0;
+            this.redAccumMs = 0;
+            this.episodeNeedsLookPosted = false;
+            try { await this.persistHealth(); } catch { /* non-fatal */ }
         }
 
         // Finalize the open bucket plus synthetic empty buckets for any silent
@@ -530,6 +600,7 @@ export class SearchHealthController implements DurableObject {
         while (this.ring.length > RING_SIZE) this.ring.shift();
         this.current = newBucket(bucketStart);
         await this.evaluate();
+        await this.checkNeedsLook(now);
         await this.state.storage.setAlarm(bucketStart + BUCKET_MS + 1000);
     }
 
@@ -551,48 +622,33 @@ export class SearchHealthController implements DurableObject {
         } else if (from >= 2 && next < 2) {
             this.lastUnhealthyExit = now;
         }
+        // oxjob #2088: a RED stretch ending adds to the episode's RED total (no
+        // Slack post; RED start and RED lift are silent now).
         if (from === 3 && next < 3) {
-            const pausedMin = this.redStartedAt ? Math.max(1, Math.round((now - this.redStartedAt) / 60000)) : 0;
-            const tag = this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health';
-            this.sendSlack(
-                `🟠 *OpenAlex ${tag}: RED lifted* — ${this.profile.rationed} paused for ~${pausedMin} min, ` +
-                `now restored at ${ladderText(this.profile.refill).ORANGE} rationing (ORANGE). Full speed returns ` +
-                `automatically as health clears; a final ✅ posts when fully GREEN.`,
-            );
-            this.episodeRedAlerted = false; // a re-RED in this episode is news again
+            this.redAccumMs += Math.max(0, now - (this.redStartedAt || this.since));
+            this.redStartedAt = 0;
         }
         this.level = next;
         this.since = now;
 
-        // v3.5 Slack alerting — RED ONLY (Casey's call: ORANGE is routine
-        // rationing, RED means anonymous search is actually paused). Episodes
-        // still open on any ORANGE/RED entry so the 10-min-quiet recovery
-        // consolidation works, but only the first RED of an episode pings, and
-        // only RED-peaked episodes send a recovery.
-        if (next >= 2 && from < 2) {
+        // Episode bookkeeping (no Slack here; see checkNeedsLook). An episode
+        // opens on any ORANGE/RED entry so the 10-min-quiet close consolidates
+        // a sawtooth, and also on an ORANGE→RED with no episode open (state
+        // lost in a restart), so RED time is always counted.
+        if (next >= 2 && (from < 2 || !this.episodeOpen)) {
             if (!this.episodeOpen) {
                 this.episodeOpen = true;
                 this.episodeStartedAt = now;
-                this.episodeRedAlerted = false;
                 this.episodePeak = next;
+                this.redAccumMs = 0;
+                this.episodeNeedsLookPosted = false;
             } else {
                 this.episodePeak = Math.max(this.episodePeak, next) as HealthLevel;
             }
         }
-        if (next === 3 && this.episodeOpen) {
+        if (next === 3) {
             this.episodePeak = 3;
-            if (from < 3) this.redStartedAt = now;
-            if (!this.episodeRedAlerted) {
-                this.episodeRedAlerted = true;
-                const last2 = this.ring[this.ring.length - 1];
-                const avg2 = last2 && last2.n ? Math.round(last2.sumMs / last2.n) : 0;
-                const tag = this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health';
-                this.sendSlack(
-                    `🔴 *OpenAlex ${tag}: RED* — ${this.profile.rationed} paused (503) while the cluster drains. ` +
-                    `Trigger bucket: ${avg2}ms avg. Hold ≥ ${effectiveDwellMs(this.reclampStreak, 3) / 60000} min. ` +
-                    this.profile.unaffected,
-                );
-            }
+            this.redStartedAt = now; // next > from, so this is always a fresh RED stretch
         }
 
         const last = this.ring[this.ring.length - 1];
@@ -609,17 +665,7 @@ export class SearchHealthController implements DurableObject {
             this.transitions = this.transitions.slice(-TRANSITIONS_KEPT);
         }
         try {
-            await this.state.storage.put('health', {
-                level: this.level,
-                since: this.since,
-                lastUnhealthyExit: this.lastUnhealthyExit,
-                reclampStreak: this.reclampStreak,
-                episodeOpen: this.episodeOpen,
-                episodeRedAlerted: this.episodeRedAlerted,
-                episodeStartedAt: this.episodeStartedAt,
-                episodePeak: this.episodePeak,
-                redStartedAt: this.redStartedAt,
-            } satisfies PersistedHealth);
+            await this.persistHealth();
             await this.state.storage.put('transitions', this.transitions);
         } catch { /* observe-only: a lost persist just means amnesia on restart */ }
         console.log(JSON.stringify({
@@ -642,7 +688,7 @@ export class SearchHealthController implements DurableObject {
             this.env.ANALYTICS?.writeDataPoint({
                 indexes: ['health_transition'],
                 blobs: ['', '', `${LEVEL_NAMES[from]}->${LEVEL_NAMES[next]}`, '',
-                        this.profile === SEMANTIC_PROFILE ? 'semantic-health' : 'search-health', '', '', 'health_transition'],
+                        this.tag, '', '', 'health_transition'],
                 doubles: [avg, errPct, last?.n ?? 0, next, from, -1, 0],
             });
         } catch (error) {
