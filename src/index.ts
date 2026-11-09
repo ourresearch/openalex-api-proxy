@@ -791,14 +791,16 @@ const handler = {
 
         // ANON-SEARCH LADDER enforcement (oxjob #521 WS-3 Phase 1; see the
         // comment at the top of the file and searchHealth.ts). Website traffic (trustedUi)
-        // is carved out.
+        // is carved out, and so are verified AI assistants (oxjob #1686): each of their searches is a
+        // person asking claude.ai or ChatGPT, and they already spend a budget of their own (about
+        // 0.5% of what the ladder sheds on a bad day, so the carve-out costs the cluster nothing).
         // Scope: /works search only — the recurring saturation driver. Search on
         // other entities (/authors, /sources, …) is not gated by the ladder.
         // Runs BEFORE the credits DO, so rejected requests are edge-cheap and
         // never charged. Untouched: keyed clients, the GUI, autocomplete (cheap
         // 'list'), singleton/list, semantic (already 1/s capped).
         // Any spelling of /works (/entities/works, /v2/works) is a works search (oxjob #1886).
-        if (!apiKey && !trustedUi && classification.type === 'search' && entityFamily(normalizedPath)?.family === "works") {
+        if (!apiKey && !trustedUi && !verifiedAssistant && classification.type === 'search' && entityFamily(normalizedPath)?.family === "works") {
             const verdict = await checkAnonSearchBudget(env, ctx);
             if (!verdict.ok) {
                 const statusCode = verdict.statusCode ?? 503;

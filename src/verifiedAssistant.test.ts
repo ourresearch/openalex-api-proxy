@@ -102,10 +102,27 @@ describe('verified AI assistants on the API path (oxjob #1686)', () => {
         expect(rows[0].doubles[DOUBLE8_VERIFIED_ASSISTANT]).toBe(1);
     });
 
-    it('stays keyless: anonymous search shedding still applies', async () => {
+    // Since 9 Nov 2026 the anonymous-search ladder no longer sheds verified assistants: on 5 Nov it refused 16% of
+    // Claude's in-budget searches, each one a person asking claude.ai, for 0.5% of what it shed that day.
+    it('the anonymous-search ladder passes it: at RED it searches from its own budget', async () => {
         const { res, checks, rows } = await run(SEARCH, { headers: ASSISTANT, env: { FORCE_HEALTH_STATE: 'RED' } });
-        expect(res.status).toBe(503);
-        expect(checks).toEqual([]);
+        expect(res.status).toBe(200);
+        expect(checks).toEqual([{ bucket: `credits:verified-assistant:${IP}`, dailyLimit: 5_000_000, perSecondLimit: 50 }]);
+        expect(rows.some((r) => r.blobs[4] === 'anon-search-ladder')).toBe(false);
         expect(rows[0].doubles[DOUBLE8_VERIFIED_ASSISTANT]).toBe(1);
+    });
+
+    it('the ladder still sheds anonymous search without the header, or with a wrong one', async () => {
+        for (const headers of [{}, { [VERIFIED_ASSISTANT_HEADER]: 'true' }] as Record<string, string>[]) {
+            const { res, checks, rows } = await run(SEARCH, { headers, env: { FORCE_HEALTH_STATE: 'RED' } });
+            expect(res.status).toBe(503);
+            expect(checks).toEqual([]);
+            expect(rows.some((r) => r.blobs[4] === 'anon-search-ladder')).toBe(true);
+        }
+    });
+
+    it('the ladder still sheds it while the secret is unset (feature off)', async () => {
+        const { res } = await run(SEARCH, { headers: ASSISTANT, env: { FORCE_HEALTH_STATE: 'RED', VERIFIED_ASSISTANT_TOKEN: undefined } });
+        expect(res.status).toBe(503);
     });
 });
