@@ -578,14 +578,16 @@ const handler = {
             return json(403, { error: "Forbidden", code: "key_not_activated", message: KEY_NOT_ACTIVATED_MESSAGE });
         }
 
+        // A plan gate is a 403, like the changefile and snapshot gates below: 429 means "slow down", so clients
+        // (pyalex, our own retry advice, the export worker) retried a refusal no wait can lift (oxjob #1850).
         const protectedParamCheck = checkProtectedParams(url, hasValidApiKey, userPlan);
         if (!protectedParamCheck.valid) {
-            const errorResponse = json(429, {
+            const errorResponse = json(403, {
                 error: "Plan upgrade required",
                 message: protectedParamCheck.error
             });
 
-            // Log 429 plan-restriction error
+            // Log 403 plan-restriction error
             logAnalytics({
                 ctx,
                 env,
@@ -594,7 +596,7 @@ const handler = {
                 url,
                 scope: 'main',
                 responseTime: Date.now() - startTime,
-                statusCode: 429,
+                statusCode: 403,
                 rateLimit: 0,
                 rateLimitRemaining: 0
             });
@@ -1788,7 +1790,7 @@ const handler = {
         // Sync filters through OQL/OQO are a paid feature too (oxjob #1689; see syncGate.ts). checkProtectedParams
         // refuses them in a classic URL before any charge; OQL's date axes (#407, June 2026) assumed the engine enforced
         // the plan, which it didn't. So an armed request's answer is read as far as meta.x_query (the engine's own
-        // translation: its classic URL and OQO) and refused with the same 429 when that names a sync field. The origin
+        // translation: its classic URL and OQO) and refused with the same 403 when that names a sync field. The origin
         // has run the query by then, so the up-front charge is refunded: refusals are free, like every error (#863).
         if (syncGateArmed && response.status === 200 && response.body
             && (response.headers.get("Content-Type") || "").includes("application/json")) {
@@ -1799,10 +1801,10 @@ const handler = {
                 logAnalytics({
                     ctx, env, apiKey, req, url, scope: 'main',
                     responseTime: Date.now() - startTime,
-                    statusCode: 429, rateLimit: 0, rateLimitRemaining: 0,
+                    statusCode: 403, rateLimit: 0, rateLimitRemaining: 0,
                     endpointType: classification.type, creditCost: 0, trustedUi,
                 });
-                return json(429, { error: "Plan upgrade required", message: oqlSyncMessage(syncField) });
+                return json(403, { error: "Plan upgrade required", message: oqlSyncMessage(syncField) });
             }
         }
 

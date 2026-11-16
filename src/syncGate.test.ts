@@ -259,17 +259,17 @@ const HD = { HYPERDRIVE: { connectionString: 'postgres://test' } };
 describe('the OQL/OQO sync gate, through the Worker (oxjob #1689)', () => {
     afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-    it('refuses a keyless OQL "updated date" query with the classic 429, refunds its credit, and logs it like the classic refusal', async () => {
+    it('refuses a keyless OQL "updated date" query with the classic 403, refunds its credit, and logs it like the classic refusal', async () => {
         const origin = originAnswering(UPDATED_URL_XQ);
         const limiter = recordingLimiter();
         const { res, rows } = await runWorker(OQL_UPDATED, { fetch: origin.fetch, env: { RATE_LIMITER: limiter.RATE_LIMITER } });
-        expect(res.status).toBe(429);
+        expect(res.status).toBe(403);
         expect(await res.json()).toEqual({ error: 'Plan upgrade required', message: oqlSyncMessage('from_updated_date') });
         expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
         expect(origin.calls).toHaveLength(1);
         expect(limiter.calls.filter(c => c.path === '/check').map(c => c.credits)).toEqual([1]);
         expect(limiter.calls.filter(c => c.path === '/refund').map(c => c.credits)).toEqual([1]);
-        const row = rows.find(r => r.doubles[1] === 429)!;
+        const row = rows.find(r => r.doubles[1] === 403)!;
         expect(row.blobs[4]).toBe('main');
         expect(row.doubles[4]).toBe(0);  // creditCost
     });
@@ -280,7 +280,7 @@ describe('the OQL/OQO sync gate, through the Worker (oxjob #1689)', () => {
             { oqo: { get_rows: 'works', filter_rows: [{ column_id: 'from_created_date', value: '2026-10-15' }] } }]) {
             const { res } = await runWorker('/', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' },
                 fetch: originAnswering(added).fetch });
-            expect(res.status).toBe(429);
+            expect(res.status).toBe(403);
             expect((await res.json() as any).message).toContain('"from_created_date"');
         }
     });
@@ -289,20 +289,20 @@ describe('the OQL/OQO sync gate, through the Worker (oxjob #1689)', () => {
         const nested = { url: null, oqo: { get_rows: 'works', filter_rows: [{ column_id: 'from_updated_date', value: '2026-10-15' },
             { join: 'or', filters: [{ column_id: 'display_name.search.exact', value: 'cancer' }, { column_id: 'abstract.search.exact', value: 'tumor' }] }] } };
         const q = '/?oql=' + encodeURIComponent('works where updated since 2026-10-15 and (title has "cancer" or abstract has "tumor")');
-        expect((await runWorker(q, { fetch: originAnswering(nested).fetch })).res.status).toBe(429);
+        expect((await runWorker(q, { fetch: originAnswering(nested).fetch })).res.status).toBe(403);
     });
 
     it('refuses a sync sort riding as a POST body sibling', async () => {
         const sorted = { url: '/works?filter=publication_year:2025&sort=updated_date:desc&per_page=1', oqo: {} };
         const { res } = await runWorker('/', { method: 'POST', body: JSON.stringify({ oql: 'works where year is 2025', sort: 'updated_date:desc' }),
             headers: { 'Content-Type': 'application/json' }, fetch: originAnswering(sorted).fetch });
-        expect(res.status).toBe(429);
+        expect(res.status).toBe(403);
         expect((await res.json() as any).message).toContain('"updated_date"');
     });
 
     it('refuses a free key, and lets paid plans (premium, member-plus) through with the answer intact', async () => {
         const free = await runWorker(OQL_UPDATED, { headers: { Authorization: 'Bearer FREEKEY1' }, env: HD, fetch: originAnswering(UPDATED_URL_XQ).fetch });
-        expect(free.res.status).toBe(429);
+        expect(free.res.status).toBe(403);
         for (const key of ['PAIDKEY1', 'MEMBERK1']) {
             const paid = await runWorker(OQL_UPDATED, { headers: { Authorization: `Bearer ${key}` }, env: HD, fetch: originAnswering(UPDATED_URL_XQ).fetch });
             expect(paid.res.status).toBe(200);
@@ -337,7 +337,7 @@ describe('the OQL/OQO sync gate, through the Worker (oxjob #1689)', () => {
     it('still refuses a hyphenated classic filter at the edge, before the origin', async () => {
         const origin = originAnswering(undefined);
         const { res } = await runWorker('/works?filter=from-updated-date:2026-10-15', { fetch: origin.fetch });
-        expect(res.status).toBe(429);
+        expect(res.status).toBe(403);
         expect((await res.json() as any).message).toBe('The "from-updated-date:2026-10-15" filter is part of daily sync, which comes with the Member+ and Partner plans. See https://help.openalex.org/access/sync/ for details.');
         expect(origin.calls).toHaveLength(0);
     });
@@ -373,7 +373,7 @@ describe('a POST body must be a UTF-8 JSON object', () => {
     it('a JSON object is read and forwarded as before; an empty body is forwarded as before', async () => {
         const plain = originAnswering(undefined);
         expect((await post(JSON.stringify({ oql: 'works where title has "coral reefs"' }), plain)).res.status).toBe(200);
-        expect((await post(JSON.stringify(ADDED))).res.status).toBe(429);  // the sync gate still reads it
+        expect((await post(JSON.stringify(ADDED))).res.status).toBe(403);  // the sync gate still reads it
         const empty = originAnswering(undefined);
         expect((await post(undefined, empty)).res.status).toBe(200);
         expect(empty.calls).toHaveLength(1);

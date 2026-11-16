@@ -109,7 +109,7 @@ export function mightNameSyncField(text: string): boolean {
  * nobody who holds one ever sees this. */
 export const DAILY_SYNC_PLANS = 'part of daily sync, which comes with the Member+ and Partner plans. See https://help.openalex.org/access/sync/ for details.';
 
-/** The 429 message for an OQL/OQO query refused here (the classic URL's messages live in index.ts). */
+/** The 403 message for an OQL/OQO query refused here (the classic URL's messages live in index.ts). */
 export function oqlSyncMessage(field: string): string {
     return `OQL that filters or sorts by "${field}" is ${DAILY_SYNC_PLANS}`;
 }
