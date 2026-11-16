@@ -4,7 +4,7 @@ import { isAuthorFixesPath, isBilledFixesRequest, authorFixesRequest } from './a
 import { isCollectionsPath, collectionsRequest, USERS_API_URL } from './collections';
 import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
-import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, profileFixCredits, ORIGIN_COST_HEADER, ORIGIN_REFUND_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER, RERANK_SHED_HEADER } from "./creditReconcile";
+import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, profileFixCredits, ORIGIN_COST_HEADER, ORIGIN_REFUND_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER, RERANK_SHED_HEADER, RERANK_CREDITS_HEADER } from "./creditReconcile";
 import { logAnalytics, markRerankShed, setRequestPerson, shouldSampleEsTook } from "./analytics";
 import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
@@ -1591,6 +1591,8 @@ const handler = {
         if (isGrandfathered) proxyHeaders.set(GRANDFATHERED_HEADER, "1");
         if (trustedUi) proxyHeaders.set(WEBSITE_HEADER, "1");
         if (rerankShed) proxyHeaders.set(RERANK_SHED_HEADER, "search_busy");
+        const rerankCharged = rerankCredits(classification.type, rerankAsked);
+        if (rerankCharged > 0) proxyHeaders.set(RERANK_CREDITS_HEADER, rerankCharged.toString());  // oxjob #2034
 
         // Only add Content-Type for POST requests
         if (req.method === "POST") {

@@ -56,6 +56,12 @@ export const WEBSITE_HEADER = "X-Credits-Website";
  *  (oxjob #2003). Like the headers above it is set only here; a caller's copy is never forwarded. */
 export const RERANK_SHED_HEADER = "X-Rerank-Shed";
 
+/** The rerank surcharge, in credits, inside the up-front price (X-Cost-USD); sent only when one was charged. The
+ *  surcharge is owed only when the answer says meta.reranked true, so on a page past the reranked top 100, or when the
+ *  model didn't answer, the origin prices the request without it in X-Credits-Cost and the settle below refunds it, as
+ *  the OQL door always has (oxjob #2034). Set only here; a caller's copy is never forwarded. */
+export const RERANK_CREDITS_HEADER = "X-Credits-Rerank";
+
 export function creditsRemainingForOrigin(remaining?: number, onetimeRemaining?: number): number {
     return Math.max(0, remaining ?? 0) + Math.max(0, onetimeRemaining ?? 0);
 }

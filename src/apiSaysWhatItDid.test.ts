@@ -112,3 +112,35 @@ describe('the 504 a timed-out record lookup gets (oxjob #2003)', () => {
         expect(body.message).toMatch(/single record/);
     });
 });
+
+describe('the rerank surcharge follows the answer (oxjob #2034)', () => {
+    const SEARCH = '/works?search=coral%20reef%20bleaching&rerank=true&page=6';
+
+    it('tells the origin the surcharge it put in the up-front price', async () => {
+        const { origin } = await run(SEARCH, 'GREEN');
+        expect(origin[0].headers.get('X-Credits-Rerank')).toBe('10');
+        expect(origin[0].headers.get('X-Cost-USD')).toBe('0.002');  // a website search, 10, plus the surcharge
+    });
+
+    it('sends no surcharge when rerank was shed or never asked', async () => {
+        expect((await run(SEARCH, 'YELLOW')).origin[0].headers.get('X-Credits-Rerank')).toBeNull();
+        expect((await run('/works?search=coral', 'GREEN')).origin[0].headers.get('X-Credits-Rerank')).toBeNull();
+    });
+
+    it('refunds the surcharge when the origin prices the page without it', async () => {
+        const uiToken = await mintUiToken(UI_SECRET, Date.now(), 1800, IP);
+        const { res } = await runWorker(SEARCH, {
+            headers: { 'X-OpenAlex-UI': uiToken },
+            fetch: async () => new Response('{"meta":{"reranked":false,"rerank_reason":"past_window"}}', {
+                status: 200, headers: { 'Content-Type': 'application/json', 'X-Credits-Cost': '10' },
+            }),
+        });
+        expect(res.headers.get('X-RateLimit-Credits-Used')).toBe('10');
+        expect(res.headers.get('X-Credits-Cost')).toBeNull();  // internal
+    });
+
+    it('never forwards a client-sent X-Credits-Rerank', async () => {
+        const { origin } = await run('/works?search=coral', 'GREEN', { headers: { 'X-Credits-Rerank': '10' } });
+        expect(origin[0].headers.get('X-Credits-Rerank')).toBeNull();
+    });
+});
