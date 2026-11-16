@@ -2326,6 +2326,19 @@ function maskApiKey(apiKey: string): string {
     return apiKey.slice(0, 3) + '...' + apiKey.slice(-3);
 }
 
+const RATE_LIMIT_LOOKUP_RETRY_SECONDS = 5;
+
+// The 503 body /rate-limit sends when it can't read the usage counter (oxjob #1548).
+function rateLimitLookupFailedBody() {
+    return {
+        error: "Usage lookup failed",
+        message: "We couldn't read your usage just now, so this response doesn't report your remaining allowance. " +
+            `Please retry in ${RATE_LIMIT_LOOKUP_RETRY_SECONDS} seconds; checking /rate-limit is free.`,
+        reason: "usage_lookup_failed",
+        retryAfter: RATE_LIMIT_LOOKUP_RETRY_SECONDS,
+    };
+}
+
 async function handleRateLimitEndpoint(
     req: Request,
     env: Env,
@@ -2351,31 +2364,40 @@ async function handleRateLimitEndpoint(
     const id = env.RATE_LIMITER.idFromName(rateLimitKey);
     const limiter = env.RATE_LIMITER.get(id);
 
-    let statusResult: {
-        daily: { used: number; remaining: number };
-        onetime: { consumed: number; remaining: number; balance: number };
-        used: number;
-        remaining: number;
-    };
+    // A failed usage lookup is reported as a failure (oxjob #1548). It used to answer 200 with zero used and the full
+    // daily allowance, a body no client could tell from a real reading, so a pre-flight check could be told it had a
+    // full day when the real state was unknown. The billed path still fails open (index.ts "Rate limiter DO error");
+    // this endpoint only reads, so it says it couldn't.
+    let dailyUsed: number;
+    let dailyRemaining: number;
+    let onetimeRemaining: number;
     try {
-        statusResult = await limiter.fetch("http://internal/status", {
+        const res = await limiter.fetch("http://internal/status", {
             method: "POST",
             body: JSON.stringify({ dailyLimit: maxCreditsPerDay, onetimeBalance: onetimeCreditsBalance })
-        }).then(res => res.json());
+        });
+        if (!res.ok) throw new Error(`rate limiter /status answered ${res.status}`);
+        const status = await res.json() as {
+            daily?: { used?: number; remaining?: number };
+            onetime?: { remaining?: number };
+            used?: number;
+            remaining?: number;
+        };
+        const used = status.daily?.used ?? status.used;
+        const remaining = status.daily?.remaining ?? status.remaining;
+        if (typeof used !== "number" || typeof remaining !== "number") {
+            throw new Error("rate limiter /status answered without daily usage");
+        }
+        dailyUsed = used;
+        dailyRemaining = remaining;
+        onetimeRemaining = status.onetime?.remaining ?? 0;
     } catch (error) {
         console.error("Rate limiter status error:", error);
         reportError(error, { site: "rate_limiter_status" });
-        statusResult = {
-            daily: { used: 0, remaining: maxCreditsPerDay },
-            onetime: { consumed: 0, remaining: onetimeCreditsBalance, balance: onetimeCreditsBalance },
-            used: 0,
-            remaining: maxCreditsPerDay
-        };
+        const resp = json(503, rateLimitLookupFailedBody());
+        resp.headers.set("Retry-After", String(RATE_LIMIT_LOOKUP_RETRY_SECONDS));
+        return resp;
     }
-
-    const dailyUsed = statusResult.daily?.used ?? statusResult.used;
-    const dailyRemaining = statusResult.daily?.remaining ?? statusResult.remaining;
-    const onetimeRemaining = statusResult.onetime?.remaining ?? 0;
     const searchCreditCost = isGrandfathered ? 1 : 10;
     const rerankSearchCreditCost = searchCreditCost + RERANK_CREDITS;  // rerank=true, oxjob #1521
 
