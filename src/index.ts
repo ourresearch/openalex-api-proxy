@@ -28,6 +28,7 @@ import { wantsKeylessNotice, keylessNoticeFor, metaNoticeTransform } from "./key
 import { contactBudgetFor, contactSpent, markContactSpent, contactBudgetMessage, CONTACT_PER_SECOND, CONTACT_DAILY_CREDITS } from "./contactBudget";
 import { loadEnforcement, matchEnforcement, enforceBucket, enforceSpent, markEnforceSpent, enforceDailyLimit, enforceMessage } from "./enforcementList";
 import { bucketSharesFor, perSecondLimitFor } from "./highRps";
+import { booleanSearchLimit, perSecondLimitsBody, RATE_LIMITS_DOCS, SEMANTIC_PER_SECOND, WIDE_OR_PER_SECOND } from "./perSecondLimits";
 import { setOriginKey } from "./originKey";
 import { originAbortMs, LONG_ORIGIN_ABORT_MS } from "./originAbort";
 import { gatewayTimeoutBody } from "./gatewayTimeout";
@@ -713,7 +714,9 @@ const handler = {
                     onetimeCreditsExpiresAt = freshAuth.onetimeCreditsExpiresAt;
                 }
             }
-            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt, creditsBucket);
+            const perSecond = perSecondLimitsBody(perSecondLimitFor(maxCreditsPerDay, keyAccountIds, env.HIGH_RPS_ACCOUNTS),
+                userPlan !== null && ENTERPRISE_PLANS.has(userPlan), hasValidApiKey);
+            return await handleRateLimitEndpoint(req, env, apiKey, hasValidApiKey, maxCreditsPerDay, isGrandfathered, onetimeCreditsBalance, onetimeCreditsExpiresAt, creditsBucket, perSecond);
         }
 
         // rerank (oxjob #1521): `rerank=true` in the URL, or `"rerank": true` in a POST body (the
@@ -981,7 +984,10 @@ const handler = {
                     const retryAfter = Math.ceil(semanticCheck.retryAfter || 1);
                     const errorResponse = new Response(JSON.stringify({
                         error: "Rate limit exceeded",
-                        message: `Semantic search is limited to 1 search per second. Please wait and try again.`,
+                        message: `Semantic search is limited to ${SEMANTIC_PER_SECOND} search per second. Please wait ${retryAfter}s and try again. ` +
+                            `Your daily budget is not affected. Limits: ${RATE_LIMITS_DOCS}`,
+                        reason: "semantic_search",
+                        perSecondLimit: SEMANTIC_PER_SECOND,
                         retryAfter
                     }), {
                         status: 429,
@@ -1028,11 +1034,11 @@ const handler = {
             ? countBooleanOperators(url.searchParams) : 0;
         if (booleanOperators > 5) {
             const hasPaidPlan = userPlan !== null && ENTERPRISE_PLANS.has(userPlan);
-            const booleanRatePerSec = hasPaidPlan ? 25 : hasValidApiKey ? 5 : 1;
+            const { gateRate, rate: booleanRate } = booleanSearchLimit(hasPaidPlan, hasValidApiKey);
             try {
                 const booleanCheck = await limiter.fetch("http://internal/check-boolean", {
                     method: "POST",
-                    body: JSON.stringify({ dailyLimit: limit, intervalMs: 1000 / booleanRatePerSec })
+                    body: JSON.stringify({ dailyLimit: limit, intervalMs: 1000 / gateRate })
                 }).then(res => res.json() as Promise<{ success: boolean; retryAfter?: number }>);
 
                 if (!booleanCheck.success) {
@@ -1040,16 +1046,17 @@ const handler = {
                     const keyHint = hasPaidPlan
                         ? ""
                         : hasValidApiKey
-                            ? " Paid plans get 25 requests per second (https://openalex.org/pricing)."
-                            : " Clients with an API key get 5 requests per second (free at https://openalex.org/rest-api); paid plans get 25.";
+                            ? ` Member+ and Partner plans get ${booleanSearchLimit(true, true).rate} a second (https://openalex.org/pricing).`
+                            : ` A free API key gets ${booleanSearchLimit(false, true).rate} a second (https://openalex.org/rest-api); Member+ and Partner plans get ${booleanSearchLimit(true, true).rate}.`;
                     const errorResponse = new Response(JSON.stringify({
                         error: "Rate limit exceeded",
                         message: `Your query uses ${booleanOperators} boolean operators (OR/AND/NOT). ` +
-                            `Broad boolean searches are heavy for our search cluster, so queries with more ` +
-                            `than 5 operators are limited to ${booleanRatePerSec} request${booleanRatePerSec === 1 ? "" : "s"} per second per client.${keyHint} ` +
-                            `Please wait ${retryAfter}s and retry, space out these requests, or narrow the query ` +
-                            `(fewer OR/AND/NOT terms). See https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication`,
+                            `Broad boolean searches are heavy for our search cluster, so searches with more ` +
+                            `than 5 operators are limited to ${booleanRate} a second for this key.${keyHint} ` +
+                            `Please wait ${retryAfter}s and retry, send these searches one at a time, or narrow the query ` +
+                            `(fewer OR/AND/NOT terms). Your daily budget is not affected. Limits: ${RATE_LIMITS_DOCS}`,
                         reason: "broad_boolean_query",
+                        perSecondLimit: booleanRate,
                         booleanOperators,
                         retryAfter
                     }), {
@@ -1102,11 +1109,12 @@ const handler = {
                         error: "Rate limit exceeded",
                         message: `Your filter ORs ${wideOr.count} values on ${wideOr.field}. ` +
                             `Each ${wideOr.field} value matches a large share of the index, so OR-lists longer ` +
-                            `than ${WIDE_OR_MAX_TERMS} terms are limited to 1 request per second per client. ` +
+                            `than ${WIDE_OR_MAX_TERMS} terms are limited to ${WIDE_OR_PER_SECOND} request per second per client. ` +
                             `Please wait ${retryAfter}s and retry, or split the list into requests of at most ` +
-                            `${WIDE_OR_MAX_TERMS} ${wideOr.field} values each. ` +
-                            `See https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication`,
+                            `${WIDE_OR_MAX_TERMS} ${wideOr.field} values each. Your daily budget is not affected. ` +
+                            `Limits: ${RATE_LIMITS_DOCS}`,
                         reason: "wide_or_filter",
+                        perSecondLimit: WIDE_OR_PER_SECOND,
                         field: wideOr.field,
                         orTerms: wideOr.count,
                         retryAfter
@@ -1227,7 +1235,8 @@ const handler = {
 
             let message: string;
             if (isPerSecond) {
-                message = `Rate limit exceeded: ${perSecondLimit} requests per second. Please slow down.`;
+                message = `Rate limit exceeded: this key can send ${perSecondLimit} requests per second. Your daily budget is not ` +
+                    `affected ($${dailyRemainingUsd} left today). Retry after ${Math.ceil(rateLimitResult.retryAfter || 1)}s. Limits: ${RATE_LIMITS_DOCS}`;
             } else if (rateLimitResult.limitType === 'first_dollar') {
                 message = firstDollarMessage(creditsToUsd(firstDollarPace), rateLimitResult.retryAfter ?? 1);
             } else if (!apiKey) {
@@ -1249,6 +1258,9 @@ const handler = {
             const errorResponse = new Response(JSON.stringify({
                 error: "Rate limit exceeded",
                 message,
+                reason: isPerSecond ? "requests_per_second"
+                    : rateLimitResult.limitType === 'first_dollar' ? "first_dollar" : "daily_budget",
+                ...(isPerSecond ? { perSecondLimit } : {}),
                 retryAfter: rateLimitResult.retryAfter,
                 // New USD fields
                 costUsd,
@@ -2350,7 +2362,8 @@ async function handleRateLimitEndpoint(
     isGrandfathered: boolean = false,
     onetimeCreditsBalance: number = 0,
     onetimeCreditsExpiresAt?: string,
-    bucket: string | null = null
+    bucket: string | null = null,
+    perSecond: ReturnType<typeof perSecondLimitsBody> | null = null
 ): Promise<Response> {
     // Require a valid API key
     if (!hasValidApiKey || !apiKey) {
@@ -2416,6 +2429,7 @@ async function handleRateLimitEndpoint(
             prepaid_expires_at: onetimeCreditsExpiresAt || null,
             resets_at: getMidnightUTCISO(),
             resets_in_seconds: getSecondsUntilMidnightUTC(),
+            per_second_limits: perSecond,
             endpoint_costs_usd: {
                 singleton: 0,
                 list: creditsToUsd(1),

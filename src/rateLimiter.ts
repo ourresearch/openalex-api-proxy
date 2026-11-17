@@ -394,7 +394,8 @@ export class RateLimiter implements DurableObject {
             const retryAfter = (1 - this.perSecondBucket.tokens) / perSecondLimit!;
             return Response.json({
                 success: false,
-                remaining: 0,
+                remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
+                onetimeRemaining: Math.max(0, onetimeBalance - this.onetimeCounter!.consumed),
                 retryAfter,
                 limitType: 'per_second'
             });
