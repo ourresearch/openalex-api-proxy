@@ -1020,8 +1020,8 @@ const handler = {
         // 2026-07-16: valid-key clients lifted to 5 req/s; anonymous stays at 1 req/s.
         // 2026-07-24 (oxjob #677): paid plans lifted to 25 req/s — on the post-#469
         // cluster these queries mean ~150-330ms took (not seconds), and 5 req/s was
-        // rejecting real production traffic from premium customers (Nestlé zd#22825,
-        // French Ministry, firstignite). Worst-case single-client burst at 25 req/s
+        // rejecting real production traffic from premium customers (zd#22825 and
+        // two others). Worst-case single-client burst at 25 req/s
         // ≈ 4-8 concurrent mean-cost searches; the 5s ES timeout + 9s abort backstop
         // remain the pathological-query defense.
         const booleanOperators = classification.type === 'search'
