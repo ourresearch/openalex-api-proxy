@@ -2125,14 +2125,16 @@ async function writebackOnetimeCredits(
         const consumed = claimResult.consumed ?? 0;
         if (consumed <= 0) return;
 
-        // Write consumed credits to DB
+        // Write consumed credits to DB. The connect is inside the try (oxjob #2471): a connection that fails after the claim
+        // above restores the claimed credits too, instead of dropping them unbilled.
         const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
-        await client.connect();
 
         try {
+            await client.connect();
             const [sql, params] = prepaidWriteback(consumed, apiKey, userId, orgId);
             await client.query(sql, params);
         } catch (dbError) {
+            try { await client.end(); } catch { /* ignore */ }
             // DB write failed — restore consumed credits to the DO so they aren't lost.
             // /begin-writeback already reset consumed to 0, so we must re-add.
             console.error("DB writeback failed, restoring credits to DO:", dbError);

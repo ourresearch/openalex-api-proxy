@@ -9,12 +9,15 @@ import { RateLimiter } from './rateLimiter';
 const db = vi.hoisted(() => ({
     keys: new Map<string, Record<string, unknown>>(),
     writes: [] as { sql: string; params: unknown[] }[],
+    failConnect: false,
+    lookedUp: false,
 }));
 vi.mock('pg', () => ({
     Client: class {
-        async connect() {}
+        async connect() { if (db.failConnect && db.lookedUp) throw new Error('Connection terminated unexpectedly'); }
         async query(sql: string, params: unknown[]) {
             if (!sql.includes('api_keys_view')) { db.writes.push({ sql, params }); return { rows: [] }; }
+            db.lookedUp = true;   // the key lookup connects first; only the writeback's own connect may fail
             const row = db.keys.get(params[0] as string);
             return { rows: row ? [row] : [] };
         }
@@ -41,7 +44,7 @@ const daySpent = (bucket: string, onetime = 0) => ({
     [bucket]: { counter: { count: 100_000, date: today() }, onetime: { consumed: onetime } },
 });
 
-afterEach(() => { db.writes.length = 0; });
+afterEach(() => { db.writes.length = 0; db.failConnect = false; db.lookedUp = false; });
 
 describe('prepaidWriteback', () => {
     it("bills a person's keys to the person, as before", () => {
@@ -96,6 +99,20 @@ describe('spend let through after the pool reads 0 is still billed this month', 
         const buckets = { 'credits:org:org-Spent': { onetime: { consumed: 9 } } };
         await runWorker('/works', { headers: key('pool-spent'), env: HD, buckets });
         expect(db.writes).toEqual([{ sql: 'SELECT spend_org_monthly_pool($1, $2)', params: ['org-Spent', 9] }]);
+    });
+
+    it('a writeback whose database connection fails puts the claimed credits back in the bucket', async () => {
+        db.keys.set('pool-flaky', orgRow({ org_id: 'org-Flaky', budget_key: 'org:org-Flaky', ...POOL }));
+        db.failConnect = true;
+        const limiters = new Map<string, RateLimiter>();
+        await runWorker('/works', { headers: key('pool-flaky'), env: HD, limiters,
+            buckets: { 'credits:org:org-Flaky': { counter: { count: 100_000, date: today() }, onetime: { consumed: 9 } } } });
+        expect(db.writes).toEqual([]);
+        const status = await limiters.get('credits:org:org-Flaky')!.fetch(new Request('http://internal/status', {
+            method: 'POST', body: JSON.stringify({ dailyLimit: 100_000, onetimeBalance: 50_000 }),
+        }));
+        // the 9 claimed, back again, plus the 1 this request spent from the pool
+        expect((await status.json() as { onetime: { consumed: number } }).onetime.consumed).toBe(10);
     });
 
     it('an org with no pool writes nothing back', async () => {
