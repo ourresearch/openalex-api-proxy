@@ -29,7 +29,10 @@ const orgRow = (o: Record<string, unknown> = {}) => ({
 const POOL = { onetime_credits_balance: 50_000, onetime_credits_expires_at: '2099-01-01T00:00:00' };
 db.keys.set('pool-a', orgRow(POOL));
 db.keys.set('pool-b', orgRow(POOL));
-db.keys.set('pool-c', orgRow(POOL));   // used once: the writeback runs only when the key's lookup is fresh, not cached
+db.keys.set('pool-c', orgRow(POOL));
+db.keys.set('pool-spent', orgRow({ org_id: 'org-Spent', budget_key: 'org:org-Spent', onetime_credits_balance: 0,
+    onetime_credits_expires_at: '2099-01-01T00:00:00' }));   // a pool that reads 0 this month
+db.keys.set('nopool-b', orgRow({ org_id: 'org-Day2', budget_key: 'org:org-Day2' }));   // used once: the writeback runs only when the key's lookup is fresh, not cached
 db.keys.set('nopool-a', orgRow({ org_id: 'org-Day', budget_key: 'org:org-Day' }));
 
 const HD = { HYPERDRIVE: { connectionString: 'postgres://test' } };
@@ -85,6 +88,20 @@ describe("then the org's monthly pool", () => {
         const { res } = await runWorker('/works', { headers: key('pool-c'), env: HD, buckets: { 'credits:org:org-Pool': { onetime: { consumed: 700 } } } });
         expect(res.status).toBe(200);
         expect(db.writes).toEqual([{ sql: 'SELECT spend_org_monthly_pool($1, $2)', params: ['org-Pool', 700] }]);
+    });
+});
+
+describe('spend let through after the pool reads 0 is still billed this month', () => {
+    it('an org key whose pool reads 0 writes back what its bucket consumed', async () => {
+        const buckets = { 'credits:org:org-Spent': { onetime: { consumed: 9 } } };
+        await runWorker('/works', { headers: key('pool-spent'), env: HD, buckets });
+        expect(db.writes).toEqual([{ sql: 'SELECT spend_org_monthly_pool($1, $2)', params: ['org-Spent', 9] }]);
+    });
+
+    it('an org with no pool writes nothing back', async () => {
+        const buckets = { 'credits:org:org-Day2': { onetime: { consumed: 9 } } };
+        await runWorker('/works', { headers: key('nopool-b'), env: HD, buckets });
+        expect(db.writes).toEqual([]);
     });
 });
 

@@ -548,7 +548,11 @@ const handler = {
 
                 // Trigger writeback of consumed one-time credits on cache refresh (non-blocking)
                 // from the bucket the charges land in, billed to the person (one balance per person, any of their keys).
-                if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
+                // An org key with a monthly pool writes back even once the pool reads 0 (users-api migration 132, oxjob
+                // #2471): spend let through by isolates still holding the older balance is billed this month, not left in
+                // the bucket for the next month's first writeback.
+                const orgPool = Boolean(authResult.orgId && !keyUserId && onetimeCreditsExpiresAt);
+                if (authResult.cacheRefreshed && (onetimeCreditsBalance > 0 || orgPool)) {
                     const wbRateLimitKey = `credits:${creditsBucket}`;
                     ctx.waitUntil(
                         writebackOnetimeCredits(env, apiKey, keyUserId, authResult.orgId ?? null, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
