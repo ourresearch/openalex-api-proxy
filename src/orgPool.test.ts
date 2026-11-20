@@ -3,7 +3,8 @@
 // (budget_key `org:<id>`); the Worker spends it like a person's prepaid balance and bills it to the org.
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { prepaidWriteback } from './index';
-import { runWorker, today } from './testHarness';
+import { runWorker, today, fakeState } from './testHarness';
+import { RateLimiter } from './rateLimiter';
 
 const db = vi.hoisted(() => ({
     keys: new Map<string, Record<string, unknown>>(),
@@ -84,5 +85,27 @@ describe("then the org's monthly pool", () => {
         const { res } = await runWorker('/works', { headers: key('pool-c'), env: HD, buckets: { 'credits:org:org-Pool': { onetime: { consumed: 700 } } } });
         expect(res.status).toBe(200);
         expect(db.writes).toEqual([{ sql: 'SELECT spend_org_monthly_pool($1, $2)', params: ['org-Pool', 700] }]);
+    });
+});
+
+describe('each key of the org keeps its own per-second limit inside the shared bucket', () => {
+    it('the Worker names the key for an org bucket, and no key for a person', async () => {
+        const { checks } = await runWorker('/works', { headers: key('pool-b'), env: HD });
+        expect(checks[0]).toMatchObject({ bucket: 'credits:org:org-Pool', perSecondLimit: 50, rateKey: 'pool-b' });
+        db.keys.set('person-key', orgRow({ user_id: 'user-q', org_id: null, budget_key: null }));
+        const person = await runWorker('/works', { headers: key('person-key'), env: HD });
+        expect(person.checks[0].rateKey).toBeUndefined();
+    });
+
+    it('one key spending its 50 a second leaves the other key its own 50', async () => {
+        const limiter = new RateLimiter(fakeState() as any);
+        await new Promise(r => setTimeout(r, 0));
+        const check = async (rateKey?: string) => (await (await limiter.fetch(new Request('http://internal/check', {
+            method: 'POST', body: JSON.stringify({ dailyLimit: 1_000_000, perSecondLimit: 50, credits: 1, rateKey }),
+        }))).json()) as { success: boolean; limitType?: string };
+        for (let i = 0; i < 50; i++) expect((await check('key-a')).success).toBe(true);
+        expect(await check('key-a')).toMatchObject({ success: false, limitType: 'per_second' });
+        expect((await check('key-b')).success).toBe(true);
+        expect((await check()).success).toBe(true);   // no key named: the object's own tokens, as before
     });
 });

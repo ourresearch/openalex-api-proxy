@@ -27,7 +27,9 @@ interface OnetimeCounter {
 const PERSIST_INTERVAL_MS = 10000; // 10 seconds
 
 export class RateLimiter implements DurableObject {
-    private perSecondBucket: TokenBucket | null = null;
+    // Per-second tokens (memory only): one per key when the caller names one (rateKey: the keys of an org that share
+    // one daily bucket keep their own per-second limit, oxjob #2471), else one for the whole object ('').
+    private perSecondBuckets = new Map<string, TokenBucket>();
     private dailyCounter: DailyCounter | null = null;
     private onetimeCounter: OnetimeCounter | null = null;
     // A new free account's first $1 (oxjob #1740; firstDollar.ts). `spent` rides in the 'counter' value as `fd` (no extra
@@ -160,6 +162,7 @@ export class RateLimiter implements DurableObject {
             consumedWriteback?: number;
             intervalMs?: number;
             search?: string;
+            rateKey?: string;          // whose per-second tokens to spend, when not the whole object's (oxjob #2471)
             firstDollarPace?: number;  // credits per 5 minutes while a new free account spends its first $1 (oxjob #1740)
             fix?: boolean;             // a Profile Doctor settlement (oxjob #2055): see /refund
         }>();
@@ -377,21 +380,24 @@ export class RateLimiter implements DurableObject {
         }
 
         // --- 1. Per-Second Limit (Memory Only) ---
-        if (!this.perSecondBucket) {
-            this.perSecondBucket = { tokens: perSecondLimit!, lastRefill: now };
+        const rateKey = body.rateKey ?? '';
+        let perSecondBucket = this.perSecondBuckets.get(rateKey);
+        if (!perSecondBucket) {
+            perSecondBucket = { tokens: perSecondLimit!, lastRefill: now };
+            this.perSecondBuckets.set(rateKey, perSecondBucket);
         }
 
-        const elapsedSeconds = (now - this.perSecondBucket.lastRefill) / 1000;
+        const elapsedSeconds = (now - perSecondBucket.lastRefill) / 1000;
         if (elapsedSeconds > 0) {
-            this.perSecondBucket.tokens = Math.min(
+            perSecondBucket.tokens = Math.min(
                 perSecondLimit!,
-                this.perSecondBucket.tokens + (elapsedSeconds * perSecondLimit!)
+                perSecondBucket.tokens + (elapsedSeconds * perSecondLimit!)
             );
-            this.perSecondBucket.lastRefill = now;
+            perSecondBucket.lastRefill = now;
         }
 
-        if (this.perSecondBucket.tokens < 1) {
-            const retryAfter = (1 - this.perSecondBucket.tokens) / perSecondLimit!;
+        if (perSecondBucket.tokens < 1) {
+            const retryAfter = (1 - perSecondBucket.tokens) / perSecondLimit!;
             return Response.json({
                 success: false,
                 remaining: Math.max(0, dailyLimit - this.dailyCounter!.count),
@@ -455,7 +461,7 @@ export class RateLimiter implements DurableObject {
         }
 
         // Decrement per-second token
-        this.perSecondBucket.tokens -= 1;
+        perSecondBucket.tokens -= 1;
 
         if (paced) {  // paced accounts draw from the daily pool, so the counter write below carries `fd`
             this.firstDollar.spent += credits;

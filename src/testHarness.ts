@@ -45,7 +45,7 @@ export async function runWorker(path: string, opts: RunOptions = {}) {
     vi.stubGlobal('fetch', vi.fn(opts.fetch ?? (async () =>
         new Response('{"meta":{}}', { status: 200, headers: { 'Content-Type': 'application/json' } }))));
     const limiters = opts.limiters ?? new Map<string, RateLimiter>();
-    const checks: { bucket: string; dailyLimit: number; perSecondLimit: number }[] = [];
+    const checks: { bucket: string; dailyLimit: number; perSecondLimit: number; rateKey?: string }[] = [];
     const rows: { blobs: string[]; doubles: number[] }[] = [];
     const pending: Promise<unknown>[] = [];
     async function limiterFor(name: string): Promise<RateLimiter> {
@@ -66,7 +66,7 @@ export async function runWorker(path: string, opts: RunOptions = {}) {
                 fetch: async (u: string, init?: RequestInit) => {
                     if (u.endsWith('/check')) {
                         const b = JSON.parse(String(init?.body));
-                        checks.push({ bucket: name, dailyLimit: b.dailyLimit, perSecondLimit: b.perSecondLimit });
+                        checks.push({ bucket: name, dailyLimit: b.dailyLimit, perSecondLimit: b.perSecondLimit, rateKey: b.rateKey });
                     }
                     return (await limiterFor(name)).fetch(new Request(u, init));
                 },

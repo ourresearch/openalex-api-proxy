@@ -1181,9 +1181,12 @@ const handler = {
 
         // Built at call time: the top-up recheck below reruns it with the fresh prepaid balance (and a person who just
         // bought credit is no longer paced).
+        // The keys of an org on a contracted daily budget share one bucket (budget_key org:<id>, users-api migration 132) but
+        // each keeps its own per-second limit inside it (oxjob #2471). A person's keys share theirs, as before.
+        const rateKey = creditsBucket?.startsWith('org:') ? apiKey : undefined;
         const checkBody = () => JSON.stringify({
             dailyLimit: limit, perSecondLimit: Math.ceil(perSecondLimit / shares), credits: creditCost, onetimeBalance: onetimeCreditsBalance,
-            firstDollarPace: onetimeCreditsBalance > 0 ? 0 : firstDollarPace,
+            firstDollarPace: onetimeCreditsBalance > 0 ? 0 : firstDollarPace, rateKey,
         });
         try {
             rateLimitResult = await limiter.fetch("http://internal/check", { method: "POST", body: checkBody() }).then(res => res.json());
