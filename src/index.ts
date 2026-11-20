@@ -128,7 +128,8 @@ interface ApiKeyAuth {
  * The daily credits bucket a valid key spends from: `credits:<this>` (oxjob #1725). Every key of one person shares one:
  * the current key, a retired key still in its grace window, and every key an AI agent asked for. So rotating a key buys
  * no fresh day. Org keys (no person) and a lookup that
- * failed open keep the old naming: the account key's bucket for an agent key (budgetKey), else the key's own.
+ * failed open keep the old naming: the account key's bucket for an agent key (budgetKey), else the key's own. An org on
+ * a contracted daily budget gets budgetKey `org:<id>` from users-api (migration 132, oxjob #2471): all its keys, one day.
  */
 export function creditsBucketFor(apiKey: string, budgetKey: string | null, userId: string | null): string {
     return userId ? `user:${userId}` : (budgetKey || apiKey);
@@ -550,7 +551,7 @@ const handler = {
                 if (authResult.cacheRefreshed && onetimeCreditsBalance > 0) {
                     const wbRateLimitKey = `credits:${creditsBucket}`;
                     ctx.waitUntil(
-                        writebackOnetimeCredits(env, apiKey, keyUserId, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
+                        writebackOnetimeCredits(env, apiKey, keyUserId, authResult.orgId ?? null, wbRateLimitKey, maxCreditsPerDay, onetimeCreditsBalance)
                     );
                 }
             }
@@ -2076,6 +2077,20 @@ export function isDataException(error: unknown): boolean {
 }
 
 /**
+ * The statement that bills `consumed` prepaid credits. A person's keys bill the person, by id when the key has one (oxjob
+ * #1725: a retired key's api_key is no longer on the users row, so a write by key string matched nothing and its prepaid
+ * spend was never billed). An org key's prepaid balance is its org's monthly pool (users-api migration 132, oxjob #2471):
+ * spend_org_monthly_pool adds the spend to this month's count, or starts the count again in a new month.
+ */
+export function prepaidWriteback(consumed: number, apiKey: string, userId: string | null, orgId: string | null): [string, unknown[]] {
+    if (!userId && orgId) return ["SELECT spend_org_monthly_pool($1, $2)", [orgId, consumed]];
+    return [
+        `UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE ${userId ? "id" : "api_key"} = $2`,
+        [consumed, userId ?? apiKey],
+    ];
+}
+
+/**
  * Write back consumed one-time credits to the DB and sync with the DO.
  * Called in waitUntil() to not block requests.
  */
@@ -2083,6 +2098,7 @@ async function writebackOnetimeCredits(
     env: Env,
     apiKey: string,
     userId: string | null,
+    orgId: string | null,
     rateLimitKey: string,
     dailyLimit: number,
     onetimeBalance: number
@@ -2107,12 +2123,8 @@ async function writebackOnetimeCredits(
         await client.connect();
 
         try {
-            // By person when the key has one (oxjob #1725): a retired key's api_key is no longer on the users row, so
-            // a write by key string matched nothing and its prepaid spend was never billed.
-            await client.query(
-                `UPDATE users SET onetime_credits_balance = GREATEST(0, onetime_credits_balance - $1) WHERE ${userId ? "id" : "api_key"} = $2`,
-                [consumed, userId ?? apiKey]
-            );
+            const [sql, params] = prepaidWriteback(consumed, apiKey, userId, orgId);
+            await client.query(sql, params);
         } catch (dbError) {
             // DB write failed — restore consumed credits to the DO so they aren't lost.
             // /begin-writeback already reset consumed to 0, so we must re-add.
