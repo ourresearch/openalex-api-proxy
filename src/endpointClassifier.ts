@@ -24,6 +24,23 @@ export function queryTextAllowed(allowlist: string | undefined, accountIds: stri
     return allowed.has("*") || accountIds.some((id) => allowed.has(id));
 }
 
+/** The account a /query/text call came from, named for the query writer's log line (ids only, never the key). */
+export const QUERY_WRITER_USER_HEADER = "X-OpenAlex-User-Id";
+export const QUERY_WRITER_ORG_HEADER = "X-OpenAlex-Org-Id";
+
+/**
+ * The request the query writer gets: the caller's own, plus the key's user and organization ids from the key check.
+ * Any values the caller sent under those names are dropped first, so the writer can trust them (oxjob #1494).
+ */
+export function queryWriterRequest(url: URL | string, req: Request, userId: string | null, orgId: string | null): Request {
+    const forwarded = new Request(url, req);
+    forwarded.headers.delete(QUERY_WRITER_USER_HEADER);
+    forwarded.headers.delete(QUERY_WRITER_ORG_HEADER);
+    if (userId) forwarded.headers.set(QUERY_WRITER_USER_HEADER, userId);
+    if (orgId) forwarded.headers.set(QUERY_WRITER_ORG_HEADER, orgId);
+    return forwarded;
+}
+
 export interface EndpointClassification {
     type: EndpointType;
     creditCost: number;

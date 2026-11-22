@@ -6,7 +6,7 @@ import { Client } from "pg";
 import { RateLimiter } from "./rateLimiter";
 import { actualCreditCost, originPrice, creditsRemainingForOrigin, settleCredits, profileFixCredits, ORIGIN_COST_HEADER, ORIGIN_REFUND_HEADER, CREDITS_REMAINING_HEADER, GRANDFATHERED_HEADER, WEBSITE_HEADER, RERANK_SHED_HEADER, RERANK_CREDITS_HEADER } from "./creditReconcile";
 import { logAnalytics, markRerankShed, setRequestPerson, shouldSampleEsTook } from "./analytics";
-import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed } from "./endpointClassifier";
+import { classifyEndpoint, entityFamily, isEntitySearch, countBooleanOperators, countWideOrTerms, WIDE_OR_MAX_TERMS, EndpointClassification, isRerank, bodyAsksRerank, rerankCredits, RERANK_CREDITS, queryTextAllowed, queryWriterRequest } from "./endpointClassifier";
 import { f1Reason, f1Message } from "./f1Validation";
 import { checkSearchVolume, searchVolumeMessage } from "./searchVolumeGate";
 import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from "./cursorGate";
@@ -431,6 +431,7 @@ const handler = {
         let activationPending = false;  // oxjob #1697
         let creditsBucket: string | null = null;  // a valid key's daily bucket, `credits:<this>` (creditsBucketFor)
         let keyUserId: string | null = null;  // the key's person (null for org keys, and when the lookup failed open)
+        let keyOrgId: string | null = null;  // the key's organization, when it has one
         let accountCreated: number | null = null;  // when the key's account was made (oxjob #1740)
 
         if (apiKey) {
@@ -491,6 +492,7 @@ const handler = {
                 keyAccountIds = [authResult.userId, authResult.orgId].filter((x): x is string => Boolean(x));
                 activationPending = authResult.activationPending === true;
                 keyUserId = authResult.userId ?? null;
+                keyOrgId = authResult.orgId ?? null;
                 accountCreated = authResult.accountCreated ?? null;
                 creditsBucket = creditsBucketFor(apiKey, authResult.budgetKey ?? null, keyUserId);
                 setRequestPerson(req, keyUserId);
@@ -1404,7 +1406,7 @@ const handler = {
                         { status: 503, headers: { "Content-Type": "application/json", "X-Credits-Cost": "0" } });
                 } else {
                     try {
-                        contentResponse = await env.QUERY_WRITER.fetch(new Request(url, req));
+                        contentResponse = await env.QUERY_WRITER.fetch(queryWriterRequest(url, req, keyUserId, keyOrgId));
                     } catch (error) {
                         console.error("Query writer call failed:", error);
                         reportError(error, { site: "query_writer" });
