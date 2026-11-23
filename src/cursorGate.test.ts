@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isKeylessCursorPage } from './cursorGate';
+import { isKeylessCursorPage, KEYLESS_CURSOR_ERROR } from './cursorGate';
 
 const u = (q: string) => new URL(`https://api.openalex.org/works?${q}`);
 const PAGE2 = 'IlsnLUluZmluaXR5JywgMCwgJ2h0dHBzOi8vb3BlbmFsZXgub3JnL1cxMjMnXSI=';
@@ -21,5 +21,13 @@ describe('isKeylessCursorPage (oxjob #1682)', () => {
     });
     it('catches a page-2 cursor hidden behind a duplicate cursor=*', () => {
         expect(isKeylessCursorPage(u(`cursor=*&cursor=${PAGE2}`), false, false)).toBe(true);
+    });
+});
+
+describe('KEYLESS_CURSOR_ERROR (oxjob #2565)', () => {
+    it('names the agent route to a key, the settings page, and the keyless way on', () => {
+        expect(KEYLESS_CURSOR_ERROR.message).toContain('POST https://api.openalex.org/api-keys');
+        expect(KEYLESS_CURSOR_ERROR.message).toContain('https://openalex.org/settings/api-key');
+        expect(KEYLESS_CURSOR_ERROR.message).toContain('page=2');
     });
 });
