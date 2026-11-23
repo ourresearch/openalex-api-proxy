@@ -34,7 +34,8 @@ const HOW = {
     use_the_key: "Send it as api_key=KEY on any request, or an \"Authorization: Bearer KEY\" header. Keep it in an environment variable (OPENALEX_API_KEY), not in code you share. It is for API calls only: it can't sign in to openalex.org, and your user can revoke it there.",
     errors: {
         "400": "the address is missing, malformed, or a placeholder like you@example.com: ask your user for their real address",
-        "409 account_exists": "the address already has an account and a key: your user copies it from https://openalex.org/settings/api-key",
+        "201 for an existing account": "an address that already has an account gets a key too; the email asks its owner to approve it, and it works once they click (it spends their free day, never prepaid credit)",
+        "409 agent_key_exists": "the account already has a working key an assistant asked for: your user copies it from https://openalex.org/settings/api-key, or revokes it there so you can ask again",
         "409 activation_pending": "a key for the address is waiting for activation: your user clicks the link we emailed",
         "429": `too many keys from this network or email domain today: your user can sign up at ${SIGNUP} instead`,
     },
