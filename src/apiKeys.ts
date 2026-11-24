@@ -35,7 +35,7 @@ const HOW = {
     errors: {
         "400": "the address is missing, malformed, or a placeholder like you@example.com: ask your user for their real address",
         "201 for an existing account": "an address that already has an account gets a key too; the email asks its owner to approve it, and it works once they click (it spends their free day, never prepaid credit)",
-        "409 agent_key_exists": "the account already has a working key an assistant asked for: your user copies it from https://openalex.org/settings/api-key, or revokes it there so you can ask again",
+        "409 agent_key_exists": "the account already has a working key an assistant asked for. Settings shows only its last four characters, so your user can't copy it: they revoke it at https://openalex.org/settings/api-key so you can ask again, or give you their own key from there",
         "409 activation_pending": "a key for the address is waiting for activation: your user clicks the link we emailed",
         "429": `too many keys from this network or email domain today: your user can sign up at ${SIGNUP} instead`,
     },
